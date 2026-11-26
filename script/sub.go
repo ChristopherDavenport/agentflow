@@ -7,6 +7,7 @@ import (
 	"path"
 	"path/filepath"
 
+	"github.com/ChristopherDavenport/agentflow"
 	"github.com/ChristopherDavenport/agentworkspace"
 )
 
@@ -16,16 +17,21 @@ import (
 // leaves dir is refused with [agentworkspace.ErrOutside]. A link inside
 // dir is followed as ws follows it, so it may reach elsewhere in ws.
 // Closing it leaves ws open.
+//
+// A dir it cannot work in, one that is missing, is not a directory or is
+// not below the root, is refused with an error that wraps
+// [agentflow.ErrChildRefused] as well as the cause, so an opener that
+// returns it fails the step that asked, which the step may retry.
 func Sub(ws agentworkspace.Workspace, dir string) (agentworkspace.Workspace, error) {
 	if !fs.ValidPath(dir) || dir == "." {
-		return nil, fmt.Errorf("script: dir %q: %w", dir, agentworkspace.ErrOutside)
+		return nil, fmt.Errorf("script: dir %q: %w: %w", dir, agentflow.ErrChildRefused, agentworkspace.ErrOutside)
 	}
 	info, err := fs.Stat(ws.FS(), dir)
 	if err != nil {
-		return nil, fmt.Errorf("script: dir %q: %w", dir, err)
+		return nil, fmt.Errorf("script: dir %q: %w: %w", dir, agentflow.ErrChildRefused, err)
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("script: dir %q is not a directory", dir)
+		return nil, fmt.Errorf("script: dir %q is not a directory: %w", dir, agentflow.ErrChildRefused)
 	}
 	return &sub{ws: ws, dir: dir}, nil
 }

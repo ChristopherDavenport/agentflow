@@ -218,8 +218,8 @@ hidden: true       # only a workflow that calls it runs it
   `flow_call`, held while its child runs.
 - **`hidden: true`** says the workflow is a part, run only by workflows
   that call it. `Graph.Invocation` refuses it, `Apply` refuses it as a
-  root, and a model's request for its skill is to be refused too
-  (`Graph.Hidden` is what that reads). A call starts it, in its caller's
+  root, and `workflow.SkillTool` refuses a model's request for its skill
+  (RFC 0009, section 8), all reading `Graph.Hidden`. A call starts it, in its caller's
   context or in a child. A catalog that lists workflows, or offers them to
   a model, should leave hidden ones out; agentflow has no catalog of its
   own, so that is the host's.
