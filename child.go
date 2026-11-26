@@ -474,6 +474,10 @@ func (f *flow) setAside(ctx context.Context, a *agentturn.Agent, text, why strin
 			if err != nil {
 				return nil, err
 			}
+			// What the child's run spent counts toward this tree however the
+			// call goes, so the call is answered with it: an override cannot
+			// buy steps by throwing a child's away.
+			let := callFailure{Failure: text}
 			if cf.started(cctx, child, args.Run) {
 				inner, err := cf.abandon(cctx, child, why)
 				if err != nil {
@@ -497,9 +501,39 @@ func (f *flow) setAside(ctx context.Context, a *agentturn.Agent, text, why strin
 						return nil, err
 					}
 				}
+				if let.Entries, let.Granted, let.Summary, err = cf.spentBy(cctx, child, args.Run); err != nil {
+					return nil, err
+				}
 			}
+			b, err := json.Marshal(let)
+			if err != nil {
+				return nil, err
+			}
+			outs = append(outs, openresponses.NewFunctionCallOutput(p.Call.CallID, string(b)))
+			continue
 		}
 		outs = append(outs, openresponses.NewFunctionCallOutput(p.Call.CallID, text))
 	}
 	return outs, nil
+}
+
+// spentBy is what run spent in a's session, as its record says once its
+// end is written: the steps its tree entered, what a person granted there,
+// and its summary. A kept child's session holds a run for each visit, and
+// only run's are counted.
+func (f *flow) spentBy(ctx context.Context, a *agentturn.Agent, run string) (entries, granted int, summary *Summary, err error) {
+	all, err := f.record(ctx, a.State().Transcript)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	runs, err := Runs(all, nil)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	for _, in := range runs {
+		if in.ID == run {
+			return in.State.Entries, in.State.Granted, in.Summary, nil
+		}
+	}
+	return 0, 0, nil, nil
 }

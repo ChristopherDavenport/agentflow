@@ -242,7 +242,20 @@ model reads what the abandoned attempt did.
 **Counts and bounds.** A retry is a new attempt and a jump a new visit;
 both count as step entries of the tree, and both are held to every bound.
 A jump into a step at its visit bound asks for more, as item 21's bounds
-do. A jump goes only where the step's inputs are on the record: to a step
+do.
+
+A child set aside still counts. The call that waited on it is answered
+with what a failed child's call returns, `{"failure": "agentflow:
+overridden", "entries", "granted", "summary"}`, with
+`agentflow: abandoned` in place of the failure for an invocation. The
+counts are taken from the child's record once its run's end is written,
+after its cleanup: the steps its tree entered, its own children's
+included, and what a person granted there. A kept child counts only the
+run of the visit it ended. Replay adds them to the caller's tree, however
+the call was answered, so a bound cannot be dodged by overriding and the
+count is the same after a resume. The caller's summary lists the child as
+`abandoned`, with its steps. A run nobody called in a session reads, once
+its end is written, as its tree stood then, whatever starts after it. A jump goes only where the step's inputs are on the record: to a step
 whose `with` cannot be resolved there, it is refused with the reference
 that is missing. A jump never goes to a cleanup step.
 

@@ -430,6 +430,11 @@ type frame struct {
 	cleaned                 string
 	// why is what the run was abandoned for, empty for a new invocation.
 	why string
+	// counted says the end of a run nobody called here is written, and
+	// entries and granted are what its tree had spent and been granted
+	// then: what the run reads as afterwards, whatever starts next.
+	counted          bool
+	entries, granted int
 }
 
 // abortPlan is an abandon under way.
@@ -567,6 +572,9 @@ func (r *replay) state(f *frame) State {
 		_, st.requestErr = r.target(own)
 	}
 	st.Entries, st.Granted, st.maxSteps = r.entries, r.granted, r.maxSteps
+	if f.counted {
+		st.Entries, st.Granted = f.entries, f.granted
+	}
 	st.Path = slices.Clone(r.root.path)
 	st.callers = nil
 	for _, s := range r.stack {
@@ -1128,6 +1136,9 @@ func (r *replay) ended(i int, c *openresponses.FunctionCall, out *openresponses.
 	e.id = out.CallID
 	f.ending, f.end = &e, r.at[out.CallID]
 	f.st.Ended = true
+	if f.parent == nil {
+		f.counted, f.entries, f.granted = true, r.entries, r.granted
+	}
 	// A step that failed with nobody to ask is over only by saying so.
 	switch {
 	case e.Status == Failed && f.failed == nil && limits[e.Limit] != nil:

@@ -305,6 +305,9 @@ func calledFresh(parent string, c callArgs, output string) []Called {
 	_ = decode([]byte(output), &said)
 	out := calledOf(parent, c.Workflow, c.Run, Done, said.Outcome, said.Summary)
 	switch {
+	case said.Failure == abandonedText || said.Failure == overriddenText:
+		// Set aside as the runs were abandoned, or for an override.
+		out[0].Status, out[0].Outcome = Abandoned, ""
 	case said.Failure != "" || said.Limit != "" || said.Outcome == Failed:
 		out[0].Status, out[0].Outcome = Failed, ""
 	case said.Outcome == "" && !strings.Contains(output, `"outcome"`):
