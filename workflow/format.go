@@ -56,6 +56,21 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 			fmt.Fprintf(&b, "  %s -->%s %s\n", n.ID, label, n.Next[outcome])
 		}
 	}
+	// Where a step branches, draw the outcomes that stop the workflow.
+	end := "done"
+	for slices.ContainsFunc(g.Nodes, func(n agentflow.Node) bool { return n.ID == end }) {
+		end += "_"
+	}
+	for _, n := range g.Nodes {
+		if len(n.Outcomes) < 2 {
+			continue
+		}
+		for _, outcome := range n.Outcomes {
+			if n.Next[outcome] == "" {
+				fmt.Fprintf(&b, "  %s -->|%s| %s((%s))\n", n.ID, outcome, end, end)
+			}
+		}
+	}
 	b.WriteString("```\n")
 	for _, n := range g.Nodes {
 		set, err := settingsNode(n)
@@ -125,6 +140,7 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 		m.add("with", valuesNode(n.With))
 	}
 	set("tools", n.Tools != nil, n.Tools)
+	set("context", n.Context != "", n.Context)
 	set("outcomes", n.Outcomes != nil, n.Outcomes)
 	if n.Data != nil {
 		out := mapping()
@@ -140,6 +156,13 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 		set("unattended", n.Unattended != "", n.Unattended)
 	}
 	set("max_visits", n.MaxVisits != 0, n.MaxVisits)
+	if j := n.Judge; j != nil {
+		judge := map[string]any{"outcomes": j.Outcomes, "criteria": j.Criteria}
+		if j.Tools != nil {
+			judge["tools"] = j.Tools
+		}
+		set("judge", true, judge)
+	}
 	return m, errors.Join(errs...)
 }
 
@@ -147,8 +170,15 @@ func valuesNode(values map[string]agentflow.Value) *yaml.Node {
 	m := mapping()
 	for _, name := range slices.Sorted(maps.Keys(values)) {
 		v := values[name].Literal
-		if from := values[name].From; from != "" {
-			v = "${{ " + from + " }}"
+		if ref := values[name]; ref.From != "" {
+			expr := strings.Join(append([]string{ref.From}, ref.Or...), ", ")
+			switch {
+			case ref.Optional:
+				expr = "optional(" + expr + ")"
+			case len(ref.Or) > 0:
+				expr = "latest(" + expr + ")"
+			}
+			v = "${{ " + expr + " }}"
 		}
 		if err := m.set(name, v); err != nil {
 			// Left out, so the round trip fails and says so.

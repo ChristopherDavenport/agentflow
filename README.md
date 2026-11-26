@@ -45,3 +45,11 @@ w, err := workflow.Load(skill) // skill from agentskill
 cfg, err := agentflow.Apply(w.Graph, agentturn.Config{ /* ... */
 	Tools: []agenttool.Tool{script.New(ws, time.Minute, script.Files(w.Files))}})
 ```
+
+A person step that declares a `judge` can be handed to a model, as far as
+the host says:
+
+```go
+agentflow.Apply(graph, cfg, agentflow.Delegate(agentflow.Advise))           // you decide, with its advice
+agentflow.Apply(graph, cfg, agentflow.Delegate(agentflow.Decide, "approve")) // it decides that step
+```

@@ -25,6 +25,8 @@ type Question struct {
 	With map[string]any `json:"with,omitempty"`
 	// Form is the schema of the data each outcome wants.
 	Form map[string]any `json:"form,omitempty"`
+	// Advice is what a judge said, to show beside the question.
+	Advice *Verdict `json:"advice,omitempty"`
 	// Retry says the question is whether to run a failed step again.
 	Retry bool `json:"retry,omitempty"`
 	// Answer is empty as asked. [Answer] fills it in.
@@ -57,6 +59,10 @@ type flow struct {
 	modelName  string
 	unattended bool
 	reply      func(context.Context, Question) (Result, bool)
+
+	delegations []delegation
+	modes       map[string]Mode
+	judgeName   string
 }
 
 // programPrefix starts the model name of a turn the program takes, so a
@@ -81,8 +87,17 @@ func Apply(g *Graph, cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 	if f.modelName == "" || strings.HasPrefix(f.modelName, programPrefix) {
 		return cfg, errors.New("agentflow: the config names no model")
 	}
+	if err := f.delegate(); err != nil {
+		return cfg, err
+	}
+	if f.judgeName == "" {
+		f.judgeName = f.modelName
+	}
+	if strings.HasPrefix(f.judgeName, programPrefix) {
+		return cfg, errors.New("agentflow: the judge needs a model")
+	}
 
-	own := []agenttool.Tool{f.startTool(), f.askTool(), f.finishTool()}
+	own := []agenttool.Tool{f.startTool(), f.askTool(), f.finishTool(), f.judgeTool()}
 	if p := cfg.ToolProvider; p != nil {
 		cfg.ToolProvider = func(ctx context.Context) []agenttool.Tool {
 			return append(slices.Clone(p(ctx)), own...)
@@ -106,6 +121,7 @@ func Apply(g *Graph, cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 			return out, f.samePosition(t, out)
 		}
 	}
+	cfg.BeforeTurn = agentturn.ChainBeforeTurn(f.begin, cfg.BeforeTurn)
 	userModel := cfg.BeforeModelCall
 	cfg.BeforeModelCall = func(ctx context.Context, req *openresponses.Request) error {
 		if userModel != nil {
@@ -140,10 +156,46 @@ func (f *flow) samePosition(before, after agentturn.Transcript) error {
 		return err
 	}
 	if a.Instance != b.Instance || a.Node != b.Node || a.Visit != b.Visit || a.Attempt != b.Attempt ||
-		a.Done != b.Done || a.Reported != b.Reported || len(a.Steps) != len(b.Steps) {
+		a.Done != b.Done || a.Reported != b.Reported || len(a.Steps) != len(b.Steps) || (a.Advice == nil) != (b.Advice == nil) {
 		return ErrPositionLost
 	}
 	return nil
+}
+
+// begin opens a visit of an Agent node with a message in the transcript.
+// Without it a model reads its last step's flow_finish under a tool that
+// now accepts only this step's, and takes that call for a mistake. It is
+// also where a fresh context starts. It is a user message, since a
+// provider may move a leading developer message out of the conversation,
+// and a hook's, so no record takes it for the person's.
+func (f *flow) begin(_ context.Context, info agentturn.TurnStartInfo) (openresponses.Items, error) {
+	st, err := f.g.Replay(info.Transcript)
+	if err != nil || st.Node == nil || st.Failure != "" || st.Begun {
+		// An error here is the same one prepare reports.
+		return nil, nil
+	}
+	switch {
+	case st.Node.Kind == Person && f.modes[st.Node.ID] != 0 && st.Advice == nil:
+		return openresponses.Items{openresponses.UserText(beginning(st.Node.ID) + " Judge it now.")}, nil
+	case st.Node.Kind != Agent:
+		return nil, nil
+	}
+	text := beginning(st.Node.ID)
+	if st.Node.Context != ContextFresh && len(st.Steps) > 0 {
+		text += " The steps before it are finished and their results accepted, the " + finishTool + " calls included."
+	}
+	return openresponses.Items{openresponses.UserText(text + " Do this step now.")}, nil
+}
+
+// since returns the input from the message that opened this visit of n.
+func since(input openresponses.Items, n *Node) (openresponses.Items, error) {
+	for i := len(input) - 1; i >= 0; i-- {
+		if m, ok := input[i].(*openresponses.Message); ok && opens(m, n) {
+			return input[i:], nil
+		}
+	}
+	// Sending everything would show a step what it must not see.
+	return nil, fmt.Errorf("%w: the start of step %q", ErrPositionLost, n.ID)
 }
 
 // modelTurn says the model takes the next turn.
@@ -158,6 +210,9 @@ func (f *flow) prepare(req *openresponses.Request) error {
 	if err != nil {
 		return err
 	}
+	if f.judging(st) {
+		return f.prepareJudge(req, st)
+	}
 	if !modelTurn(st) {
 		req.Model = programPrefix + f.g.Name
 		return nil
@@ -165,13 +220,18 @@ func (f *flow) prepare(req *openresponses.Request) error {
 	req.Model = f.modelName
 	keep := func(name string) bool { return !strings.HasPrefix(name, reserved) && name != ScriptTool }
 	if n := st.Node; n != nil {
+		if n.Context == ContextFresh {
+			if req.Input, err = since(req.Input, n); err != nil {
+				return err
+			}
+		}
 		step, err := f.instructions(st)
 		if err != nil {
 			return err
 		}
 		req.Instructions = strings.TrimSpace(req.Instructions + "\n\n" + step)
 		keep = func(name string) bool { return name == finishTool || slices.Contains(n.Tools, name) }
-		if req.Tools, err = stepTools(req.Tools, n); err != nil {
+		if req.Tools, err = stepTools(req.Tools, finishTool, n, nil); err != nil {
 			return err
 		}
 	}
@@ -182,10 +242,36 @@ func (f *flow) prepare(req *openresponses.Request) error {
 	return nil
 }
 
+// prepareJudge shapes a judge's request, which never reads the
+// conversation that led to the question.
+func (f *flow) prepareJudge(req *openresponses.Request, st State) (err error) {
+	n := st.Node
+	req.Model = f.judgeName
+	if req.Input, err = since(req.Input, n); err != nil {
+		return err
+	}
+	ask, err := f.judgeInstructions(st)
+	if err != nil {
+		return err
+	}
+	req.Instructions = strings.TrimSpace(req.Instructions + "\n\n" + ask)
+	// The verdict takes the shape of what the judge may choose.
+	allowed := *n
+	allowed.Outcomes = append(slices.Clone(n.Judge.Outcomes), HandBack)
+	if req.Tools, err = stepTools(req.Tools, judgeTool, &allowed, map[string]any{"reason": map[string]any{"type": "string"}}); err != nil {
+		return err
+	}
+	req.Tools = slices.DeleteFunc(slices.Clone(req.Tools), func(t openresponses.Tool) bool {
+		fn, ok := t.(*openresponses.FunctionTool)
+		return !ok || fn.Name != judgeTool && !slices.Contains(n.Judge.Tools, fn.Name)
+	})
+	return nil
+}
+
 // stepTools gives flow_finish the shape the step wants, so the model is
 // told by the tool itself and not only in prose. The request is what is
 // recorded, so the record holds what the model was offered.
-func stepTools(tools openresponses.Tools, n *Node) (openresponses.Tools, error) {
+func stepTools(tools openresponses.Tools, finish string, n *Node, more map[string]any) (openresponses.Tools, error) {
 	data := map[string]any{}
 	var shapes []any
 	required := []string{"step", "outcome"}
@@ -205,6 +291,10 @@ func stepTools(tools openresponses.Tools, n *Node) (openresponses.Tools, error) 
 	if len(shapes) == len(n.outcomes()) {
 		required = append(required, "data")
 	}
+	for name, schema := range more {
+		data[name] = schema
+		required = append(required, name)
+	}
 	data["step"] = map[string]any{"type": "string", "enum": []string{n.ID}}
 	data["outcome"] = map[string]any{"type": "string", "enum": n.outcomes()}
 	params, err := json.Marshal(map[string]any{"type": "object", "properties": data, "required": required})
@@ -213,7 +303,7 @@ func stepTools(tools openresponses.Tools, n *Node) (openresponses.Tools, error) 
 	}
 	out := slices.Clone(tools)
 	for i, t := range out {
-		if fn, ok := t.(*openresponses.FunctionTool); ok && fn.Name == finishTool {
+		if fn, ok := t.(*openresponses.FunctionTool); ok && fn.Name == finish {
 			own := *fn
 			own.Parameters, own.Strict = params, nil
 			out[i] = &own
@@ -262,7 +352,7 @@ func (f *flow) call(st State) (name string, args any, err error) {
 	}
 	switch {
 	case n.Kind == Person:
-		q := Question{Step: n.ID, Question: n.Prompt, Outcomes: n.outcomes(), With: with}
+		q := Question{Step: n.ID, Question: n.Prompt, Outcomes: n.outcomes(), With: with, Advice: st.Advice}
 		for outcome, s := range n.Data {
 			if q.Form == nil {
 				q.Form = map[string]any{}
@@ -352,6 +442,9 @@ func (f *flow) report(e *openresponses.Emitter, st State) error {
 	fmt.Fprintf(&b, "Workflow %s finished.", f.g.Name)
 	for _, s := range st.Steps {
 		fmt.Fprintf(&b, "\n- %s: %s", s.Node, s.Result.Outcome)
+		if s.Result.By != "" {
+			fmt.Fprintf(&b, " (by %s)", s.Result.By)
+		}
 	}
 	if st.Outputs != nil {
 		j, err := json.Marshal(st.Outputs)
@@ -402,7 +495,7 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 		if name != askTool || id != f.g.retryID(st) {
 			return block(fmt.Sprintf("step %q failed", n.ID))
 		}
-		return f.ask(ctx, info, n)
+		return f.ask(ctx, info, st)
 	case n.Kind == Agent:
 		if name == finishTool {
 			if step := finishStep(info.Call.Arguments); step != n.ID {
@@ -413,10 +506,20 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 		if !slices.Contains(n.Tools, name) {
 			return block(fmt.Sprintf("step %q does not allow %s", n.ID, name))
 		}
+	case f.judging(st):
+		if name == judgeTool {
+			if step := finishStep(info.Call.Arguments); step != n.ID {
+				return block(fmt.Sprintf("you are judging step %q, not %q", n.ID, step))
+			}
+			return nil, nil
+		}
+		if !slices.Contains(n.Judge.Tools, name) {
+			return block(fmt.Sprintf("the judge of step %q cannot call %s", n.ID, name))
+		}
 	case id != f.g.callID(st):
 		return block(fmt.Sprintf("step %q takes no other calls", n.ID))
 	case n.Kind == Person:
-		return f.ask(ctx, info, n)
+		return f.ask(ctx, info, st)
 	}
 	return nil, nil
 }
@@ -432,9 +535,19 @@ func validAnswer(n *Node, retry bool, res Result) error {
 	return nil
 }
 
-// ask decides who answers a question: the host's rules, then the node's
-// default when nobody is there, then the person.
-func (f *flow) ask(ctx context.Context, info agentturn.ToolCallInfo, n *Node) (*agentturn.ToolDecision, error) {
+// ask decides who answers a question: the host's rules, then a judge
+// the host let decide, then the node's default when nobody is there,
+// then the person.
+func (f *flow) ask(ctx context.Context, info agentturn.ToolCallInfo, st State) (*agentturn.ToolDecision, error) {
+	n := st.Node
+	answer := func(q Question, res Result, why string) (*agentturn.ToolDecision, error) {
+		q.Answer = &res
+		args, err := json.Marshal(q)
+		if err != nil {
+			return nil, err
+		}
+		return &agentturn.ToolDecision{Action: agentturn.Allow, Args: args, By: "policy", Reason: "agentflow: " + why}, nil
+	}
 	var q Question
 	if err := decode(info.Args, &q); err != nil {
 		return nil, fmt.Errorf("agentflow: question: %w", err)
@@ -442,13 +555,12 @@ func (f *flow) ask(ctx context.Context, info agentturn.ToolCallInfo, n *Node) (*
 	if f.reply != nil {
 		if res, ok := f.reply(ctx, q); ok && validAnswer(n, q.Retry, res) == nil {
 			res.By = "rules"
-			q.Answer = &res
-			args, err := json.Marshal(q)
-			if err != nil {
-				return nil, err
-			}
-			return &agentturn.ToolDecision{Action: agentturn.Allow, Args: args, By: "policy", Reason: "agentflow: answered by the host's rules"}, nil
+			return answer(q, res, "answered by the host's rules")
 		}
+	}
+	// The verdict is read from the transcript, not from the question.
+	if v := st.Advice; !q.Retry && v != nil && f.modes[n.ID] == Decide && v.Outcome != HandBack {
+		return answer(q, Result{Outcome: v.Outcome, Data: v.Data, By: ByJudge}, "decided by the judge")
 	}
 	// With nobody there, the tool takes the node's default, and refuses
 	// a retry, which ends the workflow.

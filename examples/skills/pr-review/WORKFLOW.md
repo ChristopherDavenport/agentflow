@@ -57,7 +57,11 @@ data.summary says in two sentences what the change does.
 
 ## verify
 ```yaml
+context: fresh
 with:
+  title: ${{ steps.gather.outputs.title }}
+  description: ${{ steps.gather.outputs.body }}
+  diff: ${{ steps.gather.outputs.diff }}
   findings: ${{ steps.review.outputs.findings }}
 tools: [read, grep]
 outcomes: [confirmed, rejected]
@@ -83,8 +87,11 @@ outputs:
           problem: {type: string, required: true}
           evidence: {type: string, required: true}
 ```
-Try to disprove each finding by reading the code it names. Keep a finding
-only if the code shows it, and quote that code as its evidence. If none
+A reviewer reported these findings about this pull request. You have not
+seen their work. The repository is checked out at the pull request's
+head. Try to disprove each finding by reading the code it names, with
+read and grep, not only the diff. Keep a finding only if the code shows
+it, and quote that code as its evidence. If none
 survives, the outcome is rejected, and data.reasons says for each why,
 quoting the code that disproves it.
 

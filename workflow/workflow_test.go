@@ -177,6 +177,9 @@ func TestFormatRoundTrips(t *testing.T) {
 		t.Fatalf("not stable: %v\n%s\n%s", err, out, again)
 	}
 	t.Logf("%s", out)
+	if !strings.Contains(string(out), "context: fresh") {
+		t.Error("the context was not written")
+	}
 
 	// A graph the file cannot say is refused rather than changed.
 	g := *back
@@ -217,7 +220,7 @@ func TestEverythingUnknownIsRefused(t *testing.T) {
 		"unknown section":     {edit("Well?", "Well?\n## c"), "not a node"},
 		"section twice":       {edit("Well?", "Well?\n## a"), "twice"},
 		"unknown setting":     {edit("tool: x", "tool: x\nretries: 3"), "retries"},
-		"proposed setting":    {edit("tool: x", "tool: x\ncontext: fresh"), "context"},
+		"context on a tool":   {edit("tool: x", "tool: x\ncontext: fresh"), "only a model node has a context"},
 		"late settings":       {edit("Well?", "Well?\n```yaml\nmax_visits: 3\n```"), "opens the section"},
 		"tool on a person":    {edit("Well?", "```yaml\ntool: x\n```\nWell?"), "only a program node"},
 		"tools on a program":  {edit("tool: x", "tool: x\ntools: [y]"), "only a model node"},
@@ -343,4 +346,49 @@ func stubScripts() agenttool.Tool {
 
 func stubTool(name string) agenttool.Tool {
 	return agenttool.New(name, "Stub.", func(context.Context, struct{}) (string, error) { return "", nil })
+}
+
+const branching = "# t\n\n```mermaid\nflowchart TD\n  a[[a]] -->|yes| b[[b]]\n  a -->|no| stop((stop))\n  b --> stop\n```\n\n" +
+	"## a\n```yaml\ntool: x\noutcomes: [yes, no]\n```\n\n## b\n```yaml\ntool: x\nwith:\n  v: ${{ optional(steps.a.outputs, steps.b.outputs) }}\n  w: ${{ latest(steps.a.outputs, steps.b.outputs) }}\n```\n"
+
+func TestEndsAndAlternatives(t *testing.T) {
+	g, err := workflow.Parse("t", []byte(branching))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(g.Nodes) != 2 || g.Nodes[0].Next["no"] != "" || g.Nodes[1].Next["ok"] != "" {
+		t.Errorf("an end became a node or an edge: %+v", g.Nodes)
+	}
+	want := agentflow.Value{From: "steps.a.outputs", Or: []string{"steps.b.outputs"}, Optional: true}
+	if got := g.Nodes[1].With["v"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("v = %+v", got)
+	}
+	out, err := workflow.Format(g, "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{"a -->|no| done((done))", "${{ optional(steps.a.outputs, steps.b.outputs) }}", "${{ latest(steps.a.outputs, steps.b.outputs) }}"} {
+		if !strings.Contains(string(out), line) {
+			t.Errorf("not written: %s\n%s", line, out)
+		}
+	}
+	for name, c := range map[string]struct{ old, new, want string }{
+		"an undeclared outcome": {"|no| stop", "|nope| stop", "undeclared outcome"},
+		"leaving an end":        {"b --> stop", "b --> stop\n  stop --> a", "is an end"},
+		"two destinations":      {"b --> stop", "a -->|yes| stop", "already goes"},
+		"ends then goes on":     {"b --> stop", "a -->|no| b", "already ends"},
+		"a reserved name":       {"b --> stop", "b --> end((end))", "is an end"},
+		"an end with a section": {"## b", "## stop\nx\n\n## b", "not a node"},
+		"latest of one":         {"latest(steps.a.outputs, steps.b.outputs)", "latest(steps.a.outputs)", "needs no latest"},
+		"an empty argument":     {"latest(steps.a.outputs, steps.b.outputs)", "latest(steps.a.outputs,)", "separated by commas"},
+		"another function":      {"latest(", "first(", "whole value"},
+	} {
+		if !strings.Contains(branching, c.old) {
+			t.Fatalf("%s: no %q to edit", name, c.old)
+		}
+		_, err := workflow.Parse("t", []byte(strings.Replace(branching, c.old, c.new, 1)))
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err = %v, want %q", name, err, c.want)
+		}
+	}
 }

@@ -18,6 +18,7 @@ const (
 	startTool  = "flow_start"
 	askTool    = "flow_ask"
 	finishTool = "flow_finish"
+	judgeTool  = "flow_judge"
 
 	// The outcomes of the question a failed step raises.
 	retryOutcome = "retry"
@@ -25,6 +26,7 @@ const (
 
 	invocationPrefix = "agentflow: start "
 	nudgePrefix      = "agentflow: the step is not finished."
+	beginPrefix      = "agentflow: begin step "
 )
 
 var (
@@ -53,6 +55,8 @@ type Step struct {
 	Node   string
 	Visit  int
 	Result Result
+	// Advice is what a judge said of this question, if one was asked.
+	Advice *Verdict
 }
 
 // State is where a workflow stands.
@@ -75,6 +79,11 @@ type State struct {
 	Done, Reported bool
 	// Nudges counts the reminders given since Node became current.
 	Nudges int
+	// Begun says the transcript holds the message that opens this visit
+	// of an Agent node, or opens a judge's look at a Person node.
+	Begun bool
+	// Advice is the judge's verdict on the question now being asked.
+	Advice *Verdict
 	// Steps are the finished nodes, oldest first.
 	Steps []Step
 }
@@ -168,6 +177,8 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 			switch {
 			case it.Role == openresponses.RoleUser && strings.HasPrefix(it.Text(), nudgePrefix):
 				st.Nudges++
+			case st.Node != nil && opens(it, st.Node):
+				st.Begun = true
 			case it.Role == openresponses.RoleAssistant && st.Done:
 				st.Reported = true
 			}
@@ -212,6 +223,15 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 					failed = fmt.Errorf("%w: %s: %s", ErrStepFailed, n.ID, st.Failure)
 				}
 				continue
+			case n.Kind == Person && c != nil && c.Name == judgeTool:
+				// A verdict advises; the question's own answer finishes
+				// the step. The first one given for this visit counts.
+				var v Verdict
+				if st.Advice == nil && st.Begun && at[it.CallID] > since && finishStep(c.Arguments) == n.ID &&
+					decode([]byte(it.Output.String()), &v) == nil && (v.Outcome == HandBack || n.Judge != nil && n.judged(v) == nil) {
+					st.Advice = &v
+				}
+				continue
 			case n.Kind == Agent:
 				// A finish that was rejected or is for another node is
 				// not progress; the model saw the error and goes on.
@@ -230,8 +250,8 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 					continue
 				}
 			}
-			st.Steps = append(st.Steps, Step{Node: n.ID, Visit: st.Visit, Result: res})
-			since, st.Nudges = i, 0
+			st.Steps = append(st.Steps, Step{Node: n.ID, Visit: st.Visit, Result: res, Advice: st.Advice})
+			since, st.Nudges, st.Begun, st.Advice = i, 0, false, nil
 			next := n.Next[res.Outcome]
 			if next == "" {
 				st.Node, st.Visit, st.Attempt, st.Done = nil, 0, 0, true
@@ -254,6 +274,14 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 		}
 	}
 	return st, failed
+}
+
+// beginning starts the message that opens a visit of an Agent node.
+func beginning(id string) string { return beginPrefix + strconv.Quote(id) + "." }
+
+// opens says m is the message that opens a visit of n.
+func opens(m *openresponses.Message, n *Node) bool {
+	return (n.Kind == Agent || n.Judge != nil) && m.Role == openresponses.RoleUser && strings.HasPrefix(m.Text(), beginning(n.ID))
 }
 
 func parseResult(n *Node, output string) (Result, error) {

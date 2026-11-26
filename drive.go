@@ -35,12 +35,19 @@ func Drive(ctx context.Context, g *Graph, a *agentturn.Agent, end *agentturn.Run
 			return end, st, end.Err
 		case err != nil:
 			return end, st, err
-		case end.Reason != agentturn.ReasonDone || st.Node == nil || st.Node.Kind != Agent:
+		// A judge that was opened and gave no verdict has stopped too:
+		// with no judge the question would be waiting, not done.
+		case end.Reason != agentturn.ReasonDone || st.Node == nil ||
+			st.Node.Kind != Agent && !(st.Node.Kind == Person && st.Begun && st.Advice == nil):
 			return end, st, nil
 		case st.Nudges > 0:
 			return end, st, fmt.Errorf("%w: %s", ErrStalled, st.Node.ID)
 		}
-		nudge := fmt.Sprintf("%s Text is not read. Do the step %q, then call %s.", nudgePrefix, st.Node.ID, finishTool)
+		call := finishTool
+		if st.Node.Kind == Person {
+			call = judgeTool
+		}
+		nudge := fmt.Sprintf("%s Text is not read. Do the step %q, then call %s.", nudgePrefix, st.Node.ID, call)
 		from := agentturn.ContextWithTrigger(ctx, agentturn.Trigger{Kind: TriggerKind, Ref: g.Name})
 		next, err := a.Prompt(from, openresponses.UserText(nudge))
 		if next == nil {

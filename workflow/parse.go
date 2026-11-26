@@ -25,7 +25,7 @@ import (
 const (
 	nodePattern  = `([A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*)`
 	labelPattern = `(?:"[^"]*"|[^\[\]()|"{}]+)`
-	shapePattern = `(\[\[` + labelPattern + `\]\]|\(\[` + labelPattern + `\]\)|\[` + labelPattern + `\])?`
+	shapePattern = `(\[\[` + labelPattern + `\]\]|\(\[` + labelPattern + `\]\)|\(\(` + labelPattern + `\)\)|\[` + labelPattern + `\])?`
 )
 
 var (
@@ -34,7 +34,11 @@ var (
 		`(?:\s*-->\s*(?:\|([A-Za-z0-9_-]+)\|)?\s*` + nodePattern + shapePattern + `)?$`)
 	mermaidHead = regexp.MustCompile(`^flowchart\s+(TD|LR)$`)
 	fenceLine   = regexp.MustCompile("^ {0,3}(`{3,}|~{3,})\\s*(.*?)\\s*$")
-	reference   = regexp.MustCompile(`^\$\{\{\s*([^{}\s]+)\s*\}\}$`)
+	reference   = regexp.MustCompile(`^\$\{\{\s*([^{}()\s]+)\s*\}\}$`)
+	function    = regexp.MustCompile(`^\$\{\{\s*(latest|optional)\(([^{}()]*)\)\s*\}\}$`)
+	// An end is where an outcome stops the workflow, drawn so a reader
+	// sees it. It is not a node and has no section.
+	endShape = regexp.MustCompile(nodePattern + `\(\(`)
 
 	// Words Mermaid's flowchart grammar uses, refused as node IDs so
 	// that a file that loads is also one that can be drawn.
@@ -114,15 +118,21 @@ type frontmatter struct {
 }
 
 type settings struct {
-	Run        string         `yaml:"run"`
-	Tool       string         `yaml:"tool"`
-	Args       map[string]any `yaml:"args"`
-	With       yaml.Node      `yaml:"with"`
-	Outputs    yaml.Node      `yaml:"outputs"`
-	Tools      []string       `yaml:"tools"`
-	Outcomes   []string       `yaml:"outcomes"`
-	Unattended yaml.Node      `yaml:"unattended"`
-	MaxVisits  int            `yaml:"max_visits"`
+	Run     string         `yaml:"run"`
+	Tool    string         `yaml:"tool"`
+	Args    map[string]any `yaml:"args"`
+	With    yaml.Node      `yaml:"with"`
+	Outputs yaml.Node      `yaml:"outputs"`
+	Tools   []string       `yaml:"tools"`
+	Context string         `yaml:"context"`
+	Judge   *struct {
+		Criteria string   `yaml:"criteria"`
+		Outcomes []string `yaml:"outcomes"`
+		Tools    []string `yaml:"tools"`
+	} `yaml:"judge"`
+	Outcomes   []string  `yaml:"outcomes"`
+	Unattended yaml.Node `yaml:"unattended"`
+	MaxVisits  int       `yaml:"max_visits"`
 }
 
 // strict decodes one YAML document, refusing keys it does not know.
@@ -174,7 +184,8 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 	if len(diagrams) != 1 {
 		return nil, fmt.Errorf("workflow: want one mermaid block before the first section, found %d", len(diagrams))
 	}
-	if err := diagram(g, diagrams[0]); err != nil {
+	ends, err := diagram(g, diagrams[0])
+	if err != nil {
 		return nil, fmt.Errorf("workflow: %w", err)
 	}
 
@@ -201,15 +212,36 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 			return nil, fmt.Errorf("workflow: node %q has no section", n.ID)
 		}
 	}
+	for _, e := range ends {
+		outcomes := g.Nodes[index[e.from]].Outcomes
+		if len(outcomes) == 0 {
+			outcomes = []string{agentflow.OK}
+		}
+		if !slices.Contains(outcomes, e.outcome) {
+			return nil, fmt.Errorf("workflow: node %q: edge for undeclared outcome %q", e.from, e.outcome)
+		}
+	}
 	if err := g.Validate(); err != nil {
 		return nil, err
 	}
 	return g, nil
 }
 
-// diagram reads the nodes, their kinds and their edges. The first node
-// mentioned is where the workflow starts.
-func diagram(g *agentflow.Graph, b block) error {
+// ending is an edge into an end.
+type ending struct{ from, outcome string }
+
+// diagram reads the nodes, their kinds and their edges, and returns the
+// edges into ends. The first node mentioned is where the workflow starts.
+func diagram(g *agentflow.Graph, b block) ([]ending, error) {
+	var ends []ending
+	isEnd := map[string]bool{}
+	for _, line := range b.lines {
+		if !strings.HasPrefix(strings.TrimSpace(line), "%%") {
+			for _, m := range endShape.FindAllStringSubmatch(line, -1) {
+				isEnd[m[1]] = true
+			}
+		}
+	}
 	index := map[string]int{}
 	mention := func(id, shape string, line int) (*agentflow.Node, error) {
 		if slices.Contains(reserved, id) {
@@ -246,31 +278,51 @@ func diagram(g *agentflow.Graph, b block) error {
 		}
 		if !head {
 			if !mermaidHead.MatchString(line) {
-				return fmt.Errorf("line %d: want \"flowchart TD\" or \"flowchart LR\", got %q", at, line)
+				return nil, fmt.Errorf("line %d: want \"flowchart TD\" or \"flowchart LR\", got %q", at, line)
 			}
 			head = true
 			continue
 		}
 		m := mermaidLine.FindStringSubmatch(line)
 		if m == nil {
-			return fmt.Errorf("line %d: %q is not a node or an edge this dialect accepts", at, line)
-		}
-		if _, err := mention(m[1], m[2], at); err != nil {
-			return err
+			return nil, fmt.Errorf("line %d: %q is not a node or an edge this dialect accepts", at, line)
 		}
 		to, outcome := m[4], m[3]
+		if isEnd[m[1]] {
+			if to != "" || m[2] != "" && !strings.HasPrefix(m[2], "((") {
+				return nil, fmt.Errorf("line %d: %q is an end: nothing leaves it and it has one shape", at, m[1])
+			}
+			continue
+		}
+		if _, err := mention(m[1], m[2], at); err != nil {
+			return nil, err
+		}
 		if to == "" {
 			continue
 		}
-		if _, err := mention(to, m[5], at); err != nil {
-			return err
+		if isEnd[to] {
+			if m[5] != "" && !strings.HasPrefix(m[5], "((") || slices.Contains(reserved, to) {
+				return nil, fmt.Errorf("line %d: %q is an end: it has one shape and no name Mermaid reserves", at, to)
+			}
+		} else if _, err := mention(to, m[5], at); err != nil {
+			return nil, err
 		}
 		if outcome == "" {
 			outcome = agentflow.OK
 		}
 		from := &g.Nodes[index[m[1]]]
-		if old, ok := from.Next[outcome]; ok && old != to {
-			return fmt.Errorf("line %d: %q already goes to %q on %q", at, from.ID, old, outcome)
+		ended := slices.Contains(ends, ending{from.ID, outcome})
+		old, ok := from.Next[outcome]
+		switch {
+		case ok && old != to:
+			return nil, fmt.Errorf("line %d: %q already goes to %q on %q", at, from.ID, old, outcome)
+		case ended && !isEnd[to]:
+			return nil, fmt.Errorf("line %d: %q already ends on %q", at, from.ID, outcome)
+		case isEnd[to]:
+			if !ended {
+				ends = append(ends, ending{from.ID, outcome})
+			}
+			continue
 		}
 		if from.Next == nil {
 			from.Next = map[string]string{}
@@ -278,14 +330,14 @@ func diagram(g *agentflow.Graph, b block) error {
 		from.Next[outcome] = to
 	}
 	if len(g.Nodes) == 0 {
-		return errors.New("the diagram has no nodes")
+		return nil, errors.New("the diagram has no nodes")
 	}
 	for _, n := range g.Nodes {
 		if n.Kind == 0 {
-			return fmt.Errorf("node %q has no shape: [[program]], [model] or ([person])", n.ID)
+			return nil, fmt.Errorf("node %q has no shape: [[program]], [model] or ([person])", n.ID)
 		}
 	}
-	return nil
+	return ends, nil
 }
 
 // node reads a section: a leading yaml block of settings, then prose.
@@ -333,6 +385,10 @@ func node(n *agentflow.Node, s section) error {
 	}
 	if n.Kind != agentflow.Run && (n.Script != "" || n.Tool != "" || n.Args != nil) {
 		return errors.New("only a program node has run, tool or args")
+	}
+	n.Context = set.Context
+	if j := set.Judge; j != nil {
+		n.Judge = &agentflow.Judge{Criteria: strings.TrimSpace(j.Criteria), Outcomes: j.Outcomes, Tools: j.Tools}
 	}
 	if n.Kind != agentflow.Agent && n.Tools != nil {
 		return errors.New("only a model node has tools")
@@ -416,6 +472,11 @@ func values(n *yaml.Node) (map[string]agentflow.Value, error) {
 		if s, ok := decoded.(string); ok {
 			if m := reference.FindStringSubmatch(s); m != nil {
 				value = agentflow.From(m[1])
+			} else if m := function.FindStringSubmatch(s); m != nil {
+				var err error
+				if value, err = call(m[1], m[2]); err != nil {
+					return fmt.Errorf("%s: %w", name, err)
+				}
 			}
 		}
 		if value.From == "" && hasReference(decoded) {
@@ -428,6 +489,28 @@ func values(n *yaml.Node) (map[string]agentflow.Value, error) {
 		return nil
 	})
 	return out, err
+}
+
+// call reads latest(a, b) or optional(a, ...).
+func call(name, args string) (agentflow.Value, error) {
+	paths := strings.Split(args, ",")
+	for i := range paths {
+		paths[i] = strings.TrimSpace(paths[i])
+		if paths[i] == "" || strings.ContainsAny(paths[i], " \t") {
+			return agentflow.Value{}, fmt.Errorf("%s: want references separated by commas", name)
+		}
+	}
+	var rest []string
+	if len(paths) > 1 {
+		rest = paths[1:]
+	}
+	if name == "optional" {
+		return agentflow.Value{From: paths[0], Or: rest, Optional: true}, nil
+	}
+	if rest == nil {
+		return agentflow.Value{}, errors.New("latest: one reference needs no latest")
+	}
+	return agentflow.Value{From: paths[0], Or: rest}, nil
 }
 
 func hasReference(v any) bool {

@@ -35,6 +35,7 @@ with:
 ```yaml
 with:
   paths: ${{ steps.filter.outputs.paths }}
+context: fresh
 outputs:
   ok:
     summary: {type: string, required: true}

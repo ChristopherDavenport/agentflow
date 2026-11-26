@@ -152,12 +152,15 @@ so the picture cannot disagree with what runs.
 | `id([label])` | a person decides |
 | `a --> b` | `a` ends with `ok`, then `b` |
 | `a -->\|outcome\| b` | `a` ends with `outcome`, then `b` |
+| `id((label))` | an end, where an outcome stops the workflow |
 | `%% text` | a comment |
 
 One node or one edge to a line; edges do not chain. A node has one shape,
 given at least once. A label is free text, quoted if it likes, and means
 nothing. The first node mentioned is the start. An outcome with no edge
-ends the workflow. Mermaid's keywords (`end`, `graph`, `subgraph`,
+ends the workflow, and an edge to an end says so where a reader can see
+it: an end is not a node, has no section and has nothing leaving it.
+`Format` draws one for each such outcome of a step that branches. Mermaid's keywords (`end`, `graph`, `subgraph`,
 `flowchart`, `direction`, `style`, `linkStyle`, `classDef`, `class`,
 `click`, `default`) cannot be IDs. That Mermaid itself draws every file
 this accepts has not been verified.
@@ -186,9 +189,10 @@ and be none. Unknown keys are errors.
 | `with` | all | the step's inputs, by name |
 | `outputs` | all | schema of the step's data, by outcome |
 | `tools` | model | tools the model may call; none if absent |
-| `context` | model | `session`, `fresh`, or a list of node IDs (proposed; refused today) |
+| `context` | model | `session` (default) or `fresh`; see [Context](#context-spiked) |
 | `outcomes` | all | ways the node can end; `[ok]` if absent |
 | `unattended` | person | outcome, and data, taken when nobody can be asked |
+| `judge` | person | that a model may answer: `criteria`, `outcomes` it may choose, `tools` |
 | `max_visits` | all | how often the node may run; if absent, 5 for a node on a loop and 1 for any other |
 
 The text under a model or person node is its prompt.
@@ -212,11 +216,23 @@ with:
   name: ${{ steps.confirm.outputs.version }}
 ```
 
-A value is a literal or exactly one `${{ }}` reference, to `inputs.<name>`
-or `steps.<id>.outputs`, optionally followed by member names. There are
-no operators, functions, interpolation or `if:`: a decision is a step
-with a named outcome, so every branch is in the diagram. In Go a
-reference is `From("steps.confirm.outputs.version")`.
+A value is a literal or exactly one `${{ }}` expression: a reference, to
+`inputs.<name>` or `steps.<id>.outputs`, optionally followed by member
+names, or one of two forms over references. There are no operators, no
+interpolation, no other functions and no `if:`: a decision is a step with
+a named outcome, so every branch is in the diagram. In Go these are
+`From`, `Latest` and `Optional`.
+
+| Expression | Value |
+|---|---|
+| `${{ ref }}` | the reference's; one must exist on every path here |
+| `${{ latest(a, b, ...) }}` | of those with a value, the one whose step finished last; at least one must exist on every path |
+| `${{ optional(a, ...) }}` | the same, and the argument is left out when none has a value |
+
+`latest` is for a step that several branches reach: a plan that was
+drafted, revised or loaded from disk is one argument. `optional` is for
+what a loop has not produced yet, such as the errors that sent a step
+back. An input is older than any step's result.
 
 A reference reads the **latest** result of a step, since a graph may loop.
 
@@ -230,8 +246,8 @@ A reference reads the **latest** result of a step, since a graph may loop.
 | person | shown beside the question | `data` of the answer |
 
 `with` is what a step is handed, not all it can see. A model step reads
-the whole transcript, earlier results included, until `context` is
-implemented.
+the whole transcript, earlier results included, unless its `context` is
+`fresh`.
 
 The program builds a call's arguments from recorded results, so no model
 retypes a value on its way to a tool, and the call records exactly what
@@ -274,9 +290,12 @@ reach a model.
 
 ### Checked at load
 
-Every reference must have a value on every path that reaches it: the step
-has certainly run, and where it declares schemas, the member is
-`required` by the outcome that was taken. A loop that can re-run a step
+Every plain reference must have a value on every path that reaches it:
+the step has certainly run, and where it declares schemas, the member is
+`required` by the outcome that was taken. For `latest`, every path must
+bring at least one of its references. The references of `latest` and
+`optional` must each be able to exist: a declared step or input, and a
+member some outcome declares, so a misspelt name is not read as absent. A loop that can re-run a step
 with another outcome loses the first outcome's members. A workflow's
 `outputs` are checked at every way out. Whether `with` covers what a
 tool requires is not yet checked.
@@ -381,17 +400,88 @@ When a question is reached, the host tries in order:
 
 1. its own rules (`Reply`), marked `by: rules` in the result and decided
    `by: policy` in the record (spiked)
-2. unattended, the node's `unattended` outcome, marked `by` (spiked)
-3. waiting: the run ends `input_required` (spiked)
+2. a judge the host let decide, marked `by: ai` and decided `by: policy`
+   (spiked)
+3. unattended, the node's `unattended` outcome, marked `by` (spiked)
+4. waiting: the run ends `input_required` (spiked)
 
-The working model never answers on a person's behalf.
+The conversation that did the work never answers on a person's behalf.
 
-## Context (proposed)
+## From a person to a model (spiked)
 
-A workflow records into its own child session, linked to the session it
-was invoked from, which it leaves untouched. A model node chooses what
-it sees: `session` (the invoking conversation), `fresh` (only its
-inputs) or named node results. A reviewer that inherits a session also
+A person step can move to a model one step at a time. It takes two keys,
+so a workflow file cannot give itself authority.
+
+**The author permits.** The node's `judge` writes down what the person was
+weighing, and which outcomes a model may choose:
+
+```yaml
+outcomes: [go, change, redo, park, drop]
+judge:
+  outcomes: [go, change, redo, park]   # drop stays a person's
+  tools: [read, grep]
+  criteria: |
+    Go only if the plan resolves the issue and does nothing else.
+```
+
+**The host chooses**, per run and per step, with `Delegate`:
+
+| Host | Who answers | What the record holds |
+|---|---|---|
+| nothing | the person | their answer |
+| `Delegate(Advise, ...)` | the person, shown the judge's verdict | both |
+| `Delegate(Decide, ...)` | the judge, or the person if it hands back | the verdict, `by: ai` |
+
+The path is to write the criteria, run on `Advise`, count how often
+`Step.Advice` and the person's `Step.Result` agree, and move to `Decide`
+the steps where they do. `State.Steps` holds both for the latest instance;
+counting across sessions is the host's.
+
+A judge is a request of its own: the node's question, `with` values,
+criteria and tools, from the node's opening message on, with none of the
+conversation that did the work. `JudgeModel` may name another model. Its
+verdict is a `flow_judge` call with a reason, which answers nothing: the
+question is still asked by `flow_ask`, and the host decides there whether
+the verdict stands. So position stays a function of the transcript, and
+what the host trusts is not written into it. `ask` is reserved for handing
+a question back; unattended, a handed-back question takes the `unattended`
+outcome. A retry of a failed step is never judged. A judge that only talks
+is reminded once, then is `ErrStalled`; it does not yet fall back to the
+person.
+
+What a judge reads can be written by someone else: an issue's text, a
+diff. It is told that inputs are material and not instructions, which is
+not a defence. Delegating a step whose answer publishes or deletes means
+trusting that text that far. Nothing has measured how well a judge
+decides; none has run with a real model.
+
+## Context (spiked)
+
+Each visit of a model node opens with a user message, added by
+`BeforeTurn`, reading `agentflow: begin step "<id>".` It says the earlier
+steps' results were accepted: without it a model reads its previous
+`flow_finish` under a tool that now accepts only this step's, and takes
+that call for a mistake. It is a hook's message, so no record takes it
+for the person's.
+
+A model node chooses what it reads:
+
+- `session`, the default: the whole transcript.
+- `fresh`: the transcript from the opening message of this visit, so the
+  step's own turns and nothing before them. It still gets the host's
+  instructions and the step's prompt and inputs, and it has no other way
+  to know anything, so `with` must carry what it needs. The record keeps
+  its request hashes, since the session format can say that items were
+  left out. If the opening message is missing the request fails; it is
+  never widened.
+
+A message the person sends while a fresh step is only about to open is
+not in what that step reads. A fresh step does not limit its tools: with
+`read` it can still look at anything the others could.
+
+Proposed: a list of node IDs whose results to include, and recording a
+workflow into its own child session linked to the one it was invoked
+from, which it leaves untouched. A reviewer that inherits a session also
 inherits its blind spots, so both have uses.
 
 ## Determinism and trust
@@ -470,7 +560,55 @@ this says about workflows:
 - A step that can discard a finding is a silent single point of failure
   unattended. The example now reports what is dismissed.
 - A step reached from two branches cannot use what only one of them
-  produced, so the example needs three report steps (open question 9).
+  produced, so the example has three report steps. `latest` and
+  `optional` now allow fewer; it has not been rewritten.
+
+The skill as first committed, on claude-haiku-5-5, same pull request,
+2026-11-26: the planted bug reached the final report 3/3 and the
+unmodified change was reported clean 1/1, each run in under ten
+seconds. That clean result was a miss; see below. So the misses
+above were the local model. The bug is visible in the diff beside a
+comment that contradicts it, so this is an easy one. `verify` called no
+tool in any planted run: it shares the review's context and is not an
+independent check (`context: fresh` is not built). In all three it also
+began by saying its previous `flow_finish` had named the wrong step.
+Nothing was refused; the likely cause is that the history shows the last
+step's call while the tool now accepts only this step's.
+
+With the opening message and `verify` made `fresh`, same model and day:
+
+- Planted bug, 3 runs: reported 3/3. No run apologised for its earlier
+  call, and `verify` searched and read the code every time.
+- Planted bug, 3 more runs with `verify` back on `session`: the same, no
+  apology and the code read each time, at about 36k tokens a run against
+  26k. So the opening message accounts for both changes, and these runs
+  show no gain from `fresh`.
+- `review` replaced by a script claiming a bug that does not exist, 2
+  runs: `verify` rejected it 2/2 with the code that disproves it, and the
+  report listed it as dismissed.
+- Unmodified change, 1 run: one finding, confirmed by `verify`. It is
+  real, reproduced by a test: a skill directory holding `SKILL.md` and
+  `Skill.md` lists the second as a file and serves the instructions when
+  it is read. It took 16 requests and about 180k tokens against 6 and 30k
+  for the run that missed it, so one run each says nothing about why.
+
+`examples/skills/take-issue`, an issue to a pull request, offline with a
+scripted model, real scripts and git, 2026-11-26. It is why `latest`,
+`optional` and ends exist: without them one plan check, one revise step
+and one approval had to be drawn once per branch that reached them. What
+else it showed:
+
+- A script runs inside the repository it works on, so the runner's own
+  files show as untracked there. The example excludes `.agentflow*` by
+  hand.
+- "Only the program runs scripts" does not stop a model's code running:
+  a model that may write files can change what a later check step runs.
+  Here a person has approved the plan by then, nothing limits the write
+  to the plan's files, and the check runs before the next question. Such
+  a workflow wants a contained workspace.
+- A step cannot say which of its tools' writes it allows.
+
+It has not been run with a model.
 
 The role of the reminder, qwen3:1.7b, one reminder, 40 trials a row:
 
@@ -480,8 +618,8 @@ The role of the reminder, qwen3:1.7b, one reminder, 40 trials a row:
 | user | 14 of 21 |
 
 Not yet tested: a model step that uses tools over many turns, a prompt
-that competes with the finish instruction, the real `compact` transform,
-and the `context` modes.
+that competes with the finish instruction and the real `compact`
+transform.
 
 ## Open questions
 
@@ -500,6 +638,3 @@ and the `context` modes.
 7. **Run directories** show in a repository's status while a script runs.
 8. **Gates.** A `check` script that rejects a model's result before the
    step finishes.
-9. **Joins.** A reference needs a value on every path, so a step where
-   branches meet cannot take what one branch alone made. An optional
-   reference is the obvious answer.

@@ -37,6 +37,15 @@ const (
 	Person
 )
 
+// What an Agent node's model reads of the conversation.
+const (
+	// ContextSession is the whole transcript, and what empty means.
+	ContextSession = "session"
+	// ContextFresh is the transcript from where the step began, so the
+	// model knows only the step's prompt and inputs.
+	ContextFresh = "fresh"
+)
+
 // OK is the outcome of a node that declares none.
 const OK = "ok"
 
@@ -112,12 +121,18 @@ type Node struct {
 	Prompt string
 	// Tools names the tools an Agent node may call.
 	Tools []string
+	// Context is [ContextSession], [ContextFresh] or empty, on an Agent
+	// node only.
+	Context string
 
 	// Outcomes are the ways the node can end. Empty means only [OK].
 	Outcomes []string
 	// Next maps an outcome to the node that follows. An outcome with no
 	// entry ends the workflow.
 	Next map[string]string
+
+	// Judge, on a Person node, says a model may answer it.
+	Judge *Judge `json:",omitempty"`
 
 	// Unattended is the outcome a Person node takes when nobody is
 	// there to ask. Empty means the run waits.
@@ -203,6 +218,34 @@ func (g *Graph) Validate() error {
 			}
 		default:
 			bad("node %q: unknown kind %d", n.ID, n.Kind)
+		}
+		switch {
+		case n.Context != "" && n.Kind != Agent:
+			bad("node %q: only a model node has a context", n.ID)
+		case n.Context != "" && n.Context != ContextSession && n.Context != ContextFresh:
+			bad("node %q: context %q: want %q or %q", n.ID, n.Context, ContextSession, ContextFresh)
+		}
+		if j := n.Judge; j != nil {
+			switch {
+			case n.Kind != Person:
+				bad("node %q: only a person node can be judged", n.ID)
+			case strings.TrimSpace(j.Criteria) == "":
+				bad("node %q: a judge needs criteria", n.ID)
+			case len(j.Outcomes) == 0:
+				bad("node %q: a judge needs the outcomes it may choose", n.ID)
+			case slices.Contains(n.outcomes(), HandBack):
+				bad("node %q: a judged node cannot declare the outcome %q", n.ID, HandBack)
+			}
+			for _, outcome := range j.Outcomes {
+				if !slices.Contains(n.outcomes(), outcome) {
+					bad("node %q: judge: undeclared outcome %q", n.ID, outcome)
+				}
+			}
+			for _, tool := range j.Tools {
+				if tool == ScriptTool || strings.HasPrefix(tool, reserved) {
+					bad("node %q: a judge cannot call %q", n.ID, tool)
+				}
+			}
 		}
 		for outcome, next := range n.Next {
 			if !slices.Contains(n.outcomes(), outcome) {
