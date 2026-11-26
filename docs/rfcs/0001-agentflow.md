@@ -200,7 +200,8 @@ and be none. Unknown keys are errors.
 | `flow` | program | a workflow to call instead: a skill's name, or `./<path>.md` in this skill; see [RFC 0002](0002-nesting-and-children.md) |
 | `with` | all | the step's inputs, by name |
 | `outputs` | all | schema of the step's data, by outcome |
-| `tools` | model | tools the model may call; none if absent |
+| `tools` | model | tools the model may call; none if absent; `all` for every tool the host offers (RFC 0008, section 5) |
+| `exclude_tools` | model, frontmatter | tools the step is never offered, whatever `tools` says; the frontmatter's hold every model step and judge of the workflow (RFC 0008, section 5) |
 | `skills` | model | skills whose instructions are added to the step's, read and pinned at load; they grant no tools (RFC 0005, section 16) |
 | `context` | model, call | `session` or `fresh`, a child session; see [Context](#context-spiked). `session` is the default, except for a model step that asks for another model than its workflow's, which defaults to `fresh` (RFC 0003, section 14) |
 | `dir` | fresh model, fresh call, script | the directory below the workspace's root the step works in: a path, or a reference to one, resolved when the call is made and recorded in it (RFC 0002, section 10) |

@@ -75,7 +75,7 @@ func (n *Node) checkSettings() []error {
 		if len(n.Files) > 0 && !slices.Contains(tools, "read") {
 			tools = append(slices.Clone(tools), "read")
 		}
-		if err := n.Policy.check(tools, !call); err != nil {
+		if err := n.Policy.check(tools, !call && !n.AllTools); err != nil {
 			bad("policy: %v", err)
 		}
 	}
@@ -158,7 +158,7 @@ func (g *Graph) stepGraph(n *Node) *Graph {
 	inputs, with := inputsOf(n)
 	// The child reports a stuck model as its outcome, and the caller
 	// decides what that means.
-	step := Node{ID: n.ID, Kind: Agent, Description: n.Description, Prompt: n.Prompt, Tools: n.Tools, Outcomes: n.Outcomes, Data: n.Data, With: with,
+	step := Node{ID: n.ID, Kind: Agent, Description: n.Description, Prompt: n.Prompt, Tools: n.Tools, AllTools: n.AllTools, ExcludeTools: g.excluded(n), Outcomes: n.Outcomes, Data: n.Data, With: with,
 		Model: cmp.Or(n.Model, g.Model), Thinking: cmp.Or(n.Thinking, g.Thinking), Timeout: n.Timeout, Policy: n.Policy, Skills: n.Skills,
 		Ends: map[string]string{Stuck: Stuck}, Reads: n.Reads, Edits: n.Edits, SkillFiles: n.SkillFiles}
 	// The documents it reads are the child's, as its call passes them in.

@@ -127,6 +127,8 @@ type frontmatter struct {
 	Documents map[string]*documentSpec `yaml:"documents"`
 	// OnAbort names the step the cleanup path starts at.
 	OnAbort string `yaml:"on_abort"`
+	// ExcludeTools are tools no model step is offered.
+	ExcludeTools []string `yaml:"exclude_tools"`
 }
 
 // documentSpec is how a document starts: from a file of the skill, or as
@@ -154,9 +156,11 @@ type settings struct {
 	Args        map[string]any `yaml:"args"`
 	With        yaml.Node      `yaml:"with"`
 	Outputs     yaml.Node      `yaml:"outputs"`
-	Tools       []string       `yaml:"tools"`
-	Skills      []string       `yaml:"skills"`
-	Context     string         `yaml:"context"`
+	// Tools is a list of tools, or all for every tool the host offers.
+	Tools        yaml.Node `yaml:"tools"`
+	ExcludeTools []string  `yaml:"exclude_tools"`
+	Skills       []string  `yaml:"skills"`
+	Context      string    `yaml:"context"`
 	// A child's own settings, with context: fresh. A script takes dir.
 	Dir          yaml.Node `yaml:"dir"`
 	Model        string    `yaml:"model"`
@@ -227,7 +231,7 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 			return nil, fmt.Errorf("workflow: inputs: %w", err)
 		}
 		outputs, g.MaxDepth, g.MaxSteps, g.Model, g.Thinking = fm.Outputs, fm.MaxDepth, fm.MaxSteps, fm.Model, fm.Thinking
-		g.Description, g.OnAbort = strings.TrimSpace(fm.Description), fm.OnAbort
+		g.Description, g.OnAbort, g.ExcludeTools = strings.TrimSpace(fm.Description), fm.OnAbort, fm.ExcludeTools
 		for name, d := range fm.Documents {
 			if g.Documents == nil {
 				g.Documents = map[string]agentflow.Document{}
@@ -462,7 +466,14 @@ func node(n *agentflow.Node, s section) error {
 	n.Prompt = strings.TrimSpace(strings.Join(prose, "\n"))
 	n.Description = strings.TrimSpace(set.Description)
 
-	n.Script, n.Tool, n.Tools, n.Outcomes, n.Flow = set.Run, set.Tool, set.Tools, set.Outcomes, set.Flow
+	n.Script, n.Tool, n.Outcomes, n.Flow, n.ExcludeTools = set.Run, set.Tool, set.Outcomes, set.Flow, set.ExcludeTools
+	switch t := &set.Tools; {
+	case t.IsZero():
+	case t.Kind == yaml.ScalarNode && t.Value == "all":
+		n.AllTools = true
+	case t.Kind != yaml.SequenceNode || t.Decode(&n.Tools) != nil:
+		return fmt.Errorf("line %d: tools: want a list of tools, or all for every tool the host offers", t.Line)
+	}
 	switch v := &set.MaxVisits; {
 	case v.IsZero():
 	case v.Kind == yaml.ScalarNode && v.Value == "person":
@@ -514,8 +525,8 @@ func node(n *agentflow.Node, s section) error {
 	if j := set.Judge; j != nil {
 		n.Judge = &agentflow.Judge{Criteria: strings.TrimSpace(j.Criteria), Outcomes: j.Outcomes, Tools: j.Tools, Returns: j.Returns, Policy: j.Policy.policy()}
 	}
-	if n.Kind != agentflow.Agent && n.Tools != nil {
-		return errors.New("only a model node has tools")
+	if n.Kind != agentflow.Agent && (n.Tools != nil || n.AllTools || n.ExcludeTools != nil) {
+		return errors.New("only a model node has tools or exclude_tools")
 	}
 	if set.Skills != nil && n.Kind != agentflow.Agent {
 		return errors.New("only a model node names skills")

@@ -164,8 +164,13 @@ type Node struct {
 
 	// Prompt is an Agent node's instructions or a Person node's question.
 	Prompt string
-	// Tools names the tools an Agent node may call.
-	Tools []string
+	// Tools names the tools an Agent node may call. AllTools, written
+	// tools: all, offers every tool the host does instead, and
+	// ExcludeTools takes tools out of what the step is offered, with the
+	// workflow's own [Graph.ExcludeTools].
+	Tools        []string
+	AllTools     bool     `json:",omitempty"`
+	ExcludeTools []string `json:",omitempty"`
 	// Context is [ContextSession], [ContextFresh] or empty, on an Agent
 	// node or a call.
 	Context string
@@ -374,6 +379,9 @@ type Graph struct {
 	OnAbort string `json:",omitempty"`
 	// Documents are the workflow's named markdown documents, by name.
 	Documents map[string]Document `json:",omitempty"`
+	// ExcludeTools are tools no model step of the workflow is offered,
+	// whatever it names, and no judge of it may call.
+	ExcludeTools []string `json:",omitempty"`
 	// Model and Thinking are what the workflow's model steps ask for when
 	// they do not say.
 	Model    string `json:",omitempty"`
@@ -454,6 +462,11 @@ func (g *Graph) Validate() error {
 		bad("outputs are either by outcome or for every outcome")
 	}
 	errs = append(errs, g.checkDefaults()...)
+	for _, tool := range g.ExcludeTools {
+		if tool == ScriptTool || strings.HasPrefix(tool, reserved) {
+			bad("exclude_tools: %s is the program's, which no model step is offered", tool)
+		}
+	}
 	if len(g.Nodes) == 0 {
 		bad("graph has no nodes")
 	}
@@ -522,6 +535,7 @@ func (g *Graph) Validate() error {
 		errs = append(errs, n.checkSettings()...)
 		errs = append(errs, n.checkFiles()...)
 		errs = append(errs, n.checkShow()...)
+		errs = append(errs, g.checkOffer(n)...)
 		errs = append(errs, g.checkDir(n)...)
 		for _, v := range n.Files {
 			if s := g.refSchema(v.From); v.From != "" && s != nil && s.Type != "" && s.Type != "string" && (s.Type != "array" || s.Items != nil && s.Items.Type != "" && s.Items.Type != "string") {

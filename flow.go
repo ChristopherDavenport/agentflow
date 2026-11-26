@@ -353,6 +353,14 @@ func checkTools(local map[string]*Graph, cfg agentturn.Config) error {
 				for _, tool := range n.Tools {
 					missing(x, n, tool)
 				}
+				for _, tool := range n.ExcludeTools {
+					missing(x, n, tool)
+				}
+			}
+		}
+		for _, tool := range x.ExcludeTools {
+			if !slices.Contains(offered, tool) {
+				errs = append(errs, fmt.Errorf("agentflow: %s excludes the tool %s, which the config does not offer%s", x.Name, tool, suggest(tool, offered)))
 			}
 		}
 	}
@@ -513,7 +521,7 @@ func (f *flow) prepare(ctx context.Context, req *openresponses.Request) error {
 			finish, more = judgeTool, map[string]any{"reason": map[string]any{"type": "string"}}
 		}
 		keep = func(name string) bool {
-			return name == finish || name == stuckTool && n.canStick() || slices.Contains(n.Tools, name) ||
+			return name == finish || name == stuckTool && n.canStick() || st.g.offers(n, name) ||
 				name == docReadTool && n.documented() || name == docWriteTool && len(n.Edits) > 0
 		}
 		if req.Tools, err = stepTools(req.Tools, finish, st, more); err != nil {
@@ -1061,7 +1069,7 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 			}
 			return nil, nil
 		}
-		if !slices.Contains(n.Tools, name) {
+		if !st.g.offers(n, name) {
 			return block(fmt.Sprintf("step %q does not allow %s", n.ID, name))
 		}
 		if why := f.police(ctx, st, info); why != "" {

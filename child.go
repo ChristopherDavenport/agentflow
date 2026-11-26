@@ -72,8 +72,12 @@ type ChildSettings struct {
 	Thinking string
 	// Instructions is added to the child's instructions.
 	Instructions string
-	// Tools names the tools its step may call.
-	Tools []string
+	// Tools names the tools its step may call. AllTools says it may call
+	// every tool the host offers but ExcludeTools, which it is never
+	// offered.
+	Tools        []string
+	AllTools     bool
+	ExcludeTools []string
 }
 
 // Apply makes cfg follow the child's workflow, as [Apply] makes a config
@@ -187,7 +191,8 @@ func (f *flow) childFor(st State, call *openresponses.FunctionCall, a callArgs) 
 		c.policies = f.chain(st)
 	case n.Kind == Agent:
 		c.Step = n.ID
-		c.Settings = ChildSettings{Dir: a.Dir, Model: n.Model, Thinking: cmp.Or(n.Thinking, st.g.Thinking), Instructions: n.Instructions, Tools: n.Tools}
+		c.Settings = ChildSettings{Dir: a.Dir, Model: n.Model, Thinking: cmp.Or(n.Thinking, st.g.Thinking), Instructions: n.Instructions, Tools: n.Tools,
+			AllTools: n.AllTools, ExcludeTools: st.g.excluded(n)}
 		if st.Note != "" {
 			c.Settings.Instructions = strings.TrimSpace(c.Settings.Instructions + "\n\nNote from the operator: " + st.Note)
 		}

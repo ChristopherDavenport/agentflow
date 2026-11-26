@@ -79,7 +79,7 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 		key string
 		set bool
 		v   any
-	}{{"max_depth", g.MaxDepth != 0, g.MaxDepth}, {"max_steps", g.MaxSteps != 0, g.MaxSteps}, {"model", g.Model != "", g.Model}, {"thinking", g.Thinking != "", g.Thinking}, {"on_abort", g.OnAbort != "", g.OnAbort}} {
+	}{{"max_depth", g.MaxDepth != 0, g.MaxDepth}, {"max_steps", g.MaxSteps != 0, g.MaxSteps}, {"model", g.Model != "", g.Model}, {"thinking", g.Thinking != "", g.Thinking}, {"on_abort", g.OnAbort != "", g.OnAbort}, {"exclude_tools", g.ExcludeTools != nil, g.ExcludeTools}} {
 		if !s.set {
 			continue
 		}
@@ -236,6 +236,8 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 		m.add("with", valuesNode(n.With))
 	}
 	set("tools", n.Tools != nil, n.Tools)
+	set("tools", n.AllTools, "all")
+	set("exclude_tools", n.ExcludeTools != nil, n.ExcludeTools)
 	if n.Files != nil {
 		var files []any
 		for _, v := range n.Files {
