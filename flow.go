@@ -262,6 +262,9 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 	if err := f.checkFileReader(closure, cfg); err != nil {
 		return cfg, err
 	}
+	if err := checkArgs(g, cfg); err != nil {
+		return cfg, err
+	}
 
 	cfg.Model = f
 	f.due = &deadline{}

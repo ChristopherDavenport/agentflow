@@ -401,7 +401,7 @@ func TestDepthIsBoundedAcrossTheTree(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			g := linked(t, &Graph{Name: "deep", Nodes: []Node{
 				{ID: "call", Kind: Run, Flow: "countdown", With: map[string]Value{"n": Literal(9)}, Next: map[string]string{Failed: "never"}},
-				{ID: "never", Kind: Run, Tool: "script"},
+				{ID: "never", Kind: Run, Tool: "script", Args: json.RawMessage(`{"name":"never"}`)},
 			}}, countdown())
 			if opts == nil {
 				g.MaxDepth = 2

@@ -12,6 +12,7 @@ It covers:
 - **31.** operator overrides: retry, jump with a note, abandon;
 - **32.** a summary written when a run ends;
 - **34.** files given to a model step as context.
+- **35.** a tool step's arguments, checked at load against its tool.
 
 Every rule of the earlier RFCs holds. Nothing in agentturn, agentskill or
 the session format changed.
@@ -362,3 +363,36 @@ workflow's own named markdown, edited by calls, their every version in
 the record. Files are read-only context from the workspace or the skill,
 read once when a step opens. A step that should change a file is given a
 tool to write it; one that should keep a draft keeps a document.
+
+## 35. A tool step's arguments, checked at load
+
+`Apply`, where the config's tools are known, reads the `Parameters()`
+schema of the tool each program tool step calls, and holds the step's
+arguments to it: its `args`, with its `with` merged over them, as the
+call is made.
+
+- **Every required parameter is given on every path**, by `args` or by
+  `with`. A plain reference or a `latest` already has a value on every
+  path that reaches the step, as RFC 0001 checks; an `optional` value
+  may be left out, so it gives nothing for sure.
+- **A name the tool does not declare** is an error where its schema
+  forbids other properties (`additionalProperties: false`), with the name
+  that was meant.
+- **A literal holds to its parameter's schema**, an `args` member or a
+  `with` literal alike; for a name both give, `with`'s value is the one
+  sent, and the one checked.
+- **A reference whose schema is known** must be of its parameter's type:
+  the schema the outcome declares for the member it reads, as every
+  outcome that declares it agrees; an integer may go where a number is
+  wanted. A document is text.
+
+Errors name the workflow, the step, the tool and the parameter.
+
+**What is not checked at load**, and is checked when the call is made, as
+before, by the tool's own validation of its arguments:
+
+- a config with a `ToolProvider`, whose tools are known only as it runs;
+- tool steps of a workflow called into a child, whose tools are the
+  opener's: the child's `Apply` checks them against the child's config;
+- a reference with no schema, such as a script's untyped output, and a
+  parameter with no type.
