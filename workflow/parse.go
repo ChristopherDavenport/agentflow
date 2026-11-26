@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ChristopherDavenport/agentflow"
 	"github.com/ChristopherDavenport/agenttool"
@@ -113,23 +114,38 @@ func split(lines []string, offset int) (preamble section, sections []section, er
 }
 
 type frontmatter struct {
-	Inputs  yaml.Node `yaml:"inputs"`
-	Outputs yaml.Node `yaml:"outputs"`
+	Inputs   yaml.Node `yaml:"inputs"`
+	Outputs  yaml.Node `yaml:"outputs"`
+	MaxDepth int       `yaml:"max_depth"`
+	MaxSteps int       `yaml:"max_steps"`
+	Model    string    `yaml:"model"`
+	Thinking string    `yaml:"thinking"`
 }
 
 type settings struct {
 	Run     string         `yaml:"run"`
+	Flow    string         `yaml:"flow"`
 	Tool    string         `yaml:"tool"`
 	Args    map[string]any `yaml:"args"`
 	With    yaml.Node      `yaml:"with"`
 	Outputs yaml.Node      `yaml:"outputs"`
 	Tools   []string       `yaml:"tools"`
 	Context string         `yaml:"context"`
-	Judge   *struct {
-		Criteria string   `yaml:"criteria"`
-		Outcomes []string `yaml:"outcomes"`
-		Tools    []string `yaml:"tools"`
-		Returns  int      `yaml:"max_returns"`
+	// A child's own settings, with context: fresh.
+	Dir          string `yaml:"dir"`
+	Model        string `yaml:"model"`
+	Instructions string `yaml:"instructions"`
+	Child        string `yaml:"child"`
+	// A step's own settings.
+	Thinking string      `yaml:"thinking"`
+	Timeout  string      `yaml:"timeout"`
+	Policy   *policySpec `yaml:"policy"`
+	Judge    *struct {
+		Criteria string      `yaml:"criteria"`
+		Outcomes []string    `yaml:"outcomes"`
+		Tools    []string    `yaml:"tools"`
+		Returns  int         `yaml:"max_returns"`
+		Policy   *policySpec `yaml:"policy"`
 	} `yaml:"judge"`
 	Outcomes   []string  `yaml:"outcomes"`
 	Unattended yaml.Node `yaml:"unattended"`
@@ -152,6 +168,7 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 	lines := strings.Split(strings.ReplaceAll(string(src), "\r\n", "\n"), "\n")
 	g := &agentflow.Graph{Name: name}
 	offset := 0
+	var outputs yaml.Node
 	if len(lines) > 0 && lines[0] == "---" {
 		end := slices.Index(lines[1:], "---")
 		if end < 0 {
@@ -165,9 +182,7 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 		if g.Inputs, err = objectSchema(&fm.Inputs); err != nil {
 			return nil, fmt.Errorf("workflow: inputs: %w", err)
 		}
-		if g.Outputs, err = values(&fm.Outputs); err != nil {
-			return nil, fmt.Errorf("workflow: outputs: %w", err)
-		}
+		outputs, g.MaxDepth, g.MaxSteps, g.Model, g.Thinking = fm.Outputs, fm.MaxDepth, fm.MaxSteps, fm.Model, fm.Thinking
 		offset = end + 2
 		lines = lines[offset:]
 	}
@@ -214,13 +229,32 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 		}
 	}
 	for _, e := range ends {
-		outcomes := g.Nodes[index[e.from]].Outcomes
-		if len(outcomes) == 0 {
+		n := &g.Nodes[index[e.from]]
+		outcomes := n.Outcomes
+		switch {
+		case len(outcomes) == 0 && n.Flow != "":
+			// A call's outcomes are those of what it calls, known once
+			// the workflows are linked.
+		case len(outcomes) == 0:
 			outcomes = []string{agentflow.OK}
+			fallthrough
+		default:
+			if !slices.Contains(outcomes, e.outcome) {
+				return nil, fmt.Errorf("workflow: node %q: edge for undeclared outcome %q", e.from, e.outcome)
+			}
 		}
-		if !slices.Contains(outcomes, e.outcome) {
-			return nil, fmt.Errorf("workflow: node %q: edge for undeclared outcome %q", e.from, e.outcome)
+		// An end's name is the outcome the workflow ends with. One named
+		// for its outcome says nothing more, unless it is the failure a
+		// call routes on.
+		if e.end != e.outcome || e.outcome == agentflow.Failed {
+			if n.Ends == nil {
+				n.Ends = map[string]string{}
+			}
+			n.Ends[e.outcome] = e.end
 		}
+	}
+	if err := readOutputs(g, &outputs); err != nil {
+		return nil, fmt.Errorf("workflow: outputs: %w", err)
 	}
 	if err := g.Validate(); err != nil {
 		return nil, err
@@ -229,7 +263,7 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 }
 
 // ending is an edge into an end.
-type ending struct{ from, outcome string }
+type ending struct{ from, outcome, end string }
 
 // diagram reads the nodes, their kinds and their edges, and returns the
 // edges into ends. The first node mentioned is where the workflow starts.
@@ -312,16 +346,16 @@ func diagram(g *agentflow.Graph, b block) ([]ending, error) {
 			outcome = agentflow.OK
 		}
 		from := &g.Nodes[index[m[1]]]
-		ended := slices.Contains(ends, ending{from.ID, outcome})
+		k := slices.IndexFunc(ends, func(e ending) bool { return e.from == from.ID && e.outcome == outcome })
 		old, ok := from.Next[outcome]
 		switch {
 		case ok && old != to:
 			return nil, fmt.Errorf("line %d: %q already goes to %q on %q", at, from.ID, old, outcome)
-		case ended && !isEnd[to]:
+		case k >= 0 && (!isEnd[to] || ends[k].end != to):
 			return nil, fmt.Errorf("line %d: %q already ends on %q", at, from.ID, outcome)
 		case isEnd[to]:
-			if !ended {
-				ends = append(ends, ending{from.ID, outcome})
+			if k < 0 {
+				ends = append(ends, ending{from.ID, outcome, to})
 			}
 			continue
 		}
@@ -373,7 +407,7 @@ func node(n *agentflow.Node, s section) error {
 	}
 	n.Prompt = strings.TrimSpace(strings.Join(prose, "\n"))
 
-	n.Script, n.Tool, n.Tools, n.Outcomes, n.MaxVisits = set.Run, set.Tool, set.Tools, set.Outcomes, set.MaxVisits
+	n.Script, n.Tool, n.Tools, n.Outcomes, n.MaxVisits, n.Flow = set.Run, set.Tool, set.Tools, set.Outcomes, set.MaxVisits, set.Flow
 	if set.Args != nil {
 		if hasReference(set.Args) {
 			return errors.New("args are literals; put a reference under with")
@@ -384,12 +418,21 @@ func node(n *agentflow.Node, s section) error {
 		}
 		n.Args = b
 	}
-	if n.Kind != agentflow.Run && (n.Script != "" || n.Tool != "" || n.Args != nil) {
-		return errors.New("only a program node has run, tool or args")
+	if n.Kind != agentflow.Run && (n.Script != "" || n.Tool != "" || n.Args != nil || n.Flow != "") {
+		return errors.New("only a program node has run, tool, args or flow")
 	}
 	n.Context = set.Context
+	n.Dir, n.Model, n.InstructionsFile, n.Child = set.Dir, set.Model, set.Instructions, set.Child
+	n.Thinking, n.Policy = set.Thinking, set.Policy.policy()
+	if set.Timeout != "" {
+		d, err := time.ParseDuration(set.Timeout)
+		if err != nil || d <= 0 {
+			return fmt.Errorf("timeout %q: want a duration such as 90s, 10m or 1h", set.Timeout)
+		}
+		n.Timeout = d
+	}
 	if j := set.Judge; j != nil {
-		n.Judge = &agentflow.Judge{Criteria: strings.TrimSpace(j.Criteria), Outcomes: j.Outcomes, Tools: j.Tools, Returns: j.Returns}
+		n.Judge = &agentflow.Judge{Criteria: strings.TrimSpace(j.Criteria), Outcomes: j.Outcomes, Tools: j.Tools, Returns: j.Returns, Policy: j.Policy.policy()}
 	}
 	if n.Kind != agentflow.Agent && n.Tools != nil {
 		return errors.New("only a model node has tools")
@@ -437,6 +480,90 @@ func node(n *agentflow.Node, s section) error {
 		})
 	}
 	return nil
+}
+
+// readOutputs reads a workflow's outputs: by outcome, when every key is
+// an outcome of the workflow and every value a mapping, and otherwise the
+// same for every outcome.
+func readOutputs(g *agentflow.Graph, n *yaml.Node) error {
+	if n.IsZero() || n.Tag == "!!null" {
+		return nil
+	}
+	outcomes := g.Outcomes()
+	// A call's outcomes are not known until the workflows are linked, so
+	// an outcome reached through one is taken on trust here and checked
+	// then.
+	calls := slices.ContainsFunc(g.Nodes, func(n agentflow.Node) bool { return n.Flow != "" && len(n.Outcomes) == 0 })
+	byOutcome := n.Kind == yaml.MappingNode && len(n.Content) > 0
+	for i := 0; byOutcome && i+1 < len(n.Content); i += 2 {
+		key, v := n.Content[i].Value, n.Content[i+1]
+		byOutcome = v.Kind == yaml.MappingNode && (slices.Contains(outcomes, key) || calls)
+	}
+	if !byOutcome {
+		var err error
+		g.Outputs, err = values(n)
+		return err
+	}
+	g.OutputsBy = map[string]map[string]agentflow.Value{}
+	return pairs(n, func(outcome string, v *yaml.Node) error {
+		out, err := values(v)
+		if err != nil {
+			return fmt.Errorf("%s: %w", outcome, err)
+		}
+		if out == nil {
+			out = map[string]agentflow.Value{}
+		}
+		g.OutputsBy[outcome] = out
+		return nil
+	})
+}
+
+// policySpec is a policy as a section writes it: allow and deny, each a
+// list of rules in agentpolicy's grammar, a rule written alone or with
+// the note that says why it is there.
+type policySpec struct {
+	Allow []ruleSpec `yaml:"allow"`
+	Deny  []ruleSpec `yaml:"deny"`
+}
+
+// ruleSpec is "bash(go test:*)", or {rule: "bash(curl:*)", note: "use fetch"}.
+type ruleSpec agentflow.PolicyRule
+
+func (r *ruleSpec) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		r.Rule = n.Value
+		return nil
+	}
+	if n.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: a rule is a string, or a mapping with rule and note", n.Line)
+	}
+	return pairs(n, func(key string, v *yaml.Node) error {
+		switch key {
+		case "rule":
+			return v.Decode(&r.Rule)
+		case "note":
+			return v.Decode(&r.Note)
+		}
+		return fmt.Errorf("line %d: a rule has no key %q", v.Line, key)
+	})
+}
+
+func (p *policySpec) policy() *agentflow.Policy {
+	if p == nil {
+		return nil
+	}
+	out := &agentflow.Policy{}
+	for _, r := range p.Allow {
+		out.Allow = append(out.Allow, agentflow.PolicyRule(r))
+	}
+	for _, r := range p.Deny {
+		out.Deny = append(out.Deny, agentflow.PolicyRule(r))
+	}
+	// An allow written empty is kept, so the load says it allows nothing.
+	if p.Allow != nil && out.Allow == nil {
+		out.Allow = []agentflow.PolicyRule{}
+	}
+	return out
 }
 
 // pairs visits a mapping in the order written. An absent node has none.

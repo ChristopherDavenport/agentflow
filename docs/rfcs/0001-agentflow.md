@@ -152,7 +152,7 @@ so the picture cannot disagree with what runs.
 | `id([label])` | a person decides |
 | `a --> b` | `a` ends with `ok`, then `b` |
 | `a -->\|outcome\| b` | `a` ends with `outcome`, then `b` |
-| `id((label))` | an end, where an outcome stops the workflow |
+| `id((label))` | an end, where an outcome stops the workflow; its ID is the outcome the workflow ends with |
 | `%% text` | a comment |
 
 One node or one edge to a line; edges do not chain. A node has one shape,
@@ -160,7 +160,11 @@ given at least once. A label is free text, quoted if it likes, and means
 nothing. The first node mentioned is the start. An outcome with no edge
 ends the workflow, and an edge to an end says so where a reader can see
 it: an end is not a node, has no section and has nothing leaving it.
-`Format` draws one for each such outcome of a step that branches. Mermaid's keywords (`end`, `graph`, `subgraph`,
+An end's ID is the workflow's outcome there, and an outcome with no edge
+ends the workflow with its own name; a caller routes on them
+([RFC 0002](0002-nesting-and-children.md)). `Format` draws every end
+that is named otherwise, and one for each such outcome of a step that
+branches. Mermaid's keywords (`end`, `graph`, `subgraph`,
 `flowchart`, `direction`, `style`, `linkStyle`, `classDef`, `class`,
 `click`, `default`) cannot be IDs. That Mermaid itself draws every file
 this accepts has not been verified.
@@ -169,9 +173,12 @@ this accepts has not been verified.
 
 A node a path can come back to may run 5 times unless it says otherwise,
 so a loop is bounded without every step saying so. To tighten or loosen
-it, set `max_visits` on any one node of the loop. Reaching a bound fails
-the workflow with an error naming the step, the bound, where it came
-from and the edge taken.
+it, set `max_visits` on any one node of the loop. Reaching a bound asks
+a person whether to grant more visits; unattended, with no rule that
+answers, it fails the workflow with an error naming the step, the bound,
+where it came from and the edge taken. A program step that gives the
+same outcome and data three times in a row is asked about the same way.
+See [RFC 0003](0003-step-settings-and-limits.md), sections 19 and 21.
 
 ### Sections
 
@@ -186,13 +193,19 @@ and be none. Unknown keys are errors.
 |---|---|---|
 | `run` | program | script path within the skill |
 | `tool`, `args` | program | a tool to call instead, with fixed arguments |
+| `flow` | program | a workflow to call instead: a skill's name, or `./<path>.md` in this skill; see [RFC 0002](0002-nesting-and-children.md) |
 | `with` | all | the step's inputs, by name |
 | `outputs` | all | schema of the step's data, by outcome |
 | `tools` | model | tools the model may call; none if absent |
-| `context` | model | `session` (default) or `fresh`; see [Context](#context-spiked) |
+| `context` | model, call | `session` or `fresh`, a child session; see [Context](#context-spiked). `session` is the default, except for a model step that asks for another model than its workflow's, which defaults to `fresh` (RFC 0003, section 14) |
+| `dir`, `instructions` | fresh model, fresh call | the child's working directory, and a file of the skill added to its instructions (RFC 0002, section 10) |
+| `model`, `thinking` | model; `model` also a fresh call | the model a step asks and how hard it reasons; the frontmatter's `model` and `thinking` are the workflow's defaults (RFC 0003, section 14) |
+| `timeout` | script, tool, model | a duration past which the step fails and asks to be retried (RFC 0003, section 13) |
+| `policy` | model, call | `allow` and `deny` rules in agentpolicy's grammar, which can only narrow what the host permits; on a call, for every model step it calls (RFC 0003, section 17) |
+| `child` | fresh model | a child kept across the visits and steps that name it (RFC 0002, section 11) |
 | `outcomes` | all | ways the node can end; `[ok]` if absent |
 | `unattended` | person | outcome, and data, taken when nobody can be asked |
-| `judge` | person | that a model may answer: `criteria`, `outcomes` it may choose, `tools`, `max_returns` |
+| `judge` | person | that a model may answer: `criteria`, `outcomes` it may choose, `tools`, `max_returns`, `policy` |
 | `max_visits` | all | how often the node may run; if absent, 5 for a node on a loop and 1 for any other |
 
 The text under a model or person node is its prompt.
@@ -208,6 +221,9 @@ inputs:                      # frontmatter, as workflow_call has
 outputs:
   summary: ${{ steps.score.outputs.summary }}
 ```
+
+Outputs may instead be given by outcome, as a step's are; see
+[RFC 0002](0002-nesting-and-children.md).
 
 ```yaml
 tool: git_tag
@@ -247,7 +263,7 @@ A reference reads the **latest** result of a step, since a graph may loop.
 
 `with` is what a step is handed, not all it can see. A model step reads
 the whole transcript, earlier results included, unless its `context` is
-`fresh`.
+`fresh`, when it works in a child session that sees only its `with`.
 
 The program builds a call's arguments from recorded results, so no model
 retypes a value on its way to a tool, and the call records exactly what
@@ -326,8 +342,11 @@ shows which turns the program took, and request hashes reproduce.
 ### An instance
 
 The first call of an instance is `flow_start`, which carries the
-workflow's name, its inputs, the digest of its definition, the
-definition itself and the record's format version. Replay begins there,
+workflow's name, its inputs, the digest of its definition and of every
+workflow it can call, the definitions themselves, the record's format
+version, the run's key and the bound on nesting. A call's start carries
+the key of the run that called it and the calling call instead
+([RFC 0002](0002-nesting-and-children.md)). Replay begins there,
 so whatever the transcript held before is ignored. Resuming with a
 definition whose digest differs is refused.
 
@@ -369,7 +388,7 @@ with the instance, a status, a reason, the path taken and the outputs:
 | Status | When |
 |---|---|
 | `done` | the last step finished; the report follows |
-| `failed` | a step failed with nobody to retry it, a person chose `stop`, a visit bound was reached, or the outputs could not be made. The run then ends in the same error as before |
+| `failed` | a step failed with nobody to retry it, a person chose `stop`, a bound was reached with nobody to grant more (the ending's `limit` names it), or the outputs could not be made. The run then ends in the same error as before |
 | `abandoned` | another instance was asked for over an unfinished one; written before the new `flow_start` |
 
 An instance with no `flow_end` is `running`: waiting, stalled,
@@ -377,10 +396,10 @@ interrupted, or left by a host that never prompted again. A run stopped
 by a model error or a turn limit has not left the workflow. Only the
 program may call `flow_end`.
 
-`Instances(transcript)`, given every item of a session's path, lists the
-runs with where each
-starts and ends, its status, the definition it ran and its state, and
-`Instance.At` gives the state after any item. It needs neither the
+`Runs(transcript, open)`, given every item of a session's path, lists the
+runs nobody called with where each
+starts and ends, its status, outcome, the definition it ran, its state
+and the runs it called, and `Instance.At` gives the state after any item. It needs neither the
 current workflow nor a graph: it reads the recorded definition, checks it
 against the digest, and replays. A replay that disagrees with the
 recorded ending, an unknown format, or a definition that does not match
@@ -414,20 +433,26 @@ the model sees and can correct.
 ### Failure
 
 A failed step raises a `flow_ask` with the outcomes `retry` and `stop`.
-`retry` runs the step again under a new call ID. `stop` fails the
-workflow. The host's rules may answer; unattended, with no rule that
-does, the workflow fails.
+`retry` runs the step again under a new call ID; a model step opens
+again, its messages naming the attempt. `stop` fails the workflow. The
+host's rules may answer; unattended, with no rule that does, the
+workflow fails. A model step fails when its model reports with
+`flow_stuck` that it cannot do it and the step draws no edge for `stuck`,
+or when it runs past its timeout (RFC 0003, sections 13 and 20).
 
 ### Position
 
 Position is a pure function of the graph and the record, meaning every
 item that happened, in order. Program steps are matched by call ID
-(`flow_<workflow>_<instance>_<node>_v<visit>`, with `-a<attempt>` on a
-retry), model steps by a successful `flow_finish` naming the node, made
-after the node became current, so one model turn cannot finish a step it
-has not yet been given. Nothing else is stored. Names are bounded, 16
-characters for a workflow and 20 for a node, because providers limit
-call IDs.
+(`flow_<key>_<node>_v<visit>`, with `-a<attempt>` on a retry, where the
+key is the run's, drawn at its start), model steps by a successful
+`flow_finish` naming the run and the node, made after the node became
+current, so one model turn cannot finish a step it has not yet been
+given. Nothing else is stored. A node's ID is bounded to 20 characters,
+because providers limit call IDs; a workflow's name is not in them.
+Record format 1 put the workflow's name, cut to 16 characters, and an
+instance in place of the key. It is no longer read: a record of it is
+refused (RFC 0002, section 8).
 
 **The record and what a model is sent are different things** (spiked).
 A compaction shortens the model's view, and so does an omission read back
@@ -440,19 +465,19 @@ it:
   a model as its inputs and nothing else is restored to the conversation
   to find them;
 - the host's `Transform` is given only what a model may read: `flow_start`
-  and what a blind judge did are gone before it, so no summary carries
-  them. It is not run on a program's turn, which no model reads, nor for a
-  `fresh` step or a judge, whose input is the record from the step's
-  opening message on;
+  and a blind judge's verdict are gone before it, so no summary carries
+  them. A `fresh` step and a judge work in child sessions, each with the
+  transform its host's opener gives it;
 - a record that does not hold the calls of the transcript it is read
   beside is refused (`ErrRecordBehind`), so a recorder that has stopped,
   or the wrong session, does not rewind a run. `Drive` takes the same
   option.
 
-A compaction costs some request hashes. A `fresh` step's or a judge's
-request after a fold leaves the summary out, which the session format
-cannot describe, so it is recorded as unverifiable; with
-`agentturn/compact` every other request kept its hash. The recorder must
+A compaction no longer costs request hashes. A `fresh` step's or a
+judge's request after a fold once left the summary out, which the
+session format cannot describe, so it was recorded as unverifiable. Each
+now works in its own child session and is sent the whole of it, so with
+`agentturn/compact` every request keeps its hash, the child's included. The recorder must
 be told of folds (`compact.WithOnFold(rec.Fold)`).
 
 With claude-haiku-5-5, 2026-11-26, `take-issue` on a throwaway
@@ -567,29 +592,31 @@ across sessions is the host's.
 **Shadow judges after the answer** (spiked), so there is no verdict for
 anyone to see while answering. The question is put in mode `shadow`; the
 answer is held; the judge runs as above, never shown it; then the step
-finishes with the person's answer, whatever the verdict. What the judge
-said and looked at is left out of every later request of the working
-model, as omissions that keep the request hashes. It never blocks: two
-refused verdicts, or a reply in words followed by anything said (`Drive`
-says it at once), finishes the step with no verdict. Answers from rules or
-an unattended default are not judged. Limits: a later visit's person can
-read an earlier verdict in the transcript, so only a step's first answer
-in an instance is surely blind; a front that shows the transcript shows
-the judge's turn as it happens; the run waits for the judge before going
-on; and if the judge's request fails, the next prompt retries it and the
-judge reads that prompt.
+finishes with the person's answer, whatever the verdict. The judge's
+look is in its own session, and its call and verdict in the caller's are
+left out of every later request of the working model, as omissions that
+keep the request hashes. It never blocks: a judge that stops twice, or
+gives two verdicts it may not give, comes to no verdict and the step
+finishes without one. Answers from rules or an unattended default are
+not judged. Limits: a later visit's person can read an earlier verdict
+in the record, so only a step's first answer in an instance is surely
+blind; and the run waits for the judge before going on.
 
-A judge is a request of its own: the node's question, `with` values,
-criteria and tools, from the node's opening message on, with none of the
-conversation that did the work. `JudgeModel` may name another model. Its
-verdict is a `flow_judge` call with a reason, which answers nothing: the
-question is still asked by `flow_ask`, and the host decides there whether
-the verdict stands. So position stays a function of the transcript, and
-what the host trusts is not written into it. `ask` is reserved for handing
-a question back; unattended, a handed-back question takes the `unattended`
-outcome. A retry of a failed step is never judged. A judge that only talks
-is reminded once, then is `ErrStalled`; it does not yet fall back to the
-person.
+A judge works in a child session of its own (RFC 0002, section 12),
+opened with the host's `Children`: the node's question, `with` values,
+criteria and tools, with none of the conversation that did the work. The
+program makes `flow_judge` where the question is asked and holds it
+while the judge looks; the judge's model ends its look with `flow_judge`
+and a reason, and the program's call is let go with that verdict. The
+verdict answers nothing: the question is still asked by `flow_ask`, and
+the host decides there whether the verdict stands. So position stays a
+function of the record, and what the host trusts is not written into it.
+`JudgeModel` names the model the child is asked for. `ask` is reserved
+for handing a question back; unattended, a handed-back question takes
+the `unattended` outcome. A retry of a failed step is never judged. A
+judge that only talks is reminded once; if it talks again it has given
+no verdict, and the question goes to the person, marked as handed back
+with none (`Verdict.None`).
 
 **A judge cannot send work back forever.** An outcome that leads back to
 the same question sends the work to a model that read the same inputs, so
@@ -687,8 +714,8 @@ One row for each `flow_ask` that is not a retry:
 | question, inputs shown | the question: `question`, `with` |
 | answer, reason, who | the output: `outcome`, `data`, `reason`, `by` (absent for a person) |
 | asked, answered | timestamps of the `hold` and `proceed` decisions |
-| verdict, its reason | the `flow_judge` call; under `advise`, also the question's `advice` |
-| judge's model, criteria, looks, cost | the judge's config, response and item entries |
+| verdict, its reason | the output of the program's `flow_judge` call; under `advise`, also the question's `advice` |
+| judge's model, criteria, looks, cost | the judge's child session: its start, responses and item entries |
 | blind | mode `shadow` |
 | unanswered | a question with no output: kept, not dropped |
 
@@ -726,22 +753,22 @@ for the person's.
 A model node chooses what it reads:
 
 - `session`, the default: the whole transcript.
-- `fresh`: the transcript from the opening message of this visit, so the
-  step's own turns and nothing before them. It still gets the host's
-  instructions and the step's prompt and inputs, and it has no other way
-  to know anything, so `with` must carry what it needs. The record keeps
-  its request hashes, since the session format can say that items were
-  left out. If the opening message is missing the request fails; it is
-  never widened.
+- `fresh`: a child session of its own (RFC 0002, section 9). The step
+  runs as a workflow of one step, `<workflow>:<step>`, whose start, turns
+  and finish are in the child; the caller holds a `flow_call` while it
+  works and is given its result. The child gets the instructions its
+  host's opener gives it, its settings' instructions, and the step's
+  prompt and inputs, and has no other way to know anything, so `with`
+  must carry what it needs. Its settings may give it its own working
+  directory, model and instructions, and `child:` keeps one child across
+  the visits and steps that name it.
 
-A message the person sends while a fresh step is only about to open is
-not in what that step reads. A fresh step does not limit its tools: with
-`read` it can still look at anything the others could.
+A message the person sends while a fresh step works is not in what that
+step reads; the caller takes no prompt while it holds the call. A fresh
+step does not limit its tools beyond what its child is given: with
+`read` it can still look at anything its workspace holds.
 
-Proposed: a list of node IDs whose results to include, and recording a
-workflow into its own child session linked to the one it was invoked
-from, which it leaves untouched. A reviewer that inherits a session also
-inherits its blind spots, so both have uses.
+Proposed: a list of node IDs whose results to include.
 
 ## Determinism and trust
 
@@ -769,7 +796,8 @@ Offline, with a scripted model:
   and the unattended default behave as described.
 - Fixed: one model turn could finish two steps; a transform could send
   the workflow back to its start.
-- No change to agentturn or the session format was needed.
+- No change to agentturn or the session format was needed, for nesting
+  in a shared context either (RFC 0002).
 
 With real models, one model step with two outcomes after a program step,
 8 trials each (6 for the local model), 2026-11-25:

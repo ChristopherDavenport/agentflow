@@ -34,6 +34,25 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 	if g.Outputs != nil {
 		front.add("outputs", valuesNode(g.Outputs))
 	}
+	if g.OutputsBy != nil {
+		out := mapping()
+		for _, outcome := range slices.Sorted(maps.Keys(g.OutputsBy)) {
+			out.add(outcome, valuesNode(g.OutputsBy[outcome]))
+		}
+		front.add("outputs", &out.Node)
+	}
+	for _, s := range []struct {
+		key string
+		set bool
+		v   any
+	}{{"max_depth", g.MaxDepth != 0, g.MaxDepth}, {"max_steps", g.MaxSteps != 0, g.MaxSteps}, {"model", g.Model != "", g.Model}, {"thinking", g.Thinking != "", g.Thinking}} {
+		if !s.set {
+			continue
+		}
+		if err := front.set(s.key, s.v); err != nil {
+			return nil, err
+		}
+	}
 	if len(front.Content) > 0 {
 		y, err := yaml.Marshal(&front.Node)
 		if err != nil {
@@ -56,19 +75,29 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 			fmt.Fprintf(&b, "  %s -->%s %s\n", n.ID, label, n.Next[outcome])
 		}
 	}
-	// Where a step branches, draw the outcomes that stop the workflow.
-	end := "done"
-	for slices.ContainsFunc(g.Nodes, func(n agentflow.Node) bool { return n.ID == end }) {
-		end += "_"
-	}
+	// Draw every end that is named, and where a step branches each
+	// outcome that stops the workflow, as an end named for it: an end's
+	// name is the outcome the workflow ends with.
 	for _, n := range g.Nodes {
-		if len(n.Outcomes) < 2 {
-			continue
-		}
-		for _, outcome := range n.Outcomes {
-			if n.Next[outcome] == "" {
-				fmt.Fprintf(&b, "  %s -->|%s| %s((%s))\n", n.ID, outcome, end, end)
+		drawn := slices.Sorted(maps.Keys(n.Ends))
+		if len(n.Outcomes) >= 2 {
+			for _, outcome := range n.Outcomes {
+				named := slices.ContainsFunc(g.Nodes, func(m agentflow.Node) bool { return m.ID == outcome })
+				if n.Next[outcome] == "" && n.Ends[outcome] == "" && !named && !slices.Contains(reserved, outcome) {
+					drawn = append(drawn, outcome)
+				}
 			}
+		}
+		for _, outcome := range drawn {
+			label := "|" + outcome + "|"
+			if outcome == agentflow.OK {
+				label = ""
+			}
+			end := n.Ends[outcome]
+			if end == "" {
+				end = outcome
+			}
+			fmt.Fprintf(&b, "  %s -->%s %s((%s))\n", n.ID, label, end, end)
 		}
 	}
 	b.WriteString("```\n")
@@ -96,7 +125,14 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 	}
 	written := *g
 	written.Sources = ""
-	if back.Digest() != written.Digest() {
+	// The file names a step's instructions, and loading reads them.
+	written.Nodes = slices.Clone(g.Nodes)
+	for i := range written.Nodes {
+		if written.Nodes[i].InstructionsFile != "" {
+			written.Nodes[i].Instructions = ""
+		}
+	}
+	if back.OwnDigest() != written.OwnDigest() {
 		return nil, errors.New("workflow: the graph cannot be written as a file without changing it")
 	}
 	return out, nil
@@ -128,6 +164,7 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 		}
 	}
 	set("run", n.Script != "", n.Script)
+	set("flow", n.Flow != "", n.Flow)
 	set("tool", n.Tool != "", n.Tool)
 	if n.Args != nil {
 		var args map[string]any
@@ -141,6 +178,13 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 	}
 	set("tools", n.Tools != nil, n.Tools)
 	set("context", n.Context != "", n.Context)
+	set("dir", n.Dir != "", n.Dir)
+	set("model", n.Model != "", n.Model)
+	set("thinking", n.Thinking != "", n.Thinking)
+	set("timeout", n.Timeout != 0, n.Timeout.String())
+	set("policy", n.Policy != nil, policyOut(n.Policy))
+	set("instructions", n.InstructionsFile != "", n.InstructionsFile)
+	set("child", n.Child != "", n.Child)
 	set("outcomes", n.Outcomes != nil, n.Outcomes)
 	if n.Data != nil {
 		out := mapping()
@@ -163,6 +207,9 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 		}
 		if j.Returns != 0 {
 			judge["max_returns"] = j.Returns
+		}
+		if j.Policy != nil {
+			judge["policy"] = policyOut(j.Policy)
 		}
 		set("judge", true, judge)
 	}
@@ -220,4 +267,31 @@ func field(s *agenttool.Schema, required bool) *yaml.Node {
 		m.add("properties", fields(s))
 	}
 	return &m.Node
+}
+
+// policyOut is a policy as a section writes it: a rule alone where it
+// has no note.
+func policyOut(p *agentflow.Policy) map[string]any {
+	if p == nil {
+		return nil
+	}
+	list := func(rules []agentflow.PolicyRule) []any {
+		out := []any{}
+		for _, r := range rules {
+			if r.Note == "" {
+				out = append(out, r.Rule)
+			} else {
+				out = append(out, map[string]any{"rule": r.Rule, "note": r.Note})
+			}
+		}
+		return out
+	}
+	out := map[string]any{}
+	if p.Allow != nil {
+		out["allow"] = list(p.Allow)
+	}
+	if p.Deny != nil {
+		out["deny"] = list(p.Deny)
+	}
+	return out
 }

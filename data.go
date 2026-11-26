@@ -113,7 +113,7 @@ func (n *Node) check(res Result) error {
 	if !slices.Contains(n.outcomes(), res.Outcome) {
 		return fmt.Errorf("outcome %q: want one of %s", res.Outcome, strings.Join(n.outcomes(), ", "))
 	}
-	if err := checkData(n.Data[res.Outcome], res.Data); err != nil {
+	if err := checkData(n.schemas()[res.Outcome], res.Data); err != nil {
 		return fmt.Errorf("data of outcome %q: %w", res.Outcome, err)
 	}
 	return nil
@@ -206,7 +206,7 @@ func (f facts) after(n *Node, outcome string) facts {
 			out[k] = true
 		}
 	}
-	if s := n.Data[outcome]; s != nil {
+	if s := n.schemas()[outcome]; s != nil {
 		for _, field := range s.Required {
 			out[n.ID+"."+field] = true
 		}
@@ -268,7 +268,7 @@ func (g *Graph) checkRefs() []error {
 			bad("no step %q", r.step)
 		case !have[r.step]:
 			bad("some path gets here without running %q", r.step)
-		case len(r.path) > 0 && len(from.Data) > 0 && !have[r.step+"."+r.path[0]]:
+		case len(r.path) > 0 && len(from.schemas()) > 0 && !have[r.step+"."+r.path[0]]:
 			bad("%q does not certainly produce %q on every path here", r.step, r.path[0])
 		}
 	}
@@ -287,8 +287,9 @@ func (g *Graph) checkRefs() []error {
 			if n.Next[outcome] != "" {
 				continue
 			}
-			for _, name := range slices.Sorted(maps.Keys(g.Outputs)) {
-				if v := g.Outputs[name]; plain(v) {
+			outputs := g.outputs(n.ending(outcome))
+			for _, name := range slices.Sorted(maps.Keys(outputs)) {
+				if v := outputs[name]; plain(v) {
 					use("output "+name+" after "+n.ID+" "+outcome, v, at.after(n, outcome))
 				}
 			}
@@ -341,24 +342,35 @@ func (g *Graph) checkAlternatives() []error {
 			})
 		}
 	}
-	for _, name := range slices.Sorted(maps.Keys(g.Outputs)) {
-		check("output "+name, g.Outputs[name], func(refs []ref) bool {
-			at := g.reached(refs)
-			for i := range g.Nodes {
-				n := &g.Nodes[i]
-				for _, outcome := range n.outcomes() {
-					if n.Next[outcome] != "" {
-						continue
-					}
-					for have := range at[n.ID] {
-						if n.available(refs, have, outcome) == 0 {
-							return false
+	byOutcome := map[string]map[string]Value{"": g.Outputs}
+	if g.OutputsBy != nil {
+		byOutcome = g.OutputsBy
+	}
+	for _, end := range slices.Sorted(maps.Keys(byOutcome)) {
+		outputs := byOutcome[end]
+		for _, name := range slices.Sorted(maps.Keys(outputs)) {
+			where := "output " + name
+			if end != "" {
+				where = "output " + name + " of " + end
+			}
+			check(where, outputs[name], func(refs []ref) bool {
+				at := g.reached(refs)
+				for i := range g.Nodes {
+					n := &g.Nodes[i]
+					for _, outcome := range n.outcomes() {
+						if n.Next[outcome] != "" || end != "" && n.ending(outcome) != end {
+							continue
+						}
+						for have := range at[n.ID] {
+							if n.available(refs, have, outcome) == 0 {
+								return false
+							}
 						}
 					}
 				}
-			}
-			return true
-		})
+				return true
+			})
+		}
 	}
 	return errs
 }
@@ -380,7 +392,7 @@ func (g *Graph) possible(r ref) error {
 		return nil
 	}
 	for _, outcome := range n.outcomes() {
-		if s := n.Data[outcome]; s == nil && len(n.Data) == 0 || s != nil && declares(s, r.path[0]) {
+		if s := n.schemas()[outcome]; s == nil && len(n.schemas()) == 0 || s != nil && declares(s, r.path[0]) {
 			return nil
 		}
 	}
@@ -399,8 +411,8 @@ func (n *Node) available(refs []ref, have uint, outcome string) uint {
 			continue
 		}
 		have &^= 1 << i
-		s := n.Data[outcome]
-		if len(r.path) == 0 || len(n.Data) == 0 || s != nil && slices.Contains(s.Required, r.path[0]) {
+		s := n.schemas()[outcome]
+		if len(r.path) == 0 || len(n.schemas()) == 0 || s != nil && slices.Contains(s.Required, r.path[0]) {
 			have |= 1 << i
 		}
 	}

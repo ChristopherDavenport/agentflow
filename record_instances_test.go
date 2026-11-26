@@ -21,7 +21,7 @@ var clean = says{finishTool, `{"step":"review","outcome":"clean"}`}
 
 // recorded runs a graph in a stored session and returns a function that
 // reads the instances back from the store.
-func recorded(t *testing.T, g *Graph, tool agenttool.Tool, m *cast, opts ...Option) (*agentturn.Agent, func() (agentturn.Transcript, []Instance)) {
+func recorded(t *testing.T, g *Graph, tool agenttool.Tool, m *cast, opts ...Option) (*agentturn.Agent, func() (agentturn.Transcript, []*Instance)) {
 	t.Helper()
 	ctx := context.Background()
 	store, err := jsonl.Open(t.TempDir())
@@ -32,20 +32,20 @@ func recorded(t *testing.T, g *Graph, tool agenttool.Tool, m *cast, opts ...Opti
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := Apply(g, agentturn.Config{Model: m, ModelName: "worker", Tools: []agenttool.Tool{tool}}, opts...)
+	cfg, err := kinApply(g, agentturn.Config{Model: m, ModelName: "worker", Tools: []agenttool.Tool{tool}}, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	a := agentturn.New(cfg)
 	rec.Attach(a)
-	return a, func() (agentturn.Transcript, []Instance) {
+	return a, func() (agentturn.Transcript, []*Instance) {
 		got, err := store.Open(ctx, s.ID())
 		if err != nil {
 			t.Fatal(err)
 		}
 		checkHashes(t, got)
 		items := pathItems(got)
-		all, err := Instances(items)
+		all, err := Runs(items, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -90,7 +90,7 @@ func TestATrimmedTranscriptIsRefused(t *testing.T) {
 	var ran []string
 	g := release()
 	config := func(m *cast) agentturn.Config {
-		cfg, err := Apply(g, agentturn.Config{Model: m, ModelName: "w", Tools: []agenttool.Tool{scriptTool(&ran)}})
+		cfg, err := kinApply(g, agentturn.Config{Model: m, ModelName: "w", Tools: []agenttool.Tool{scriptTool(&ran)}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -111,7 +111,7 @@ func TestATrimmedTranscriptIsRefused(t *testing.T) {
 	if _, err := g.Replay(trimmed); !errors.Is(err, ErrPositionLost) {
 		t.Errorf("replay: %v", err)
 	}
-	if _, err := Instances(trimmed); !errors.Is(err, ErrPositionLost) {
+	if _, err := Runs(trimmed, nil); !errors.Is(err, ErrPositionLost) {
 		t.Errorf("instances: %v", err)
 	}
 	ran = nil
@@ -143,7 +143,11 @@ func TestARecordSaysWhenARunWasEnteredAndLeft(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.Prompt(context.Background(), again); err != nil {
+	end, err := a.Prompt(context.Background(), again)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Drive(context.Background(), g, a, end); err != nil {
 		t.Fatal(err)
 	}
 	// The model is never shown the definition, which holds the criteria.
@@ -205,7 +209,8 @@ func TestEveryWayOfLeavingIsWritten(t *testing.T) {
 		g.node("gather").MaxVisits = 1
 		fixed := says{finishTool, `{"step":"fix","outcome":"ok"}`}
 		a, read := recorded(t, g, scriptTool(&ran), &cast{script: []says{found, verdict("fix"), fixed}}, Delegate(Decide))
-		if end := run(a); !errors.Is(end.Err, ErrVisits) {
+		end, _, _ := Drive(context.Background(), g, a, run(a))
+		if end = stopAt(t, g, a, end, "visits"); !errors.Is(end.Err, ErrVisits) {
 			t.Errorf("err = %v", end.Err)
 		}
 		_, all := read()

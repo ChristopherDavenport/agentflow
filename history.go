@@ -75,17 +75,16 @@ func (f *flow) read(ctx context.Context, local agentturn.Transcript) (State, age
 	return st, all, err
 }
 
-// visible drops from input what no model may read: flow_start, and what
-// a judge did after a person had answered.
+// visible drops from input what no model may read: flow_start, and a
+// judge's look at an answer a person gave, which it judged unseen.
 func (f *flow) visible(input openresponses.Items, record agentturn.Transcript, st State) openresponses.Items {
 	if f.history == nil {
-		// The input is what was replayed, so its places are the state's.
-		return withoutStarts(without(input, st.unseen))
+		return withoutHidden(input)
 	}
 	// The input is a view of the record, so items are known by what they
 	// are rather than where.
 	shown := map[string]bool{}
-	for _, item := range withoutStarts(without(openresponses.Items(record), st.unseen)) {
+	for _, item := range withoutHidden(openresponses.Items(record)) {
 		shown[itemKey(item)] = true
 	}
 	hidden := map[string]bool{}
@@ -127,12 +126,6 @@ func itemKey(item openresponses.Item) string {
 	return item.ItemType() + " " + string(b)
 }
 
-// ownInput says the step's model reads only from its opening message, so
-// there is nothing of the conversation to shorten.
-func (f *flow) ownInput(st State) bool {
-	return f.judging(st) || modelTurn(st) && st.Node != nil && st.Node.Context == ContextFresh
-}
-
 // transform runs the host's. With a history it is given only what a
 // model may read, so nothing it summarises can hand back what was kept
 // from one. Without, what it returns must still say where the workflow
@@ -146,13 +139,10 @@ func (f *flow) transform(host func(context.Context, agentturn.Transcript) (agent
 			}
 			return out, f.samePosition(t, out)
 		}
+		// A failed run's error is the request's to report.
 		st, all, err := f.read(ctx, t)
 		if all == nil {
 			return nil, err
-		}
-		// A failed run's error is the request's to report.
-		if f.ownInput(st) {
-			return t, nil
 		}
 		return host(ctx, agentturn.Transcript(f.visible(openresponses.Items(t), all, st)))
 	}
@@ -232,6 +222,15 @@ func note(c *openresponses.FunctionCall, result string, answered bool) string {
 	_ = decode([]byte(result), &res)
 	switch c.Name {
 	case judgeTool:
+		if strings.HasPrefix(c.CallID, reserved) {
+			var a callArgs
+			var v Verdict
+			_ = decode([]byte(c.Arguments), &a)
+			if decode([]byte(result), &v) != nil || !answered {
+				return fmt.Sprintf("%sa separate judge model, not the assistant, was asked to look at step %q in a session of its own: %s", recordPrefix, a.Step, result)
+			}
+			return fmt.Sprintf("%sa separate judge model, not the assistant, looked at step %q in a session of its own and came to %s, giving the reason %q", recordPrefix, a.Step, v.Outcome, v.Reason)
+		}
 		var a judgeArgs
 		_ = decode([]byte(c.Arguments), &a)
 		return fmt.Sprintf("%sa separate judge model, not the assistant, gave a verdict on step %q: %s, giving the reason %q", recordPrefix, a.Step, a.Outcome, a.Reason)
@@ -251,6 +250,14 @@ func note(c *openresponses.FunctionCall, result string, answered bool) string {
 		var e Ending
 		_ = decode([]byte(c.Arguments), &e)
 		return fmt.Sprintf("%sthe workflow run ended: %s. %s", recordPrefix, e.Status, e.Reason)
+	case callTool:
+		var a callArgs
+		_ = decode([]byte(c.Arguments), &a)
+		where := ""
+		if a.Context == ContextFresh {
+			where = " in a session of its own"
+		}
+		return fmt.Sprintf("%sthe workflow, not the assistant, called the workflow %s%s, which came to: %s", recordPrefix, a.Workflow, where, result)
 	case ScriptTool:
 		var sc ScriptCall
 		_ = decode([]byte(c.Arguments), &sc)
@@ -261,10 +268,10 @@ func note(c *openresponses.FunctionCall, result string, answered bool) string {
 
 // notice says item is something the workflow says to the model.
 func notice(m *openresponses.Message) bool {
-	prefixes := []string{beginPrefix, nudgePrefix, noVerdict}
+	prefixes := []string{beginPrefix, nudgePrefix}
 	switch m.Role {
 	case openresponses.RoleDeveloper:
-		prefixes = []string{invocationPrefix}
+		prefixes = []string{invocationPrefix, abandonText}
 	case openresponses.RoleUser:
 	default:
 		return false

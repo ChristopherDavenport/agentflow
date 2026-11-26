@@ -36,6 +36,8 @@ with:
 with:
   paths: ${{ steps.filter.outputs.paths }}
 context: fresh
+model: fake
+instructions: prompts/review.md
 outputs:
   ok:
     summary: {type: string, required: true}

@@ -1,3 +1,5 @@
+github.com/ChristopherDavenport/agentpolicy v0.0.20 h1:QMOhrSDLho9Bjz0ZmUU7dwimfR0D26vrDZOPXbtIylg=
+github.com/ChristopherDavenport/agentpolicy v0.0.20/go.mod h1:BvueWqC8eILGm1LuDfUy1WJFJy1GdpDHWac5Ax7Twps=
 github.com/ChristopherDavenport/agentsession v0.0.41 h1:9FYrfnavlF2DrNKNJx3LdnBL/PGnHlv5FnkZLSdA7tc=
 github.com/ChristopherDavenport/agentsession v0.0.41/go.mod h1:p1YUil1k6AlU0R5d8TogaYBuHQRNRSD5gN4ALAX2TWY=
 github.com/ChristopherDavenport/agentskill v0.0.12 h1:8rAmdk+CC5TNnbGjKjfEObAZM9ZzsXd0iyz5kp3wAsE=

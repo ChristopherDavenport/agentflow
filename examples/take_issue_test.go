@@ -46,7 +46,7 @@ func (m *scripted) CreateStream(_ context.Context, req openresponses.Request, si
 	if err != nil {
 		return err
 	}
-	if err := call.Arguments(next.args); err != nil {
+	if err := call.Arguments(withRun(req, next.args)); err != nil {
 		return err
 	}
 	if err := call.Close(); err != nil {
@@ -140,8 +140,9 @@ func (r repository) run(t *testing.T, m *scripted, answers []agentflow.Result, o
 	writer := agenttool.New("write", "Write a file.", func(ctx context.Context, a writeArgs) (string, error) {
 		return "written", ws.WriteFile(ctx, a.Path, []byte(a.Content), 0o644)
 	})
-	cfg, err := agentflow.Apply(w.Graph, agentturn.Config{Model: m, ModelName: "scripted",
-		Tools: append(tools(ws.FS()), writer, script.New(ws, time.Minute, script.Files(w.Files)))}, opts...)
+	all := append(tools(ws.FS()), writer, script.New(ws, time.Minute, script.Files(w.Files)))
+	cfg, err := agentflow.Apply(w.Graph, agentturn.Config{Model: m, ModelName: "scripted", Tools: all},
+		append([]agentflow.Option{inMemory(m, "scripted", all)}, opts...)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,6 +152,9 @@ func (r repository) run(t *testing.T, m *scripted, answers []agentflow.Result, o
 		t.Fatal(err)
 	}
 	end, err := a.Prompt(ctx, item)
+	if err == nil {
+		end, _, err = agentflow.Drive(ctx, w.Graph, a, end)
+	}
 	for err == nil && end.Reason == agentturn.ReasonInputRequired {
 		if len(answers) == 0 {
 			t.Fatalf("an unexpected question: %s", end.Pending[0].Call.Arguments)
@@ -160,7 +164,7 @@ func (r repository) run(t *testing.T, m *scripted, answers []agentflow.Result, o
 			t.Fatalf("%v: %s", err2, end.Pending[0].Call.Arguments)
 		}
 		answers = answers[1:]
-		end, err = a.Resume(ctx, ans)
+		end, _, err = agentflow.Resume(ctx, w.Graph, a, []agentturn.Answer{ans})
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -331,16 +335,27 @@ func TestRealDefinitionsReadBack(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		args, err := json.Marshal(map[string]any{"workflow": g.Name, "digest": g.Digest(), "format": agentflow.RecordFormat, "definition": json.RawMessage(b)})
+		args, err := json.Marshal(map[string]any{"workflow": g.Name, "digest": g.Digest(), "format": agentflow.RecordFormat, "definition": json.RawMessage(b), "run": "0123456789"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		all, err := agentflow.Instances(agentturn.Transcript{
-			&openresponses.FunctionCall{CallID: "flow_x_start", Name: "flow_start", Arguments: string(args)},
-			&openresponses.FunctionCallOutput{CallID: "flow_x_start", Output: openresponses.FunctionCallOutputData{Text: `{"outcome":"ok"}`}},
-		})
+		all, err := agentflow.Runs(agentturn.Transcript{
+			&openresponses.FunctionCall{CallID: "flow_0123456789_start", Name: "flow_start", Arguments: string(args)},
+			&openresponses.FunctionCallOutput{CallID: "flow_0123456789_start", Output: openresponses.FunctionCallOutputData{Text: `{"outcome":"ok"}`}},
+		}, nil)
 		if err != nil || len(all) != 1 || all[0].Problem != "" || all[0].Graph == nil {
-			t.Errorf("%s: %+v, %v", dir, all, err)
+			t.Errorf("%s: %q, %v", dir, all[0].Problem, err)
 		}
 	}
+}
+
+// withRun names in a finish or a verdict the run the request's
+// instructions name, as a model reads it from them.
+func withRun(req openresponses.Request, args string) string {
+	_, rest, ok := strings.Cut(req.Instructions, `, run "`)
+	if !ok || !strings.HasPrefix(args, "{") || strings.Contains(args, `"run":`) {
+		return args
+	}
+	run, _, _ := strings.Cut(rest, `"`)
+	return `{"run":"` + run + `",` + args[1:]
 }

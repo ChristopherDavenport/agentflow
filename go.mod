@@ -15,3 +15,5 @@ require (
 	github.com/ChristopherDavenport/agentworkspace v0.0.12
 	go.yaml.in/yaml/v3 v3.0.5
 )
+
+require github.com/ChristopherDavenport/agentpolicy v0.0.20

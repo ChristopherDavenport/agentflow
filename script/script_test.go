@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -113,7 +114,7 @@ func (m *model) CreateStream(_ context.Context, req openresponses.Request, sink 
 	if err != nil {
 		return err
 	}
-	if err := call.Arguments(args); err != nil {
+	if err := call.Arguments(withRun(req, args)); err != nil {
 		return err
 	}
 	if err := call.Close(); err != nil {
@@ -431,5 +432,65 @@ func TestTheModelCannotRunScripts(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(ws.Root(), "ran")); !os.IsNotExist(err) {
 		t.Fatalf("the model ran a script: %v", err)
+	}
+}
+
+// withRun names in a finish or a verdict the run the request's
+// instructions name, as a model reads it from them.
+func withRun(req openresponses.Request, args string) string {
+	_, rest, ok := strings.Cut(req.Instructions, `, run "`)
+	if !ok || !strings.HasPrefix(args, "{") || strings.Contains(args, `"run":`) {
+		return args
+	}
+	run, _, _ := strings.Cut(rest, `"`)
+	return `{"run":"` + run + `",` + args[1:]
+}
+
+func TestSubConfinesAWorkspaceToADirectory(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "svc", "api"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "top.txt"), []byte("top"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := agentworkspace.NewLocal(dir, []string{"PATH=" + os.Getenv("PATH")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ws.Close() })
+	sub, err := script.Sub(ws, "svc/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "svc", "api"); sub.Root() != want || sub.Descriptor().Root != ws.Descriptor().Root && sub.Descriptor().Root != want {
+		t.Errorf("root = %s", sub.Root())
+	}
+	if err := sub.WriteFile(ctx, "note.txt", []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "svc", "api", "note.txt")); err != nil || string(b) != "hi" {
+		t.Errorf("wrote %q, %v", b, err)
+	}
+	if _, err := fs.ReadFile(sub.FS(), "note.txt"); err != nil {
+		t.Error(err)
+	}
+	out, err := sub.Exec(ctx, agentworkspace.Command{Args: []string{"pwd"}})
+	if err != nil || strings.TrimSpace(string(out.Stdout)) != filepath.Join(dir, "svc", "api") {
+		t.Errorf("pwd = %q, %v", out.Stdout, err)
+	}
+	for _, name := range []string{"../top.txt", "/top.txt"} {
+		if err := sub.WriteFile(ctx, name, nil, 0o644); !errors.Is(err, agentworkspace.ErrOutside) {
+			t.Errorf("wrote %s: %v", name, err)
+		}
+		if _, err := sub.Exec(ctx, agentworkspace.Command{Args: []string{"true"}, Dir: name}); !errors.Is(err, agentworkspace.ErrOutside) {
+			t.Errorf("ran in %s: %v", name, err)
+		}
+	}
+	for _, bad := range []string{"..", "/svc", "missing", "top.txt"} {
+		if _, err := script.Sub(ws, bad); err == nil {
+			t.Errorf("Sub(%q) was allowed", bad)
+		}
 	}
 }

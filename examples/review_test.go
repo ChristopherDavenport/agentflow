@@ -138,12 +138,14 @@ func TestLiveReview(t *testing.T) {
 		w = loadFrom(t, dir)
 	}
 	g := w.Graph
+	live := openresponses.NewClient(url).AsAdapter()
+	all := append(tools(ws.FS()), script.New(ws, 2*time.Minute, script.Files(w.Files)))
 	cfg, err := agentflow.Apply(g, agentturn.Config{
-		Model:     openresponses.NewClient(url).AsAdapter(),
+		Model:     live,
 		ModelName: model,
 		MaxTurns:  40,
-		Tools:     append(tools(ws.FS()), script.New(ws, 2*time.Minute, script.Files(w.Files))),
-	}, agentflow.Unattended())
+		Tools:     all,
+	}, agentflow.Unattended(), inMemory(live, model, all))
 	if err != nil {
 		t.Fatal(err)
 	}

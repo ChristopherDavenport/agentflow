@@ -33,10 +33,12 @@ type scriptArgs struct {
 	Name string `json:"name"`
 }
 
+// scriptTool runs a script that gives a new result each time, as one
+// that reads a changing repository does, so no loop it is on repeats.
 func scriptTool(ran *[]string) agenttool.Tool {
 	return agenttool.New("script", "Run a script.", func(_ context.Context, a scriptArgs) (Result, error) {
 		*ran = append(*ran, a.Name)
-		return Result{Outcome: OK}, nil
+		return Result{Outcome: OK, Data: map[string]any{"run": len(*ran)}}, nil
 	})
 }
 
@@ -60,7 +62,7 @@ func (m *fakeModel) CreateStream(_ context.Context, req openresponses.Request, s
 		m.outcomes = m.outcomes[1:]
 		return say(sink, req.Model, "some text")
 	}
-	args, err := json.Marshal(finishArgs{Step: step, Outcome: m.outcomes[0]})
+	args, err := json.Marshal(finishArgs{Run: runIn(req), Step: step, Outcome: m.outcomes[0]})
 	if err != nil {
 		return err
 	}
@@ -77,6 +79,38 @@ func (m *fakeModel) CreateStream(_ context.Context, req openresponses.Request, s
 		return err
 	}
 	return e.Complete()
+}
+
+// runIn is the run a request's instructions tell the model to name.
+func runIn(req openresponses.Request) string {
+	_, rest, ok := strings.Cut(req.Instructions, `, run "`)
+	if !ok {
+		return ""
+	}
+	run, _, _ := strings.Cut(rest, `"`)
+	return run
+}
+
+// withRun adds to a finish or a verdict the run the request names, as a
+// model reads it from its instructions.
+func withRun(req openresponses.Request, tool, args string) string {
+	if tool != finishTool && tool != judgeTool && tool != stuckTool {
+		return args
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(args), &m) != nil || m == nil || m["run"] != nil {
+		return args
+	}
+	run := runIn(req)
+	if run == "" {
+		return args
+	}
+	m["run"] = run
+	b, err := json.Marshal(m)
+	if err != nil {
+		return args
+	}
+	return string(b)
 }
 
 func say(sink openresponses.EventSink, model, text string) error {
@@ -96,7 +130,7 @@ func say(sink openresponses.EventSink, model, text string) error {
 
 func newAgent(t *testing.T, g *Graph, m *fakeModel, ran *[]string, opts ...Option) *agentturn.Agent {
 	t.Helper()
-	cfg, err := Apply(g, agentturn.Config{Model: m, ModelName: "fake", Tools: []agenttool.Tool{scriptTool(ran)}}, opts...)
+	cfg, err := kinApply(g, agentturn.Config{Model: m, ModelName: "fake", Tools: []agenttool.Tool{scriptTool(ran)}}, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +176,7 @@ func TestNoQuestionWhenClean(t *testing.T) {
 	for _, tool := range m.requests[0].Tools {
 		offered = append(offered, tool.(*openresponses.FunctionTool).Name)
 	}
-	if want := []string{finishTool}; !slices.Equal(offered, want) {
+	if want := []string{finishTool, stuckTool}; !slices.Equal(offered, want) {
 		t.Errorf("offered = %v, want %v", offered, want)
 	}
 }
@@ -247,7 +281,7 @@ func TestUnattendedFailureIsFinal(t *testing.T) {
 	for name, opts := range map[string][]Option{"alone": {Unattended()}, "rules decline": {Unattended(), declines}} {
 		t.Run(name, func(t *testing.T) {
 			var ran []string
-			cfg, err := Apply(release(), agentturn.Config{Model: &fakeModel{}, ModelName: "fake", MaxTurns: 10, Tools: []agenttool.Tool{flaky(1, &ran)}}, opts...)
+			cfg, err := kinApply(release(), agentturn.Config{Model: &fakeModel{}, ModelName: "fake", MaxTurns: 10, Tools: []agenttool.Tool{flaky(1, &ran)}}, opts...)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -352,8 +386,12 @@ func TestCallIDsFitProviders(t *testing.T) {
 	if err := g.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	st := State{Instance: "01234567", Node: &g.Nodes[0], Visit: 99, Attempt: 9}
-	if id := g.retryID(st); len(id) > 64 {
+	key, err := newKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := State{Instance: key, prefix: keyPrefix(key), Node: &g.Nodes[0], Visit: 99, Attempt: 99}
+	if id := st.retryID(); len(id) > 64 {
 		t.Errorf("%d characters: %s", len(id), id)
 	}
 }
@@ -368,6 +406,7 @@ func TestVisitLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	end, _ = a.Resume(context.Background(), ans)
+	end = stopAt(t, g, a, end, "visits")
 	if end == nil || !errors.Is(end.Err, ErrVisits) {
 		t.Fatalf("end = %+v", end)
 	}
@@ -375,7 +414,7 @@ func TestVisitLimit(t *testing.T) {
 
 func TestPolicyStillDecides(t *testing.T) {
 	g, ran := release(), []string{}
-	cfg, err := Apply(g, agentturn.Config{
+	cfg, err := kinApply(g, agentturn.Config{
 		Model: &fakeModel{outcomes: []string{"clean"}}, ModelName: "fake",
 		Tools: []agenttool.Tool{scriptTool(&ran)},
 		BeforeToolCall: func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
@@ -432,7 +471,9 @@ func TestLoopBounds(t *testing.T) {
 			g := loop(tc.max)
 			cfg := apply(t, g, &fakeModel{}, scriptTool(&ran))
 			cfg.MaxTurns = 40
-			end, _ := agentturn.New(cfg).Prompt(context.Background(), openresponses.UserText("go"))
+			a := agentturn.New(cfg)
+			end, _ := a.Prompt(context.Background(), openresponses.UserText("go"))
+			end = stopAt(t, g, a, end, "visits")
 			if end == nil || !errors.Is(end.Err, ErrVisits) {
 				t.Fatalf("end = %+v", end)
 			}

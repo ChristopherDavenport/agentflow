@@ -8,8 +8,10 @@ in the same commit as any behaviour it describes.
 
 - Module path: `github.com/ChristopherDavenport/agentflow`.
 - Go 1.26 is the floor, which `agentworkspace` sets.
-- The root package builds from `openresponses`, `agenttool`, `agentturn`
-  and the standard library; `script` adds `agentworkspace`.
+- The root package builds from `openresponses`, `agenttool`, `agentturn`,
+  `agentpolicy` and the standard library; `script` adds `agentworkspace`.
+  A step's policy is agentpolicy's grammar and engine; agentflow keeps no
+  matching of its own.
   `agentsession` and `agentturn/session` are test dependencies only.
   `make deps` enforces the module's list.
 
