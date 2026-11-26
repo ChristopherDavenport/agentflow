@@ -62,9 +62,36 @@ A session says which runs it holds and how each ended, whatever the
 workflow has become since:
 
 Give it every item of the session's path. The context
-`agentturn/session` rebuilds leaves out what the last request did, and a
-workflow stopped inside a model step cannot yet be resumed from it: it is
-refused, see the RFC.
+`agentturn/session` rebuilds leaves out what the last request did.
+
+With a session, give the workflow that record, so a compaction or a
+resumed session loses it nothing. The model still sees only what the
+transcript holds, and each step is handed its inputs:
+
+```go
+history := agentflow.History(func(ctx context.Context) (agentturn.Transcript, error) {
+	s, err := store.Open(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	var items agentturn.Transcript
+	for _, e := range s.Path(s.Leaf()) {
+		if item, ok := e.(*agentsession.ItemEntry); ok {
+			items = append(items, item.Item)
+		}
+	}
+	return items, nil
+})
+cfg, err := agentflow.Apply(graph, base, history) // and agentflow.Drive(..., history)
+```
+
+A compactor needs one thing from the workflow, or its summaries tell
+later steps that earlier ones are still running:
+
+```go
+compact.NewLocal(summarizer, compact.WithOnFold(rec.Fold),
+	compact.WithFilter(agentflow.SummaryFilter))
+```
 
 ```go
 runs, err := agentflow.Instances(transcript)

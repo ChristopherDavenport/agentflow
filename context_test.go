@@ -41,10 +41,18 @@ func TestEachVisitOpensOnce(t *testing.T) {
 			opened = append(opened, rest)
 		}
 	}
-	const rest = " The steps before it are finished and their results accepted, the flow_finish calls included. Do this step now."
+	const rest = " The steps before it are finished and their results accepted, the flow_finish calls included. Do this step now. (run "
 	want := []string{`"review".` + rest, `"fix".` + rest, `"review".` + rest}
-	if strings.Join(opened, "\n") != strings.Join(want, "\n") {
-		t.Errorf("opened = %q, want %q", opened, want)
+	if len(opened) != len(want) {
+		t.Fatalf("opened = %q", opened)
+	}
+	seen := map[string]bool{}
+	for i, got := range opened {
+		// No two visits read alike, a step's second visit included.
+		if !strings.HasPrefix(got, want[i]) || seen[got] {
+			t.Errorf("opened[%d] = %q, want %q and a visit of its own", i, got, want[i])
+		}
+		seen[got] = true
 	}
 }
 

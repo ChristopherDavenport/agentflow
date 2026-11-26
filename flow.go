@@ -70,6 +70,7 @@ type flow struct {
 	unattended bool
 	reply      func(context.Context, Question) (Result, bool)
 
+	history     func(context.Context) (agentturn.Transcript, error)
 	delegations []delegation
 	modes       map[string]Mode
 	judgeName   string
@@ -123,13 +124,7 @@ func Apply(g *Graph, cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 
 	cfg.Model = f
 	if transform := cfg.Transform; transform != nil {
-		cfg.Transform = func(ctx context.Context, t agentturn.Transcript) (agentturn.Transcript, error) {
-			out, err := transform(ctx, t)
-			if err != nil {
-				return nil, err
-			}
-			return out, f.samePosition(t, out)
-		}
+		cfg.Transform = f.transform(transform)
 	}
 	cfg.BeforeTurn = agentturn.ChainBeforeTurn(f.begin, cfg.BeforeTurn)
 	userModel := cfg.BeforeModelCall
@@ -139,7 +134,7 @@ func Apply(g *Graph, cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 				return err
 			}
 		}
-		return f.prepare(req)
+		return f.prepare(ctx, req)
 	}
 	userTool := cfg.BeforeToolCall
 	cfg.BeforeToolCall = func(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
@@ -179,15 +174,15 @@ func (f *flow) samePosition(before, after agentturn.Transcript) error {
 // also where a fresh context starts. It is a user message, since a
 // provider may move a leading developer message out of the conversation,
 // and a hook's, so no record takes it for the person's.
-func (f *flow) begin(_ context.Context, info agentturn.TurnStartInfo) (openresponses.Items, error) {
-	st, err := f.g.Replay(info.Transcript)
+func (f *flow) begin(ctx context.Context, info agentturn.TurnStartInfo) (openresponses.Items, error) {
+	st, _, err := f.read(ctx, info.Transcript)
 	if err != nil || st.Node == nil || st.Failure != "" || st.Begun {
 		// An error here is the same one prepare reports.
 		return nil, nil
 	}
 	switch {
 	case f.wants(st):
-		return openresponses.Items{openresponses.UserText(beginning(st.Node.ID) + " Judge it now.")}, nil
+		return openresponses.Items{openresponses.UserText(beginning(st.Node.ID) + " Judge it now." + visitTag(st))}, nil
 	case st.Node.Kind != Agent:
 		return nil, nil
 	}
@@ -195,14 +190,14 @@ func (f *flow) begin(_ context.Context, info agentturn.TurnStartInfo) (openrespo
 	if st.Node.Context != ContextFresh && len(st.Steps) > 0 {
 		text += " The steps before it are finished and their results accepted, the " + finishTool + " calls included."
 	}
-	return openresponses.Items{openresponses.UserText(text + " Do this step now.")}, nil
+	return openresponses.Items{openresponses.UserText(text + " Do this step now." + visitTag(st))}, nil
 }
 
 // since returns the input from the message that opened this visit of n.
 func since(input openresponses.Items, n *Node) (openresponses.Items, error) {
 	for i := len(input) - 1; i >= 0; i-- {
 		if m, ok := input[i].(*openresponses.Message); ok && opens(m, n) {
-			return input[i:], nil
+			return slices.Clone(input[i:]), nil
 		}
 	}
 	// Sending everything would show a step what it must not see.
@@ -233,8 +228,8 @@ func modelTurn(st State) bool {
 
 // prepare shapes the request for whoever takes this turn. It runs
 // before the turn is recorded, so the record holds what was sent.
-func (f *flow) prepare(req *openresponses.Request) error {
-	st, err := f.g.Replay(req.Input)
+func (f *flow) prepare(ctx context.Context, req *openresponses.Request) error {
+	st, all, err := f.read(ctx, req.Input)
 	if f.overdue(st, err) != nil {
 		req.Model = programPrefix + f.g.Name
 		return nil
@@ -243,18 +238,23 @@ func (f *flow) prepare(req *openresponses.Request) error {
 		return err
 	}
 	if f.judging(st) {
-		return f.prepareJudge(req, st)
+		return f.prepareJudge(req, st, all)
 	}
 	if !modelTurn(st) {
 		req.Model = programPrefix + f.g.Name
 		return nil
 	}
 	req.Model = f.modelName
-	req.Input = withoutStarts(without(req.Input, st.unseen))
+	req.Input = f.visible(req.Input, all, st)
 	keep := func(name string) bool { return !strings.HasPrefix(name, reserved) && name != ScriptTool }
 	if n := st.Node; n != nil {
 		if n.Context == ContextFresh {
-			if req.Input, err = since(req.Input, n); err != nil {
+			// From the record, which a compaction does not reach.
+			from := req.Input
+			if f.history != nil {
+				from = openresponses.Items(all)
+			}
+			if req.Input, err = since(from, n); err != nil {
 				return err
 			}
 		}
@@ -277,10 +277,14 @@ func (f *flow) prepare(req *openresponses.Request) error {
 
 // prepareJudge shapes a judge's request, which never reads the
 // conversation that led to the question.
-func (f *flow) prepareJudge(req *openresponses.Request, st State) (err error) {
+func (f *flow) prepareJudge(req *openresponses.Request, st State, all agentturn.Transcript) (err error) {
 	n := st.Node
 	req.Model = f.judgeName
-	if req.Input, err = since(req.Input, n); err != nil {
+	from := req.Input
+	if f.history != nil {
+		from = openresponses.Items(all)
+	}
+	if req.Input, err = since(from, n); err != nil {
 		return err
 	}
 	ask, err := f.judgeInstructions(st)
@@ -421,7 +425,7 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 	if !strings.HasPrefix(req.Model, programPrefix) {
 		return f.model.CreateStream(ctx, req, sink)
 	}
-	st, err := f.g.Replay(req.Input)
+	st, _, err := f.read(ctx, req.Input)
 	over := f.overdue(st, err)
 	if err != nil && over == nil {
 		return err
@@ -517,7 +521,7 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 	if !ok {
 		return nil, errors.New("agentflow: no transcript on the context")
 	}
-	st, err := f.g.Replay(t)
+	st, _, err := f.read(ctx, t)
 	name, id := info.Call.Name, info.Call.CallID
 	if name == endTool {
 		if over := f.overdue(st, err); over == nil || id != f.g.endID(over.Instance) {

@@ -417,6 +417,11 @@ func without(t openresponses.Items, unseen [][2]int) openresponses.Items {
 	return out
 }
 
+// visitTag tells one visit's messages from every other's. They must not
+// read alike: agentturn quarantines by content, so after a resume a
+// message like one that was once left out is left out too.
+func visitTag(st State) string { return fmt.Sprintf(" (run %s, visit %d)", st.Instance, st.Visit) }
+
 // beginning starts the message that opens a visit of an Agent node.
 func beginning(id string) string { return beginPrefix + strconv.Quote(id) + "." }
 

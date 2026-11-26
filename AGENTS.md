@@ -16,7 +16,8 @@ in the same commit as any behaviour it describes.
 ## Rules
 
 - The loop learns nothing about workflows. Build on its public surface.
-- Position is a pure function of the graph and the transcript.
+- Position is a pure function of the graph and the record: every item
+  that happened. What a model is sent is only a view of it.
 - The record never passes a program's turn off as a model's.
 - Only the program runs scripts.
 

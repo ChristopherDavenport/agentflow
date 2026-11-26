@@ -338,24 +338,28 @@ unfinished instance. After an instance has finished and said so, a plain
 prompt is a conversation with the model, with its tools. An instance
 that failed stays failed until an invocation.
 
-### Resuming a session (broken for a run stopped inside a model step)
+### Resuming a session (spiked with `History`)
 
-Leaving an item out of a request, for a fresh step, for what a blind
-judge did or for `flow_start`, is recorded as an omission, and
+Leaving an item out of a request is recorded as an omission, and
 `agentturn/session` reads an omission in force as a trim: `Transcript`
-and `AgentOptions` rebuild the conversation without those items. A
-program turn sends everything and lifts it, so a session left at a
-question resumes. One left inside a model step, by a stall, a model error
-or a kill, or after a model's reply to a finished workflow, does not.
-Until 2026-11-26 it then started the workflow again, running its steps a
-second time. Now `Replay` returns `ErrPositionLost` when it finds a run's
-calls or step messages without its start, and `Instances` when it finds
-no start at all.
+and `AgentOptions` rebuild the conversation without those items
+(agentturn#323). With `History`, a session loaded that way resumes where
+it stood: the record still holds everything. Without it, one stopped
+inside a model step cannot be resumed and is refused; until 2026-11-26 it
+started the workflow again.
 
-Every item of the session's path still holds the position, so read those,
-not the rebuilt context. Resuming an agent on them has not been built or
-tried. Open: a helper that seeds an agent that way, and a way in
-`agentturn/session` to say an omission was for one request.
+What this does not restore is the model's view. After a resume, a
+`session` step reads the conversation as the session rebuilt it, without
+what was omitted. Nothing is put back into it: the record cannot say
+whether an omission was a one-time one or a block that must stand.
+`Attach` also quarantines by content, so a kept item that reads like an
+omitted one is held back too; the workflow's own messages carry the run
+and visit for that reason.
+
+Tried: a run stalled inside a model step, with the transcript trimmed by
+omission, by compaction, and each with a `fresh` step, and a process
+killed there. Each resumed without running a script again, with the
+step's input taken from the record.
 
 ### Leaving, and reading it back (spiked)
 
@@ -416,8 +420,8 @@ does, the workflow fails.
 
 ### Position
 
-Position is a pure function of the graph and the transcript. Program
-steps are matched by call ID
+Position is a pure function of the graph and the record, meaning every
+item that happened, in order. Program steps are matched by call ID
 (`flow_<workflow>_<instance>_<node>_v<visit>`, with `-a<attempt>` on a
 retry), model steps by a successful `flow_finish` naming the node, made
 after the node became current, so one model turn cannot finish a step it
@@ -425,11 +429,53 @@ has not yet been given. Nothing else is stored. Names are bounded, 16
 characters for a workflow and 20 for a node, because providers limit
 call IDs.
 
-Position needs every earlier step, so a transform that drops any of them,
-a compaction among them, is refused. Long workflows cannot be compacted
-until position is read from the session path instead (proposed). A
-transform that records its fold before returning may still have written
-it.
+**The record and what a model is sent are different things** (spiked).
+A compaction shortens the model's view, and so does an omission read back
+by a resumed session. `History` gives agentflow the record: a function
+returning every item, for a session the item entries of its path. With
+it:
+
+- position, `with` values, step instructions and the gate are read from
+  the record, whatever the transcript has lost, so a step's inputs reach
+  a model as its inputs and nothing else is restored to the conversation
+  to find them;
+- the host's `Transform` is given only what a model may read: `flow_start`
+  and what a blind judge did are gone before it, so no summary carries
+  them. It is not run on a program's turn, which no model reads, nor for a
+  `fresh` step or a judge, whose input is the record from the step's
+  opening message on;
+- a record that does not hold the calls of the transcript it is read
+  beside is refused (`ErrRecordBehind`), so a recorder that has stopped,
+  or the wrong session, does not rewind a run. `Drive` takes the same
+  option.
+
+A compaction costs some request hashes. A `fresh` step's or a judge's
+request after a fold leaves the summary out, which the session format
+cannot describe, so it is recorded as unverifiable; with
+`agentturn/compact` every other request kept its hash. The recorder must
+be told of folds (`compact.WithOnFold(rec.Fold)`).
+
+With claude-haiku-5-5, 2026-11-26, `take-issue` on a throwaway
+repository: a model request was made to fail inside `build`, a new agent
+resumed with 3 of 28 recorded items, and the run finished with each
+script run once, two folds applied, no wrong hash, one request without
+one, and nothing of the definition or a judge's verdict in a working or
+summarizing request. The folds came after the resume, so resuming an
+already folded session is tested only with a scripted model. A small
+budget made most folds fail: the summary's token cap went on reasoning.
+A summary also took in the workflow's own messages: one said a step was
+"currently executing" and that the user had asked for it, which a later
+step would read. `SummaryFilter`, given to the compactor
+(`compact.WithFilter`), now keeps the invocation, the opening messages
+and the reminders out of what is summarised, without changing a request
+or its hash. A host that builds its compactor without it gets the old
+behaviour: agentflow is handed only the compactor's `Transform` and
+cannot add it. Calls and their outputs are still summarised. Not tried
+with a real model since.
+
+Without `History` the transcript is the record, as long as nothing drops
+from it: a transform that drops what position is read from is refused
+(`ErrPositionLost`), a compaction among them.
 
 ### Answering a question
 
@@ -648,7 +694,8 @@ cases the rate is under 5% at 95% confidence, and 300 for under 1%.
 ## Context (spiked)
 
 Each visit of a model node opens with a user message, added by
-`BeforeTurn`, reading `agentflow: begin step "<id>".` It says the earlier
+`BeforeTurn`, reading `agentflow: begin step "<id>".` and ending with
+the run and visit, so no two read alike. It says the earlier
 steps' results were accepted: without it a model reads its previous
 `flow_finish` under a tool that now accepts only this step's, and takes
 that call for a mistake. It is a hook's message, so no record takes it
@@ -808,13 +855,13 @@ The role of the reminder, qwen3:1.7b, one reminder, 40 trials a row:
 | user | 14 of 21 |
 
 Not yet tested: a model step that uses tools over many turns, a prompt
-that competes with the finish instruction and the real `compact`
-transform.
+that competes with the finish instruction.
 
 ## Open questions
 
-1. **Compaction.** Read position from the session path, or record
-   checkpoints that a fold keeps.
+1. **Compaction and resume without a record.** A host with no `History`
+   still cannot compact a running workflow. A front's `Replay` must be
+   given the record too.
 2. **Fan-out.** Running a step once per item of a list, and joining.
 3. **Reminders.** One is the rule. A host may want more for a small
    model.
