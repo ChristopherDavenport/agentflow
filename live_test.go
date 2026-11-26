@@ -3,6 +3,7 @@ package agentflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -41,6 +42,15 @@ func liveGraph() *Graph {
 		{ID: "review", Kind: Agent, Outcomes: []string{"clean", "findings"},
 			Prompt: "Review the code the gather step returned. Choose findings if it can crash or is wrong, else clean."},
 	}}
+}
+
+func countNudges(t agentturn.Transcript) (n int) {
+	for _, item := range t {
+		if m, ok := item.(*openresponses.Message); ok && strings.HasPrefix(m.Text(), nudgePrefix) {
+			n++
+		}
+	}
+	return n
 }
 
 func TestLive(t *testing.T) {
@@ -89,9 +99,14 @@ func TestLive(t *testing.T) {
 		began := time.Now()
 		end, err := a.Prompt(ctx, openresponses.UserText("Run the review workflow."))
 		if mode == "nudge" && err == nil && end.Err == nil {
-			if st, serr := g.Replay(a.State().Transcript); serr == nil && st.Node != nil {
+			// Drive reminds once; a model still silent is stalled.
+			var st State
+			end, st, err = Drive(ctx, g, a, end)
+			if st.Nudges > 0 || st.Done && countNudges(a.State().Transcript) > 0 {
 				nudged++
-				end, err = a.Prompt(ctx, openresponses.UserText("The step is not finished. Call the flow_finish tool now; text is not read."))
+			}
+			if errors.Is(err, ErrStalled) {
+				err = nil
 			}
 		}
 		unsub()
@@ -112,7 +127,7 @@ func TestLive(t *testing.T) {
 		for _, item := range a.State().Transcript {
 			switch it := item.(type) {
 			case *openresponses.FunctionCall:
-				if it.Name != "gather" {
+				if it.Name != "gather" && it.Name != startTool {
 					calls = append(calls, it.Name+" "+it.Arguments)
 				}
 			case *openresponses.FunctionCallOutput:
@@ -125,7 +140,7 @@ func TestLive(t *testing.T) {
 		answer, _ := end.Answer()
 		outcome := ""
 		switch {
-		case len(st.Steps) == 2:
+		case st.Done:
 			finished++
 			outcome = st.Steps[1].Result.Outcome
 			if outcome == want {

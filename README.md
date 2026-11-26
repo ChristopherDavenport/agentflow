@@ -14,7 +14,13 @@ cfg, err := agentflow.Apply(graph, agentturn.Config{Model: model, ModelName: nam
 a := agentturn.New(cfg)
 end, err := a.Prompt(ctx, openresponses.UserText("review this PR"))
 
+// A model that stops without finishing is reminded once.
+end, state, err := agentflow.Drive(ctx, graph, a, end)
+
 // At a person step the run ends input_required.
 answer, err := agentflow.Answer(end.Pending[0], agentflow.Result{Outcome: "fix"})
 end, err = a.Resume(ctx, answer)
+
+// Run it again in the same conversation.
+end, err = a.Prompt(ctx, graph.Invocation())
 ```

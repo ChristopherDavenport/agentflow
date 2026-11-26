@@ -6,11 +6,21 @@
 package agentflow
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
+)
+
+// Names are part of call IDs, which providers hold to 64 characters of
+// this set.
+var (
+	graphName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,16}$`)
+	nodeID    = regexp.MustCompile(`^[A-Za-z0-9_-]{1,20}$`)
 )
 
 // Kind says who takes a node's turn.
@@ -81,8 +91,8 @@ func (g *Graph) node(id string) *Node {
 func (g *Graph) Validate() error {
 	var errs []error
 	bad := func(format string, args ...any) { errs = append(errs, fmt.Errorf("agentflow: "+format, args...)) }
-	if g.Name == "" {
-		bad("graph has no name")
+	if !graphName.MatchString(g.Name) {
+		bad("invalid graph name %q: want 1 to 16 letters, digits, _ or -", g.Name)
 	}
 	if len(g.Nodes) == 0 {
 		bad("graph has no nodes")
@@ -90,8 +100,8 @@ func (g *Graph) Validate() error {
 	seen := map[string]bool{}
 	for i := range g.Nodes {
 		n := &g.Nodes[i]
-		if n.ID == "" || strings.ContainsAny(n.ID, ": \t\n") {
-			bad("node %d: invalid id %q", i, n.ID)
+		if !nodeID.MatchString(n.ID) {
+			bad("node %d: invalid id %q: want 1 to 20 letters, digits, _ or -", i, n.ID)
 		}
 		if seen[n.ID] {
 			bad("node %q: declared twice", n.ID)
@@ -123,9 +133,21 @@ func (g *Graph) Validate() error {
 		if n.Unattended != "" && (n.Kind != Person || !slices.Contains(n.outcomes(), n.Unattended)) {
 			bad("node %q: unattended must be an outcome of a person node", n.ID)
 		}
-		if n.MaxVisits < 0 {
-			bad("node %q: negative max visits", n.ID)
+		if n.MaxVisits < 0 || n.MaxVisits > 99 {
+			bad("node %q: max visits must be 0 to 99", n.ID)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// Digest names the definition. A transcript holds the digest its
+// instance started with, so a changed graph does not resume it.
+func (g *Graph) Digest() string {
+	b, err := json.Marshal(g)
+	if err != nil {
+		// Only Args can fail, and Validate refuses what is not JSON.
+		panic(err)
+	}
+	sum := sha256.Sum256(b)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }

@@ -1,0 +1,51 @@
+package agentflow
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/openresponses"
+)
+
+// ErrStalled is a model that stopped, and stopped again when reminded,
+// without finishing its step. The step is still current: a host with a
+// person shows them what the model said and prompts with their reply,
+// and one without fails.
+var ErrStalled = errors.New("agentflow: the model stopped without finishing its step")
+
+// TriggerKind is the trigger of what a workflow says on its own.
+const TriggerKind = "workflow"
+
+// Drive takes a run that has ended and sees it through what a config
+// alone cannot: a model that stops without finishing its step is
+// reminded once. The reminder is a user message, which models heed far
+// more than a developer one, sent under a trigger of kind [TriggerKind]
+// so neither the loop nor a record takes it for the person's. It returns the last run's end and where
+// the workflow stands. A run waiting on a question is returned as it
+// is, for [Answer] and Resume.
+func Drive(ctx context.Context, g *Graph, a *agentturn.Agent, end *agentturn.RunEnd) (*agentturn.RunEnd, State, error) {
+	for {
+		st, err := g.Replay(a.State().Transcript)
+		switch {
+		case end == nil:
+			return nil, st, errors.New("agentflow: no run to drive")
+		case end.Err != nil:
+			return end, st, end.Err
+		case err != nil:
+			return end, st, err
+		case end.Reason != agentturn.ReasonDone || st.Node == nil || st.Node.Kind != Agent:
+			return end, st, nil
+		case st.Nudges > 0:
+			return end, st, fmt.Errorf("%w: %s", ErrStalled, st.Node.ID)
+		}
+		nudge := fmt.Sprintf("%s Text is not read. Do the step %q, then call %s.", nudgePrefix, st.Node.ID, finishTool)
+		from := agentturn.ContextWithTrigger(ctx, agentturn.Trigger{Kind: TriggerKind, Ref: g.Name})
+		next, err := a.Prompt(from, openresponses.UserText(nudge))
+		if next == nil {
+			return end, st, err
+		}
+		end = next
+	}
+}

@@ -149,12 +149,85 @@ func checkRecord(t *testing.T, store *jsonl.Store, id string) {
 		hashes++
 	}
 	const p, f = "agentflow/pr", "fake"
-	// gather, review, triage | fix, gather, review, report, summary
-	want := []string{p, f, p, f, p, f, p, p}
+	// start, gather, review, triage | fix, gather, review, report, summary
+	want := []string{p, p, f, p, f, p, f, p, p}
 	if !slices.Equal(models, want) {
 		t.Errorf("models = %v, want %v", models, want)
 	}
 	t.Logf("%d request hashes verified", hashes)
+}
+
+func TestReminderIsNotRecordedAsThePersons(t *testing.T) {
+	ctx := context.Background()
+	store, err := jsonl.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, s, err := session.Start(ctx, store, agentsession.Header{CWD: "/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, ran := release(), []string{}
+	a := newAgent(t, g, &fakeModel{outcomes: []string{"", "clean"}}, &ran)
+	rec.Attach(a)
+	typed := agentturn.ContextWithTrigger(ctx, agentturn.Trigger{Kind: agentturn.TriggerHuman})
+	end, err := a.Prompt(typed, openresponses.UserText("review this PR"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, st, err := Drive(ctx, g, a, end); err != nil || !st.Done {
+		t.Fatalf("state = %+v, %v", st, err)
+	}
+	got, err := store.Open(ctx, s.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	for _, e := range got.Path(got.Leaf()) {
+		line, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(line), `"kind":"`+TriggerKind+`"`) {
+			lines = append(lines, string(line))
+		}
+	}
+	if len(lines) == 0 {
+		t.Fatal("no entry records the workflow's trigger")
+	}
+	for _, l := range lines {
+		t.Log(l)
+	}
+	checkHashes(t, got)
+	// Read back, the person's messages are the prompt alone.
+	items, _, person, err := session.TranscriptMarks(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var theirs []string
+	for _, item := range items {
+		if m, ok := item.(*openresponses.Message); ok && person.Has(m) {
+			theirs = append(theirs, m.Text())
+		}
+	}
+	if want := []string{"review this PR"}; !slices.Equal(theirs, want) {
+		t.Errorf("person's messages = %q, want %q", theirs, want)
+	}
+}
+
+// checkHashes rebuilds every request hash on the path.
+func checkHashes(t *testing.T, s *agentsession.Session) {
+	t.Helper()
+	for _, e := range s.Path(s.Leaf()) {
+		r, ok := e.(*agentsession.ResponseEntry)
+		if !ok {
+			continue
+		}
+		got, err := s.RequestHashFor(r.Parent, r)
+		if err != nil || r.RequestHash == "" || r.RequestHash != got {
+			t.Errorf("response %s (%s): request hash %q, rebuilt %q, %v", r.ResponseID, r.Model, r.RequestHash, got, err)
+		}
+	}
 }
 
 // verdicts lists the decisions on the path.

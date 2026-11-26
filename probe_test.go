@@ -120,14 +120,18 @@ func TestKillDuringScript(t *testing.T) {
 				}
 				return
 			}
-			// A script that cannot run again ends the workflow
-			// (RFC 0001, open question 5).
+			// A script that cannot run again on its own is the person's
+			// call.
 			if !errors.Is(err, agentturn.ErrAmbiguousCall) || len(ran) != 0 {
 				t.Fatalf("err = %v, ran = %v", err, ran)
 			}
-			end, _ = a.Resume(context.Background(), agentturn.OutcomeUnknown(p[0].Call.CallID))
-			if end == nil || !errors.Is(end.Err, ErrStepFailed) {
-				t.Fatalf("end = %+v", end)
+			end, err = a.Resume(context.Background(), agentturn.OutcomeUnknown(p[0].Call.CallID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			end = answer(t, a, end, "retry")
+			if end.Reason != agentturn.ReasonDone || !slices.Equal(ran, []string{"gather", "report"}) {
+				t.Fatalf("end = %+v, ran = %v", end, ran)
 			}
 		})
 	}
@@ -218,7 +222,11 @@ func TestOneTurnCannotFinishTheNextStep(t *testing.T) {
 		t.Errorf("model turns = %d, want 2", m.turns)
 	}
 	// Replay holds the rule without the gate, for a record made elsewhere.
-	var forged agentturn.Transcript
+	begin, _ := json.Marshal(startPayload{Workflow: g.Name, Digest: g.Digest()})
+	forged := agentturn.Transcript{
+		&openresponses.FunctionCall{CallID: g.startID("i"), Name: startTool, Arguments: string(begin)},
+		&openresponses.FunctionCallOutput{CallID: g.startID("i"), Output: openresponses.FunctionCallOutputData{Text: `{"outcome":"ok"}`}},
+	}
 	for _, step := range []string{"plan", "build"} {
 		args, _ := json.Marshal(finishArgs{Step: step, Outcome: OK})
 		forged = append(forged, &openresponses.FunctionCall{CallID: step, Name: finishTool, Arguments: string(args)})
@@ -229,19 +237,5 @@ func TestOneTurnCannotFinishTheNextStep(t *testing.T) {
 	st, err := g.Replay(forged)
 	if err != nil || st.Node == nil || st.Node.ID != "build" {
 		t.Fatalf("state = %+v, err = %v", st, err)
-	}
-}
-
-// A transcript holds one instance of a workflow: a second prompt reports
-// the first and runs nothing (RFC 0001, open question 3).
-func TestSecondPromptRunsNothing(t *testing.T) {
-	var ran []string
-	g := release()
-	a := agentturn.New(apply(t, g, &fakeModel{outcomes: []string{"clean", "clean"}}, scriptTool(&ran)))
-	start(t, a)
-	ran = nil
-	end := start(t, a)
-	if end.Reason != agentturn.ReasonDone || len(ran) != 0 {
-		t.Fatalf("end = %s, ran = %v", end.Reason, ran)
 	}
 }

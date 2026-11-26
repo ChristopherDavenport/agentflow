@@ -54,6 +54,11 @@ func (m *fakeModel) CreateStream(_ context.Context, req openresponses.Request, s
 	}
 	_, rest, _ := strings.Cut(req.Instructions, `with step "`)
 	step, _, _ := strings.Cut(rest, `"`)
+	// Outside a step, or asked for silence, it only talks.
+	if step == "" || m.outcomes[0] == "" {
+		m.outcomes = m.outcomes[1:]
+		return say(sink, req.Model, "some text")
+	}
 	args, err := json.Marshal(finishArgs{Step: step, Outcome: m.outcomes[0]})
 	if err != nil {
 		return err
@@ -68,6 +73,21 @@ func (m *fakeModel) CreateStream(_ context.Context, req openresponses.Request, s
 		return err
 	}
 	if err := call.Close(); err != nil {
+		return err
+	}
+	return e.Complete()
+}
+
+func say(sink openresponses.EventSink, model, text string) error {
+	e := openresponses.NewEmitter(sink, &openresponses.Response{Model: model})
+	msg, err := e.Message("")
+	if err != nil {
+		return err
+	}
+	if err := msg.Text(text); err != nil {
+		return err
+	}
+	if err := msg.Close(); err != nil {
 		return err
 	}
 	return e.Complete()
@@ -170,18 +190,166 @@ func TestUndeclaredOutcomeIsNotProgress(t *testing.T) {
 	}
 }
 
-func TestFailedScriptStops(t *testing.T) {
-	g := release()
-	failing := agenttool.New("script", "Run a script.", func(context.Context, scriptArgs) (Result, error) {
-		return Result{}, errors.New("exit status 1")
+// flaky is a script tool that fails its first failures calls.
+func flaky(failures int, ran *[]string) agenttool.Tool {
+	return agenttool.New("script", "Run a script.", func(_ context.Context, a scriptArgs) (Result, error) {
+		*ran = append(*ran, a.Name)
+		if len(*ran) <= failures {
+			return Result{}, errors.New("exit status 1")
+		}
+		return Result{Outcome: OK}, nil
 	})
-	cfg, err := Apply(g, agentturn.Config{Model: &fakeModel{}, ModelName: "fake", Tools: []agenttool.Tool{failing}})
+}
+
+func answer(t *testing.T, a *agentturn.Agent, end *agentturn.RunEnd, outcome string) *agentturn.RunEnd {
+	t.Helper()
+	if end.Reason != agentturn.ReasonInputRequired || len(end.Pending) != 1 {
+		t.Fatalf("end = %s, err = %v", end.Reason, end.Err)
+	}
+	ans, err := Answer(end.Pending[0], Result{Outcome: outcome})
 	if err != nil {
 		t.Fatal(err)
 	}
-	end, _ := agentturn.New(cfg).Prompt(context.Background(), openresponses.UserText("go"))
-	if end == nil || end.Reason != agentturn.ReasonError || !errors.Is(end.Err, ErrStepFailed) {
-		t.Fatalf("end = %+v", end)
+	next, err := a.Resume(context.Background(), ans)
+	if next == nil {
+		t.Fatal(err)
+	}
+	return next
+}
+
+func TestFailedScriptAsksToRetry(t *testing.T) {
+	var ran []string
+	g := release()
+	a := agentturn.New(apply(t, g, &fakeModel{outcomes: []string{"clean"}}, flaky(2, &ran)))
+	end := start(t, a)
+	end = answer(t, a, end, "retry")
+	end = answer(t, a, end, "retry")
+	if end.Reason != agentturn.ReasonDone || end.Err != nil {
+		t.Fatalf("end = %s, err = %v", end.Reason, end.Err)
+	}
+	if want := []string{"gather", "gather", "gather", "report"}; !slices.Equal(ran, want) {
+		t.Errorf("ran = %v, want %v", ran, want)
+	}
+}
+
+func TestStoppedStepEndsTheWorkflow(t *testing.T) {
+	var ran []string
+	a := agentturn.New(apply(t, release(), &fakeModel{}, flaky(1, &ran)))
+	end := answer(t, a, start(t, a), "stop")
+	if !errors.Is(end.Err, ErrStepFailed) || len(ran) != 1 {
+		t.Fatalf("end = %+v, ran = %v", end, ran)
+	}
+}
+
+func TestUnattendedFailureIsFinal(t *testing.T) {
+	declines := Reply(func(context.Context, Question) (Result, bool) { return Result{}, false })
+	for name, opts := range map[string][]Option{"alone": {Unattended()}, "rules decline": {Unattended(), declines}} {
+		t.Run(name, func(t *testing.T) {
+			var ran []string
+			cfg, err := Apply(release(), agentturn.Config{Model: &fakeModel{}, ModelName: "fake", MaxTurns: 10, Tools: []agenttool.Tool{flaky(1, &ran)}}, opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			end, _ := agentturn.New(cfg).Prompt(context.Background(), openresponses.UserText("go"))
+			if end == nil || !errors.Is(end.Err, ErrStepFailed) || len(ran) != 1 {
+				t.Fatalf("end = %+v, ran = %v", end, ran)
+			}
+		})
+	}
+}
+
+func TestRulesAnswerBeforeThePerson(t *testing.T) {
+	g, ran := release(), []string{}
+	a := newAgent(t, g, &fakeModel{outcomes: []string{"findings", "ok", "clean"}}, &ran,
+		Reply(func(_ context.Context, q Question) (Result, bool) { return Result{Outcome: "fix"}, q.Step == "triage" }))
+	if end := start(t, a); end.Reason != agentturn.ReasonDone || end.Err != nil {
+		t.Fatalf("end = %s, err = %v", end.Reason, end.Err)
+	}
+	st, err := g.Replay(a.State().Transcript)
+	if err != nil || len(st.Steps) != 7 || st.Steps[2].Result.By != "rules" {
+		t.Fatalf("steps = %+v, %v", st.Steps, err)
+	}
+}
+
+func TestAfterTheWorkflow(t *testing.T) {
+	g, ran := release(), []string{}
+	m := &fakeModel{outcomes: []string{"clean", "", "clean"}}
+	a := newAgent(t, g, m, &ran)
+	start(t, a)
+	first, err := g.Replay(a.State().Transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A plain prompt is a conversation with the model, with its tools.
+	ran = ran[:0]
+	if got, _ := start(t, a).Answer(); got != "some text" || len(ran) != 0 {
+		t.Fatalf("answer = %q, ran = %v", got, ran)
+	}
+	last := m.requests[len(m.requests)-1]
+	if len(last.Tools) != 1 || last.Tools[0].(*openresponses.FunctionTool).Name != "script" {
+		t.Errorf("tools = %+v", last.Tools)
+	}
+
+	// An invocation starts another instance.
+	if end, err := a.Prompt(context.Background(), g.Invocation()); err != nil || end.Reason != agentturn.ReasonDone {
+		t.Fatalf("end = %+v, %v", end, err)
+	}
+	second, err := g.Replay(a.State().Transcript)
+	if err != nil || second.Instance == first.Instance || len(second.Steps) != 3 {
+		t.Fatalf("second = %+v, %v", second, err)
+	}
+	if want := []string{"gather", "report"}; !slices.Equal(ran, want) {
+		t.Errorf("ran = %v, want %v", ran, want)
+	}
+}
+
+func TestChangedDefinitionIsRefused(t *testing.T) {
+	g, ran := release(), []string{}
+	a := newAgent(t, g, &fakeModel{outcomes: []string{"findings"}}, &ran)
+	start(t, a)
+	changed := release()
+	changed.node("report").Args = json.RawMessage(`{"name":"other"}`)
+	if _, err := changed.Replay(a.State().Transcript); !errors.Is(err, ErrChanged) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestDriveRemindsOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		outcomes []string
+		err      error
+	}{
+		{"finishes", []string{"", "clean"}, nil},
+		{"stalls", []string{"", ""}, ErrStalled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g, ran := release(), []string{}
+			m := &fakeModel{outcomes: tc.outcomes}
+			a := newAgent(t, g, m, &ran)
+			end, st, err := Drive(context.Background(), g, a, start(t, a))
+			if !errors.Is(err, tc.err) || end.Reason != agentturn.ReasonDone {
+				t.Fatalf("end = %+v, err = %v", end, err)
+			}
+			if tc.err == nil && !st.Done || tc.err != nil && st.Node.ID != "review" {
+				t.Errorf("state = %+v", st)
+			}
+			if len(m.requests) != 2 {
+				t.Errorf("model turns = %d, want 2", len(m.requests))
+			}
+		})
+	}
+}
+
+func TestCallIDsFitProviders(t *testing.T) {
+	g := &Graph{Name: strings.Repeat("n", 16), Nodes: []Node{{ID: strings.Repeat("i", 20), Kind: Run, Tool: "script", MaxVisits: 99}}}
+	if err := g.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	st := State{Instance: "01234567", Node: &g.Nodes[0], Visit: 99, Attempt: 9}
+	if id := g.retryID(st); len(id) > 64 {
+		t.Errorf("%d characters: %s", len(id), id)
 	}
 }
 

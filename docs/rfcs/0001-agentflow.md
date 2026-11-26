@@ -166,6 +166,20 @@ do for any config.
 The model name is set before the turn is recorded. The record therefore
 shows which turns the program took, and request hashes reproduce.
 
+### An instance
+
+The first call of an instance is `flow_start`, which carries the
+workflow's name and the digest of its definition. Replay begins there,
+so whatever the transcript held before is ignored. Resuming with a
+definition whose digest differs is refused.
+
+A transcript with no instance starts one. Another begins only at an
+invocation, a developer message reading `agentflow: start <name>`
+(`Graph.Invocation`), which a model cannot write. It also abandons an
+unfinished instance. After an instance has finished and said so, a plain
+prompt is a conversation with the model, with its tools. An instance
+that failed stays failed until an invocation.
+
 ### Results
 
 Every step ends in one result:
@@ -175,22 +189,32 @@ Every step ends in one result:
 ```
 
 A transcript carries no failure flag, so success has to be said. A
-program or person step whose output is anything else, an error or a
-refusal included, fails the workflow. A model finishes with
-`flow_finish`; a finish naming an undeclared outcome is an error the
-model sees and can correct.
+program or person step whose output is anything else, an error, a
+refusal or an unknown outcome included, has failed. A model finishes
+with `flow_finish`; a finish naming an undeclared outcome is an error
+the model sees and can correct.
+
+### Failure
+
+A failed step raises a `flow_ask` with the outcomes `retry` and `stop`.
+`retry` runs the step again under a new call ID. `stop` fails the
+workflow. The host's rules may answer; unattended, with no rule that
+does, the workflow fails.
 
 ### Position
 
 Position is a pure function of the graph and the transcript. Program
-steps are matched by call ID (`flow_<workflow>_<node>_<visit>`), model
-steps by a successful `flow_finish` naming the node, made after the node
-became current, so one model turn cannot finish a step it has not yet
-been given. Nothing else is stored.
+steps are matched by call ID
+(`flow_<workflow>_<instance>_<node>_v<visit>`, with `-a<attempt>` on a
+retry), model steps by a successful `flow_finish` naming the node, made
+after the node became current, so one model turn cannot finish a step it
+has not yet been given. Nothing else is stored. Names are bounded, 16
+characters for a workflow and 20 for a node, because providers limit
+call IDs.
 
 Position needs every earlier step, so a transform that drops any of them,
 a compaction among them, is refused. Long workflows cannot be compacted
-until position can be read from somewhere else (open question 2). A
+until position is read from the session path instead (proposed). A
 transform that records its fold before returning may still have written
 it.
 
@@ -203,12 +227,23 @@ then `proceed by human`. Supplying the output directly would be recorded
 as `reject`, which is what the format says of any output a caller writes
 for a call that did not run.
 
+### A model that stops (spiked)
+
+A config cannot keep a run going, so `Drive` takes a run that ended and,
+if a model step is still current, reminds the model once. The reminder is
+a user message sent under a trigger of kind `workflow`: the record names
+its source, and neither the loop nor a reader takes it for the person's.
+A model that stops again is `ErrStalled`. An interactive host shows the
+person what the model said and prompts with their reply; an unattended
+one fails.
+
 ## Interactive and unattended
 
-When a person step is reached unattended, the host tries in order:
+When a question is reached, the host tries in order:
 
-1. its own rules or a reviewer (proposed)
-2. the node's `unattended` outcome, marked `by` in the result (spiked)
+1. its own rules (`Reply`), marked `by: rules` in the result and decided
+   `by: policy` in the record (spiked)
+2. unattended, the node's `unattended` outcome, marked `by` (spiked)
 3. waiting: the run ends `input_required` (spiked)
 
 The working model never answers on a person's behalf.
@@ -223,8 +258,8 @@ inherits its blind spots, so both have uses.
 
 ## Determinism and trust (proposed)
 
-- The session records a digest of the whole skill tree. A resume against
-  a different tree is refused unless the caller says otherwise.
+- `flow_start` records a digest of the graph (spiked). Loaded from a
+  skill, it must cover the whole tree, scripts included.
 - Branches use only recorded outcomes. Time, randomness and anything
   clever belong in a script whose result is recorded.
 - A workflow from a repository is repository code that runs at fixed
@@ -242,8 +277,8 @@ Offline, with a scripted model:
 - SIGKILL during a model turn: `Continue` finishes the workflow.
 - SIGKILL during a script: the call is pending and may have run. A tool
   that says replay is safe is approved and the workflow goes on. One
-  that does not cannot be approved, and answering that the outcome is
-  unknown fails the workflow.
+  that does not cannot be approved; answering that the outcome is
+  unknown fails the step, which asks whether to retry.
 - Loops, visit limits, failed scripts, policy deferral of a program step
   and the unattended default behave as described.
 - Fixed: one model turn could finish two steps; a transform could send
@@ -264,7 +299,14 @@ The figures count steps finished; every hosted model also chose the right
 outcome each time. The small model usually wrote the result as JSON text
 instead of calling `flow_finish`. The providers accepted a history
 holding a call to a tool the request no longer offered. The samples are
-small and the task easy.
+small and the task easy. The hosted figures predate `flow_start`.
+
+The role of the reminder, qwen3:1.7b, one reminder, 40 trials a row:
+
+| Reminder role | Stalls recovered |
+|---|---|
+| developer | 5 of 21, and 3 of 20 reworded |
+| user | 14 of 21 |
 
 Not yet tested: a model step that uses tools over many turns, a prompt
 that competes with the finish instruction, the real `compact` transform,
@@ -272,20 +314,19 @@ and the `context` modes.
 
 ## Open questions
 
-1. **A model that stops without finishing.** The run ends `done` with the
-   workflow unfinished. Proposed: a driver above the config nudges once,
-   as a developer message, then asks the person, or fails unattended. The
-   config alone cannot keep a run going.
-2. **Compaction.** Read position from the session path, or record
+1. **Compaction.** Read position from the session path, or record
    checkpoints that a fold keeps.
-3. **Start marker.** A transcript holds one instance. Proposed: the first
-   program call is `flow_start`, carrying an instance ID and the
-   definition digest, and replay begins at the last one.
-4. **Cost and eval tools** see `agentflow/` responses with no usage.
+2. **Data between steps.** A model step sees earlier results in the
+   transcript. A script gets none: nothing says how one step's data
+   becomes another's arguments.
+3. **Reminders.** One is the rule. A host may want more for a small
+   model.
+4. **A failed instance** answers every later prompt with its error until
+   an invocation, since the transcript does not say the error was seen.
+5. **Policy and the flow tools.** The config's `BeforeToolCall` sees
+   `flow_start`, `flow_ask` and `flow_finish`, so a policy that asks by
+   default asks about them. A host must allow them.
+6. **Cost and eval tools** see `agentflow/` responses with no usage.
    They should skip them, not report an unpriced model.
-5. **A failed step is final,** an unknown script outcome among them.
-   Proposed: ask the person whether to retry.
-6. **Gates.** A `check` script that rejects a model's result before the
+7. **Gates.** A `check` script that rejects a model's result before the
    step finishes.
-7. **Naming.** `flow_` and `agentflow/` need to be settled before any
-   session written with them is kept.
