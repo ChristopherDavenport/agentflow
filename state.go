@@ -229,6 +229,9 @@ type State struct {
 	// the end records.
 	endNow       bool
 	abandonedFor string
+	// show is a step's result a model is to see only as the step's show
+	// says, whose flow_shown the program makes before anything else.
+	show *unshown
 	// refused counts the verdicts a judge gave that it may not give.
 	refused int
 	// kept are the children the run keeps, by name, each with its spawn.
@@ -489,6 +492,9 @@ type replay struct {
 	// maxSteps is the tree's bound on step entries, and granted what a
 	// person added to it.
 	maxSteps, granted int
+	// unshown are the results a model is to see only as their steps' show
+	// says, whose flow_shown is yet to be made, oldest first.
+	unshown []unshown
 }
 
 // Replay reads where the workflow stands from a transcript: the
@@ -579,6 +585,11 @@ func (r *replay) state(f *frame) State {
 		_, st.requestErr = r.target(own)
 	}
 	st.Entries, st.Granted, st.maxSteps = r.entries, r.granted, r.maxSteps
+	st.show = nil
+	if len(r.unshown) > 0 {
+		u := r.unshown[0]
+		st.show = &u
+	}
 	if f.counted {
 		st.Entries, st.Granted = f.entries, f.granted
 	}
@@ -793,6 +804,12 @@ func (r *replay) call(i int, c *openresponses.FunctionCall) {
 
 func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 	c := r.calls[out.CallID]
+	if c != nil && c.Name == shownTool && strings.HasPrefix(c.CallID, reserved) {
+		// A result is shown however the call went: it is a view, and the
+		// record holds the whole result either way.
+		r.unshown = slices.DeleteFunc(r.unshown, func(u unshown) bool { return u.id() == out.CallID })
+		return
+	}
 	if c != nil && c.Name == endTool {
 		r.ended(i, c, out)
 		return
@@ -1170,6 +1187,9 @@ func (r *replay) ended(i int, c *openresponses.FunctionCall, out *openresponses.
 func (r *replay) finish(f *frame, i int, step Step) {
 	st := &f.st
 	n := st.Node
+	if n.Show != nil && n.Kind == Run && n.Flow == "" {
+		r.unshown = append(r.unshown, unshown{of: st.callID(), run: st.Instance, step: n.ID, visit: st.Visit, show: *n.Show, result: step.Result})
+	}
 	step.Node, step.Visit = n.ID, st.Visit
 	st.Steps = append(st.Steps, step)
 	f.since, st.Nudges, st.Begun, st.Advice, st.Held, st.refused = i, 0, false, nil, nil, 0

@@ -181,6 +181,8 @@ type settings struct {
 	Documents *stepDocuments `yaml:"documents"`
 	// The files a model step is given as context.
 	Files yaml.Node `yaml:"files"`
+	// What a model sees of a script or tool step's result.
+	Show yaml.Node `yaml:"show"`
 	// A question's own settings.
 	Choices   yaml.Node `yaml:"choices"`
 	Text      yaml.Node `yaml:"text"`
@@ -492,6 +494,9 @@ func node(n *agentflow.Node, s section) error {
 	if d := set.Documents; d != nil {
 		n.Reads, n.Edits, n.Writes = d.Read, d.Edit, d.Write
 	}
+	if n.Show, err = show(&set.Show); err != nil {
+		return err
+	}
 	if set.Timeout != "" {
 		d, err := time.ParseDuration(set.Timeout)
 		if err != nil || d <= 0 {
@@ -731,6 +736,28 @@ func (p *policySpec) policy() *agentflow.Policy {
 		out.Allow = []agentflow.PolicyRule{}
 	}
 	return out
+}
+
+// show reads what a model sees of a step's result: none, or a list of
+// the members of its data.
+func show(v *yaml.Node) (*agentflow.Show, error) {
+	want := fmt.Errorf("line %d: show: want none, or a list of the members of the result a model sees", v.Line)
+	switch {
+	case v.IsZero():
+		return nil, nil
+	case v.Kind == yaml.ScalarNode && v.Value == "none":
+		return &agentflow.Show{}, nil
+	case v.Kind != yaml.SequenceNode || len(v.Content) == 0:
+		return nil, want
+	}
+	s := &agentflow.Show{}
+	for _, c := range v.Content {
+		if c.Kind != yaml.ScalarNode || c.Value == "" {
+			return nil, want
+		}
+		s.Members = append(s.Members, c.Value)
+	}
+	return s, nil
 }
 
 // pairs visits a mapping in the order written. An absent node has none.

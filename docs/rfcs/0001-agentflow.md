@@ -214,6 +214,7 @@ and be none. Unknown keys are errors.
 | `on_abort` | frontmatter | the step a cleanup path starts at, run when the run is abandoned (RFC 0006, section 30) |
 | `files` | model | files given to the step as context when it opens, in order: workspace paths, literal or referred to, and `./` files of the skill, read and pinned at load (RFC 0006, section 34) |
 | `documents` | model; script, tool | on a model step, the documents it may `read` and `edit`; on a script or tool step, those it `write`s from members of its result. The frontmatter's `documents` declares them (RFC 0006, section 29) |
+| `show` | script, tool | the members of its result's data a working model sees, or `none` for the outcome alone; the record and every `with` keep the whole result (RFC 0007) |
 | `outcomes` | all | ways the node can end; `[ok]` if absent |
 | `unattended` | person | outcome, and data, taken when nobody can be asked |
 | `judge` | person | that a model may answer: `criteria`, `outcomes` it may choose, `tools`, `max_returns`, `policy` |
@@ -293,7 +294,10 @@ not share a stream.
 - A non-zero exit, a result that is not one JSON value, or one over 1 MiB
   fails the step. Nothing is truncated.
 
-Large data belongs in a workspace file, passed as its path and a hash.
+Large data belongs in a workspace file, passed as its path and a hash,
+or in a result whose step says with `show` what a model sees of it: the
+record and every step's `with` keep the whole result, and a model is
+sent the members named (RFC 0007).
 
 A script reports progress while it runs by appending lines to
 `$AGENTFLOW_PROGRESS`; each is a progress update of its call and changes
@@ -430,7 +434,8 @@ the format: a change to it changes `RecordFormat`.
 
 The definition holds what the working model should not read, a judge's
 criteria among it, so `flow_start` is left out of every request to it, as
-an omission that keeps the request hash. Its inputs go with it: a step
+an omission that keeps the request hash. So is a result a step shows
+only in part, in favour of its `flow_shown` (RFC 0007). Its inputs go with it: a step
 gets what its `with` names. The record itself holds all of it, and an
 agent that continues the session without agentflow would be sent it.
 
@@ -486,9 +491,9 @@ it:
   the record, whatever the transcript has lost, so a step's inputs reach
   a model as its inputs and nothing else is restored to the conversation
   to find them;
-- the host's `Transform` is given only what a model may read: `flow_start`
-  and a blind judge's verdict are gone before it, so no summary carries
-  them. A `fresh` step and a judge work in child sessions, each with the
+- the host's `Transform` is given only what a model may read: `flow_start`,
+  a blind judge's verdict and a result shown only in part are gone
+  before it, so no summary carries them. A `fresh` step and a judge work in child sessions, each with the
   transform its host's opener gives it;
 - a record that does not hold the calls of the transcript it is read
   beside is refused (`ErrRecordBehind`), so a recorder that has stopped,
