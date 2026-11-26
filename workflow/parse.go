@@ -129,6 +129,10 @@ type frontmatter struct {
 	OnAbort string `yaml:"on_abort"`
 	// ExcludeTools are tools no model step is offered.
 	ExcludeTools []string `yaml:"exclude_tools"`
+	// Context fresh says every call runs the workflow in a child, and
+	// Hidden that only a workflow that calls it runs it.
+	Context string `yaml:"context"`
+	Hidden  bool   `yaml:"hidden"`
 }
 
 // documentSpec is how a document starts: from a file of the skill, or as
@@ -232,6 +236,7 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 		}
 		outputs, g.MaxDepth, g.MaxSteps, g.Model, g.Thinking = fm.Outputs, fm.MaxDepth, fm.MaxSteps, fm.Model, fm.Thinking
 		g.Description, g.OnAbort, g.ExcludeTools = strings.TrimSpace(fm.Description), fm.OnAbort, fm.ExcludeTools
+		g.Context, g.Hidden = fm.Context, fm.Hidden
 		for name, d := range fm.Documents {
 			if g.Documents == nil {
 				g.Documents = map[string]agentflow.Document{}

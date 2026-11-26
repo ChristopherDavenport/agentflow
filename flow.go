@@ -174,6 +174,9 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 	if err := g.Validate(); err != nil {
 		return cfg, err
 	}
+	if g.Hidden && f.child == nil {
+		return cfg, fmt.Errorf("agentflow: %s is hidden: only a workflow that calls it runs it, so it is not applied on its own", g.Name)
+	}
 	closure := g.closure()
 	needs := false
 	for _, x := range closure {

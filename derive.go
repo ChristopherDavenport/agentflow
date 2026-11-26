@@ -17,7 +17,7 @@ func (n *Node) checkChild() []error {
 	bad := func(format string, args ...any) {
 		errs = append(errs, fmt.Errorf("agentflow: node %q: "+format, append([]any{n.ID}, args...)...))
 	}
-	if !n.fresh() {
+	if !n.fresh() && !n.unlinked() {
 		for _, s := range []struct {
 			key string
 			set bool
@@ -49,7 +49,7 @@ func (n *Node) checkSettings() []error {
 	}
 	call := n.Flow != ""
 	switch {
-	case n.Model != "" && n.Kind != Agent && !(call && n.fresh()):
+	case n.Model != "" && n.Kind != Agent && !(call && (n.fresh() || n.unlinked())):
 		bad("model is a model step's, or a child's")
 	case n.Thinking != "" && n.Kind != Agent:
 		bad("thinking is a model step's")
@@ -133,9 +133,16 @@ func (g *Graph) checkKept() []error {
 // it is a model step that asks for another model than its workflow's and
 // does not say context session. The other model would otherwise read a
 // conversation another model wrote, without that model's reasoning.
+//
+// A call also runs in a child when the workflow it calls says context
+// fresh of itself, which linking finds.
 func (n *Node) fresh() bool {
-	return n.Context == ContextFresh || n.Context == "" && n.otherModel
+	return n.Context == ContextFresh || n.Context == "" && (n.otherModel || n.call != nil && n.call.g.Context == ContextFresh)
 }
+
+// unlinked says n calls a workflow linking has not yet found, so where
+// it runs is not yet known: checks that turn on it wait for the link.
+func (n *Node) unlinked() bool { return n.Flow != "" && n.call == nil }
 
 // inputsOf is the inputs schema and the with of a workflow made from n,
 // which reads n's inputs as its own.

@@ -272,7 +272,7 @@ func (f *flow) settle(ctx context.Context, st State, p agentturn.PendingCall, a 
 		}
 	default:
 		var item openresponses.Item
-		if item, err = cf.g.Invocation(inputsOrNil(a.With)); err == nil {
+		if item, err = cf.g.invocation(inputsOrNil(a.With)); err == nil {
 			trigger := agentturn.ContextWithTrigger(cctx, agentturn.Trigger{Kind: TriggerKind, Ref: c.Caller})
 			if end, err = child.Prompt(trigger, item); end != nil {
 				end, cst, err = cf.drive(cctx, child, end)

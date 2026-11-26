@@ -379,6 +379,14 @@ type Graph struct {
 	OnAbort string `json:",omitempty"`
 	// Documents are the workflow's named markdown documents, by name.
 	Documents map[string]Document `json:",omitempty"`
+	// Context, set to [ContextFresh], says every call to the workflow runs
+	// it in a child of its own, whatever the call says; a call that says
+	// context session is a load error. Empty leaves it to each call.
+	Context string `json:",omitempty"`
+	// Hidden says the workflow is run only by other workflows that call
+	// it: neither an invocation nor a model's request for its skill starts
+	// it, and a catalog should leave it out.
+	Hidden bool `json:",omitempty"`
 	// ExcludeTools are tools no model step of the workflow is offered,
 	// whatever it names, and no judge of it may call.
 	ExcludeTools []string `json:",omitempty"`
@@ -462,6 +470,9 @@ func (g *Graph) Validate() error {
 		bad("outputs are either by outcome or for every outcome")
 	}
 	errs = append(errs, g.checkDefaults()...)
+	if g.Context != "" && g.Context != ContextFresh {
+		bad("context %q: a workflow may say only %q, that every call runs it in a child; leave it out to let each call say%s", g.Context, ContextFresh, suggest(g.Context, []string{ContextFresh}))
+	}
 	for _, tool := range g.ExcludeTools {
 		if tool == ScriptTool || strings.HasPrefix(tool, reserved) {
 			bad("exclude_tools: %s is the program's, which no model step is offered", tool)

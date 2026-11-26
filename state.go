@@ -337,7 +337,19 @@ type pinned struct {
 // Invocation is the item that asks for a new instance, carrying its
 // inputs, nil for none. A transcript with no instance starts one without
 // it, with no inputs.
+//
+// A hidden workflow ([Graph.Hidden]) is refused: only another workflow's
+// call starts it.
 func (g *Graph) Invocation(inputs any) (openresponses.Item, error) {
+	if g.Hidden {
+		return nil, fmt.Errorf("agentflow: %s is hidden: only a workflow that calls it runs it", g.Name)
+	}
+	return g.invocation(inputs)
+}
+
+// invocation is the item that starts a run of g in a child, where its
+// caller's call asked for it: a hidden workflow's too.
+func (g *Graph) invocation(inputs any) (openresponses.Item, error) {
 	text := invocationPrefix + g.Name
 	if inputs != nil {
 		if err := checkData(g.Inputs, inputs); err != nil {

@@ -20,7 +20,7 @@ func (g *Graph) checkDir(n *Node) []error {
 	bad := func(format string, args ...any) {
 		errs = append(errs, fmt.Errorf("agentflow: node %q: "+format, append([]any{n.ID}, args...)...))
 	}
-	if !n.fresh() && n.Script == "" {
+	if !n.fresh() && n.Script == "" && !n.unlinked() {
 		bad("dir is a setting of a child or of a script; it needs context: %s, or run", ContextFresh)
 	}
 	switch {

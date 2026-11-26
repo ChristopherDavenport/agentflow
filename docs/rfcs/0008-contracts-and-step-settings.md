@@ -71,3 +71,33 @@ exclude_tools: [fetch]
   step carries `tools: all` and the step's exclusions with its
   workflow's, and `ChildSettings` gives the opener `AllTools` and
   `ExcludeTools` to build the child's tools from.
+
+## 4. What a callee says of itself (spiked)
+
+```yaml
+---
+context: fresh     # every call runs this workflow in a child of its own
+hidden: true       # only a workflow that calls it runs it
+---
+```
+
+- **`context: fresh`** in a workflow's frontmatter makes every call to it
+  run in a child, as if the call said `context: fresh`: a workflow that
+  must not read, or write into, its caller's conversation says so once,
+  where it is defined. A call that says nothing runs it in a child, and
+  may then take a child's settings (`dir`, `model`, `instructions`). A
+  call that says `context: session` is a load error, raised by `Link`:
+  the callee's word is the one that holds, and it is not overridden in
+  silence. `fresh` is the only value a workflow may give; leaving the key
+  out leaves it to each call.
+- Which calls run fresh is known only once the workflows are linked, so a
+  child's settings on a call are checked again then, as a call's outcomes
+  already are. The record is unchanged: the call is an ordinary fresh
+  `flow_call`, held while its child runs.
+- **`hidden: true`** says the workflow is a part, run only by workflows
+  that call it. `Graph.Invocation` refuses it, `Apply` refuses it as a
+  root, and a model's request for its skill is to be refused too
+  (`Graph.Hidden` is what that reads). A call starts it, in its caller's
+  context or in a child. A catalog that lists workflows, or offers them to
+  a model, should leave hidden ones out; agentflow has no catalog of its
+  own, so that is the host's.
