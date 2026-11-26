@@ -53,7 +53,7 @@ func (m *model) CreateStream(_ context.Context, req openresponses.Request, sink 
 	if err != nil {
 		return err
 	}
-	if err := call.Arguments(`{"step":"review","outcome":"ok","data":{"summary":"Adds a.go."}}`); err != nil {
+	if err := call.Arguments(withRun(req, `{"step":"review","outcome":"ok","data":{"summary":"Adds a.go."}}`)); err != nil {
 		return err
 	}
 	if err := call.Close(); err != nil {
@@ -329,7 +329,7 @@ func (loopModel) CreateStream(_ context.Context, req openresponses.Request, sink
 	if err != nil {
 		return err
 	}
-	if err := call.Arguments(args); err != nil {
+	if err := call.Arguments(withRun(req, args)); err != nil {
 		return err
 	}
 	if err := call.Close(); err != nil {
@@ -367,7 +367,11 @@ func TestEndsAndAlternatives(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, line := range []string{"a -->|no| done((done))", "${{ optional(steps.a.outputs, steps.b.outputs) }}", "${{ latest(steps.a.outputs, steps.b.outputs) }}"} {
+	// An end's name is the outcome the workflow ends with.
+	if got := g.Outcomes(); !slices.Equal(got, []string{"stop"}) {
+		t.Errorf("outcomes = %v, want [stop]", got)
+	}
+	for _, line := range []string{"a -->|no| stop((stop))", "b --> stop((stop))", "${{ optional(steps.a.outputs, steps.b.outputs) }}", "${{ latest(steps.a.outputs, steps.b.outputs) }}"} {
 		if !strings.Contains(string(out), line) {
 			t.Errorf("not written: %s\n%s", line, out)
 		}
@@ -391,4 +395,15 @@ func TestEndsAndAlternatives(t *testing.T) {
 			t.Errorf("%s: err = %v, want %q", name, err, c.want)
 		}
 	}
+}
+
+// withRun names in a finish or a verdict the run the request's
+// instructions name, as a model reads it from them.
+func withRun(req openresponses.Request, args string) string {
+	_, rest, ok := strings.Cut(req.Instructions, `, run "`)
+	if !ok || !strings.HasPrefix(args, "{") || strings.Contains(args, `"run":`) {
+		return args
+	}
+	run, _, _ := strings.Cut(rest, `"`)
+	return `{"run":"` + run + `",` + args[1:]
 }

@@ -60,7 +60,7 @@ func (m *fakeModel) CreateStream(_ context.Context, req openresponses.Request, s
 		m.outcomes = m.outcomes[1:]
 		return say(sink, req.Model, "some text")
 	}
-	args, err := json.Marshal(finishArgs{Step: step, Outcome: m.outcomes[0]})
+	args, err := json.Marshal(finishArgs{Run: runIn(req), Step: step, Outcome: m.outcomes[0]})
 	if err != nil {
 		return err
 	}
@@ -77,6 +77,38 @@ func (m *fakeModel) CreateStream(_ context.Context, req openresponses.Request, s
 		return err
 	}
 	return e.Complete()
+}
+
+// runIn is the run a request's instructions tell the model to name.
+func runIn(req openresponses.Request) string {
+	_, rest, ok := strings.Cut(req.Instructions, `, run "`)
+	if !ok {
+		return ""
+	}
+	run, _, _ := strings.Cut(rest, `"`)
+	return run
+}
+
+// withRun adds to a finish or a verdict the run the request names, as a
+// model reads it from its instructions.
+func withRun(req openresponses.Request, tool, args string) string {
+	if tool != finishTool && tool != judgeTool {
+		return args
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(args), &m) != nil || m == nil || m["run"] != nil {
+		return args
+	}
+	run := runIn(req)
+	if run == "" {
+		return args
+	}
+	m["run"] = run
+	b, err := json.Marshal(m)
+	if err != nil {
+		return args
+	}
+	return string(b)
 }
 
 func say(sink openresponses.EventSink, model, text string) error {
@@ -352,8 +384,12 @@ func TestCallIDsFitProviders(t *testing.T) {
 	if err := g.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	st := State{Instance: "01234567", Node: &g.Nodes[0], Visit: 99, Attempt: 9}
-	if id := g.retryID(st); len(id) > 64 {
+	key, err := newKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := State{Instance: key, prefix: keyPrefix(key), Node: &g.Nodes[0], Visit: 99, Attempt: 99}
+	if id := st.retryID(); len(id) > 64 {
 		t.Errorf("%d characters: %s", len(id), id)
 	}
 }

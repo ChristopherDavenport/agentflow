@@ -152,7 +152,7 @@ so the picture cannot disagree with what runs.
 | `id([label])` | a person decides |
 | `a --> b` | `a` ends with `ok`, then `b` |
 | `a -->\|outcome\| b` | `a` ends with `outcome`, then `b` |
-| `id((label))` | an end, where an outcome stops the workflow |
+| `id((label))` | an end, where an outcome stops the workflow; its ID is the outcome the workflow ends with |
 | `%% text` | a comment |
 
 One node or one edge to a line; edges do not chain. A node has one shape,
@@ -160,7 +160,11 @@ given at least once. A label is free text, quoted if it likes, and means
 nothing. The first node mentioned is the start. An outcome with no edge
 ends the workflow, and an edge to an end says so where a reader can see
 it: an end is not a node, has no section and has nothing leaving it.
-`Format` draws one for each such outcome of a step that branches. Mermaid's keywords (`end`, `graph`, `subgraph`,
+An end's ID is the workflow's outcome there, and an outcome with no edge
+ends the workflow with its own name; a caller routes on them
+([RFC 0002](0002-nesting-and-children.md)). `Format` draws every end
+that is named otherwise, and one for each such outcome of a step that
+branches. Mermaid's keywords (`end`, `graph`, `subgraph`,
 `flowchart`, `direction`, `style`, `linkStyle`, `classDef`, `class`,
 `click`, `default`) cannot be IDs. That Mermaid itself draws every file
 this accepts has not been verified.
@@ -186,6 +190,7 @@ and be none. Unknown keys are errors.
 |---|---|---|
 | `run` | program | script path within the skill |
 | `tool`, `args` | program | a tool to call instead, with fixed arguments |
+| `flow` | program | a workflow to call instead: a skill's name, or `./<path>.md` in this skill; see [RFC 0002](0002-nesting-and-children.md) |
 | `with` | all | the step's inputs, by name |
 | `outputs` | all | schema of the step's data, by outcome |
 | `tools` | model | tools the model may call; none if absent |
@@ -208,6 +213,9 @@ inputs:                      # frontmatter, as workflow_call has
 outputs:
   summary: ${{ steps.score.outputs.summary }}
 ```
+
+Outputs may instead be given by outcome, as a step's are; see
+[RFC 0002](0002-nesting-and-children.md).
 
 ```yaml
 tool: git_tag
@@ -326,8 +334,11 @@ shows which turns the program took, and request hashes reproduce.
 ### An instance
 
 The first call of an instance is `flow_start`, which carries the
-workflow's name, its inputs, the digest of its definition, the
-definition itself and the record's format version. Replay begins there,
+workflow's name, its inputs, the digest of its definition and of every
+workflow it can call, the definitions themselves, the record's format
+version, the run's key and the bound on nesting. A call's start carries
+the key of the run that called it and the calling call instead
+([RFC 0002](0002-nesting-and-children.md)). Replay begins there,
 so whatever the transcript held before is ignored. Resuming with a
 definition whose digest differs is refused.
 
@@ -377,10 +388,10 @@ interrupted, or left by a host that never prompted again. A run stopped
 by a model error or a turn limit has not left the workflow. Only the
 program may call `flow_end`.
 
-`Instances(transcript)`, given every item of a session's path, lists the
-runs with where each
-starts and ends, its status, the definition it ran and its state, and
-`Instance.At` gives the state after any item. It needs neither the
+`Runs(transcript, open)`, given every item of a session's path, lists the
+runs nobody called with where each
+starts and ends, its status, outcome, the definition it ran, its state
+and the runs it called, and `Instance.At` gives the state after any item. It needs neither the
 current workflow nor a graph: it reads the recorded definition, checks it
 against the digest, and replays. A replay that disagrees with the
 recorded ending, an unknown format, or a definition that does not match
@@ -422,12 +433,15 @@ does, the workflow fails.
 
 Position is a pure function of the graph and the record, meaning every
 item that happened, in order. Program steps are matched by call ID
-(`flow_<workflow>_<instance>_<node>_v<visit>`, with `-a<attempt>` on a
-retry), model steps by a successful `flow_finish` naming the node, made
-after the node became current, so one model turn cannot finish a step it
-has not yet been given. Nothing else is stored. Names are bounded, 16
-characters for a workflow and 20 for a node, because providers limit
-call IDs.
+(`flow_<key>_<node>_v<visit>`, with `-a<attempt>` on a retry, where the
+key is the run's, drawn at its start), model steps by a successful
+`flow_finish` naming the run and the node, made after the node became
+current, so one model turn cannot finish a step it has not yet been
+given. Nothing else is stored. A node's ID is bounded to 20 characters,
+because providers limit call IDs; a workflow's name is not in them.
+Record format 1 put the workflow's name, cut to 16 characters, and an
+instance in place of the key; a run of it is still read and resumed as
+it was written.
 
 **The record and what a model is sent are different things** (spiked).
 A compaction shortens the model's view, and so does an omission read back
@@ -769,7 +783,8 @@ Offline, with a scripted model:
   and the unattended default behave as described.
 - Fixed: one model turn could finish two steps; a transform could send
   the workflow back to its start.
-- No change to agentturn or the session format was needed.
+- No change to agentturn or the session format was needed, for nesting
+  in a shared context either (RFC 0002).
 
 With real models, one model step with two outcomes after a program step,
 8 trials each (6 for the local model), 2026-11-25:

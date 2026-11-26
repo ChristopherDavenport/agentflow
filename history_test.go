@@ -273,7 +273,7 @@ func TestResumeAfterKillInAModelStep(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			runs, err := Instances(pathItems(got))
+			runs, err := Runs(pathItems(got), nil)
 			if err != nil || len(runs) != 1 || runs[0].Status != Done || runs[0].Problem != "" {
 				t.Errorf("runs = %+v, %v", runs, err)
 			}
@@ -375,7 +375,7 @@ func TestResumeWhenTheTranscriptHasLostItems(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			runs, err := Instances(pathItems(got))
+			runs, err := Runs(pathItems(got), nil)
 			if err != nil || len(runs) != 1 || runs[0].Status != Done || runs[0].Problem != "" {
 				t.Errorf("runs = %+v, %v", runs, err)
 			}

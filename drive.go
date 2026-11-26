@@ -56,7 +56,7 @@ func Drive(ctx context.Context, g *Graph, a *agentturn.Agent, end *agentturn.Run
 		// A judge nobody is waiting on is not reminded: the person has
 		// answered, and the workflow goes on.
 		if st.Held != nil {
-			nudge = noVerdict
+			nudge = noVerdict + visitTag(st)
 		}
 		from := agentturn.ContextWithTrigger(ctx, agentturn.Trigger{Kind: TriggerKind, Ref: g.Name})
 		next, err := a.Prompt(from, openresponses.UserText(nudge))

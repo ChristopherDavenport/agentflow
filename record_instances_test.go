@@ -21,7 +21,7 @@ var clean = says{finishTool, `{"step":"review","outcome":"clean"}`}
 
 // recorded runs a graph in a stored session and returns a function that
 // reads the instances back from the store.
-func recorded(t *testing.T, g *Graph, tool agenttool.Tool, m *cast, opts ...Option) (*agentturn.Agent, func() (agentturn.Transcript, []Instance)) {
+func recorded(t *testing.T, g *Graph, tool agenttool.Tool, m *cast, opts ...Option) (*agentturn.Agent, func() (agentturn.Transcript, []*Instance)) {
 	t.Helper()
 	ctx := context.Background()
 	store, err := jsonl.Open(t.TempDir())
@@ -38,14 +38,14 @@ func recorded(t *testing.T, g *Graph, tool agenttool.Tool, m *cast, opts ...Opti
 	}
 	a := agentturn.New(cfg)
 	rec.Attach(a)
-	return a, func() (agentturn.Transcript, []Instance) {
+	return a, func() (agentturn.Transcript, []*Instance) {
 		got, err := store.Open(ctx, s.ID())
 		if err != nil {
 			t.Fatal(err)
 		}
 		checkHashes(t, got)
 		items := pathItems(got)
-		all, err := Instances(items)
+		all, err := Runs(items, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -111,7 +111,7 @@ func TestATrimmedTranscriptIsRefused(t *testing.T) {
 	if _, err := g.Replay(trimmed); !errors.Is(err, ErrPositionLost) {
 		t.Errorf("replay: %v", err)
 	}
-	if _, err := Instances(trimmed); !errors.Is(err, ErrPositionLost) {
+	if _, err := Runs(trimmed, nil); !errors.Is(err, ErrPositionLost) {
 		t.Errorf("instances: %v", err)
 	}
 	ran = nil

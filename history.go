@@ -251,6 +251,10 @@ func note(c *openresponses.FunctionCall, result string, answered bool) string {
 		var e Ending
 		_ = decode([]byte(c.Arguments), &e)
 		return fmt.Sprintf("%sthe workflow run ended: %s. %s", recordPrefix, e.Status, e.Reason)
+	case callTool:
+		var a callArgs
+		_ = decode([]byte(c.Arguments), &a)
+		return fmt.Sprintf("%sthe workflow, not the assistant, called the workflow %s, which came to: %s", recordPrefix, a.Workflow, result)
 	case ScriptTool:
 		var sc ScriptCall
 		_ = decode([]byte(c.Arguments), &sc)

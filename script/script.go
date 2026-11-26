@@ -43,13 +43,23 @@ const SkillDirEnv = "AGENTFLOW_SKILL_DIR"
 // Option configures [New].
 type Option func(*options)
 
-type options struct{ files map[string][]byte }
+type options struct {
+	files  map[string][]byte
+	skills map[string]map[string][]byte
+}
 
 // Files gives the files scripts are run from, by slash path. They are
 // written to a new directory of the workspace for each run and removed
 // after it, so what runs is what was loaded and not what the workspace
 // holds. The script still starts at the workspace's root.
 func Files(files map[string][]byte) Option { return func(o *options) { o.files = files } }
+
+// Skills gives the files of every skill a run's workflows are of, by
+// skill, for a workflow that calls one of another skill. A script of the
+// workflow the run started from runs from [Files].
+func Skills(skills map[string]map[string][]byte) Option {
+	return func(o *options) { o.skills = skills }
+}
 
 // New returns the tool a graph's script steps call, running them in ws.
 // A script is a path within the workspace, or within the [Files] given.
@@ -70,7 +80,14 @@ func New(ws agentworkspace.Workspace, timeout time.Duration, opts ...Option) age
 			}
 			a = exact
 		}
-		return run(ctx, ws, timeout, o.files, a)
+		files := o.files
+		if a.Skill != "" {
+			var ok bool
+			if files, ok = o.skills[a.Skill]; !ok {
+				return agentflow.Result{}, fmt.Errorf("script %q: no files are given for skill %q", a.Run, a.Skill)
+			}
+		}
+		return run(ctx, ws, timeout, files, a)
 	})
 }
 

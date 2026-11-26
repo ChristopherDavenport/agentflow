@@ -38,7 +38,7 @@ func (m *cast) CreateStream(_ context.Context, req openresponses.Request, sink o
 	if err != nil {
 		return err
 	}
-	if err := call.Arguments(next.args); err != nil {
+	if err := call.Arguments(withRun(req, next.tool, next.args)); err != nil {
 		return err
 	}
 	if err := call.Close(); err != nil {

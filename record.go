@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -16,11 +17,15 @@ import (
 
 // RecordFormat versions what a workflow writes into a transcript and how
 // it is read. flow_start carries it, and a reader that does not know the
-// one it finds says so rather than guess.
-const RecordFormat = 1
+// one it finds says so rather than guess. Format 2 keys every run, so
+// that runs can nest; a run of format 1 is still read, and resumed, as a
+// run nobody called.
+const RecordFormat = 2
 
 // The statuses of an [Instance]. All but running are written down, by
 // flow_end, so that having left a workflow is not something to infer.
+// Failed is also the outcome a call ends with when what it called
+// failed.
 const (
 	Running   = "running"
 	Done      = "done"
@@ -36,14 +41,25 @@ type PathStep struct {
 	By      string `json:"by,omitempty"`
 }
 
-// Ending is flow_end's arguments: that an instance is over, how, and the
-// way it went, which a reader's own replay can be held to.
+// Ending is flow_end's arguments: that a run is over, how, and the way
+// it went, which a reader's own replay can be held to.
 type Ending struct {
-	Instance string         `json:"instance"`
-	Status   string         `json:"status"`
-	Reason   string         `json:"reason,omitempty"`
-	Path     []PathStep     `json:"path,omitempty"`
-	Outputs  map[string]any `json:"outputs,omitempty"`
+	// Instance is the run's key.
+	Instance string `json:"instance"`
+	Status   string `json:"status"`
+	// Outcome is the end a done run reached.
+	Outcome string         `json:"outcome,omitempty"`
+	Reason  string         `json:"reason,omitempty"`
+	Path    []PathStep     `json:"path,omitempty"`
+	Outputs map[string]any `json:"outputs,omitempty"`
+	// Step is the step a failed run was at.
+	Step string `json:"step,omitempty"`
+	// Limit names the bound across the tree of runs the run failed on,
+	// such as depth, so every run it is nested in fails with it.
+	Limit string `json:"limit,omitempty"`
+
+	// id is the ID of the call that writes it.
+	id string
 }
 
 func pathOf(steps []Step) []PathStep {
@@ -54,32 +70,42 @@ func pathOf(steps []Step) []PathStep {
 	return out
 }
 
-// ending is how the instance st stands would be ended: what it came to,
-// or abandoned if it came to nothing.
+// ending is how the run st stands would be ended: what it came to, or
+// abandoned if it came to nothing.
 func ending(st State, failed error) *Ending {
-	e := &Ending{Instance: st.Instance, Status: Abandoned, Path: pathOf(st.Steps)}
+	e := &Ending{Instance: st.Instance, Status: Abandoned, Path: pathOf(st.Steps), id: st.endID()}
+	if st.Done {
+		e.Outcome = st.Outcome
+	}
 	switch {
 	case failed != nil:
-		e.Status, e.Reason = Failed, failed.Error()
+		e.Status, e.Reason, e.Limit = Failed, failed.Error(), st.limit
+		if st.Node != nil {
+			e.Step = st.Node.ID
+		}
 	case st.Done:
 		e.Status, e.Outputs = Done, st.Outputs
 	}
 	return e
 }
 
-func (g *Graph) endID(instance string) string { return g.idPrefix() + instance + "_end" }
-
-// Instance is one run of a workflow, as a transcript tells it. It needs
-// nothing but the transcript: the definition is the one the run started
-// with, however the workflow has changed since.
+// Instance is one run of a workflow, as a transcript tells it, with the runs
+// it called. It needs nothing but the transcript: the definitions are
+// those the run's root pinned, however the workflows have changed since.
 type Instance struct {
 	Workflow, ID, Digest string
 	Graph                *Graph
 	Inputs               any
+	// Parent and Caller are the key of the run that called this one and
+	// the ID of its call, empty for a run nobody called. Depth counts
+	// the runs it is nested in.
+	Parent, Caller string
+	Depth          int
 	// Start is the item that called flow_start, and End the item that
 	// recorded the ending, -1 while there is none.
 	Start, End int
 	Status     string
+	Outcome    string
 	Reason     string
 	// State is where the run got to.
 	State State
@@ -87,16 +113,21 @@ type Instance struct {
 	// unknown format, a definition that does not match its digest, or a
 	// replay that disagrees with the recorded ending.
 	Problem string
+	// Children are the runs it called, in the order they started.
+	Children []*Instance
 
-	// stop is the first item that is no longer the run's.
-	stop int
+	// root's graph replays from from up to stop, the first item no
+	// longer the root's.
+	root       *Graph
+	from, stop int
 }
 
-// Instances lists the workflow runs of a transcript, in the order they
-// started.
-func Instances(t agentturn.Transcript) ([]Instance, error) {
+// Runs lists the runs of a transcript nobody called, in the order they
+// started, each with the runs it called. open reads a session a run was
+// called into; it may be nil while none is.
+func Runs(t agentturn.Transcript, open func(session string) (agentturn.Transcript, error)) ([]*Instance, error) {
 	calls := map[string]int{}
-	var out []Instance
+	var out []*Instance
 	started, made := false, false
 	for i, item := range t {
 		switch it := item.(type) {
@@ -115,11 +146,13 @@ func Instances(t agentturn.Transcript) ([]Instance, error) {
 			if c.Name != startTool || !strings.HasPrefix(c.CallID, reserved) {
 				continue
 			}
-			in, err := instance(t, at, c, it)
+			run, err := rootRun(t, at, c, it)
 			if err != nil {
 				return nil, fmt.Errorf("agentflow: item %d: %w", at, err)
 			}
-			out = append(out, in)
+			if run != nil {
+				out = append(out, run)
+			}
 		}
 	}
 	if made && !started {
@@ -130,99 +163,176 @@ func Instances(t agentturn.Transcript) ([]Instance, error) {
 
 // At is where the run stood once item i of t had happened. Items before
 // the run or after it give where it began or ended.
-func (in Instance) At(t agentturn.Transcript, i int) (State, error) {
-	if in.Graph == nil {
-		return State{}, errors.New("agentflow: no state to read: " + cmp.Or(in.Problem, "the run never started: "+in.Reason))
+func (run *Instance) At(t agentturn.Transcript, i int) (State, error) {
+	if run.root == nil {
+		return State{}, errors.New("agentflow: no state to read: " + cmp.Or(run.Problem, "the run never started: "+run.Reason))
 	}
-	upto := min(max(i+1, in.Start), in.stop, len(t))
-	var run agentturn.Transcript
-	for _, item := range t[in.Start:upto] {
-		// A request for the next run is not part of this one.
+	r := run.root.replay(spanOf(run.root, t, run.from, min(max(i+1, run.from), run.stop, len(t))))
+	for _, f := range r.frames {
+		if f.st.Instance == run.ID {
+			st := r.state(f)
+			return st, f.failed
+		}
+	}
+	// Not yet started: where it was about to begin.
+	if run.Parent == "" {
+		return r.state(r.root), nil
+	}
+	return State{Workflow: run.Workflow, Instance: run.ID, Parent: run.Parent, Caller: run.Caller, Depth: run.Depth}, nil
+}
+
+// spanOf is t's items from from to to, without the invocations of the
+// root's workflow: a request for the next run is not part of this one.
+func spanOf(g *Graph, t agentturn.Transcript, from, to int) agentturn.Transcript {
+	var out agentturn.Transcript
+	for _, item := range t[from:to] {
 		if m, ok := item.(*openresponses.Message); ok && m.Role == openresponses.RoleDeveloper {
-			if _, invoked := in.Graph.invoked(m.Text()); invoked {
+			if _, invoked := g.invoked(m.Text()); invoked {
+				// Kept out by position: the span stops at the first.
 				continue
 			}
 		}
-		run = append(run, item)
+		out = append(out, item)
 	}
-	return in.Graph.Replay(run)
+	return out
 }
 
-func instance(t agentturn.Transcript, at int, c *openresponses.FunctionCall, out *openresponses.FunctionCallOutput) (Instance, error) {
-	var p struct {
-		Workflow   string          `json:"workflow"`
-		Digest     string          `json:"digest"`
-		Inputs     any             `json:"inputs"`
-		Format     int             `json:"format"`
-		Definition json.RawMessage `json:"definition"`
-	}
+// rootRun reads the run nobody called whose flow_start is item at, nil
+// for a call's start.
+func rootRun(t agentturn.Transcript, at int, c *openresponses.FunctionCall, out *openresponses.FunctionCallOutput) (*Instance, error) {
+	var p startPayload
 	if err := decode([]byte(c.Arguments), &p); err != nil {
-		return Instance{}, fmt.Errorf("flow_start: %w", err)
+		return nil, fmt.Errorf("flow_start: %w", err)
 	}
-	in := Instance{Workflow: p.Workflow, Digest: p.Digest, Inputs: p.Inputs, Start: at, End: -1, Status: Running, stop: len(t)}
+	if p.Parent != "" {
+		return nil, nil
+	}
+	run := &Instance{Workflow: p.Workflow, Digest: p.Digest, Inputs: p.Inputs, Start: at, End: -1, Status: Running, from: at, stop: len(t)}
 	var res Result
 	if json.Unmarshal([]byte(out.Output.String()), &res) != nil || res.Outcome != OK {
-		in.Status, in.Reason, in.stop = Failed, out.Output.String(), at
-		return in, nil
+		run.Status, run.Reason = Failed, out.Output.String()
+		return run, nil
 	}
-	if p.Format != RecordFormat {
-		in.Problem = fmt.Sprintf("record format %d, and this reads %d", p.Format, RecordFormat)
-		return in, nil
+	if p.Format != 1 && p.Format != RecordFormat {
+		run.Problem = fmt.Sprintf("record format %d, and this reads up to %d", p.Format, RecordFormat)
+		return run, nil
 	}
-	g, err := decodeGraph(p.Definition)
+	g, err := pinnedGraph(p)
 	if err != nil {
-		in.Problem = "definition: " + err.Error()
-		return in, nil
+		run.Problem = err.Error()
+		return run, nil
 	}
-	if g.Digest() != p.Digest {
-		in.Problem = "the definition does not match its digest"
-		return in, nil
+	run.Graph, run.root = g, g
+	run.ID = p.Run
+	if p.Format == 1 {
+		run.ID = strings.TrimSuffix(strings.TrimPrefix(c.CallID, v1Prefix(g.Name)), "_start")
 	}
-	in.Graph = g
-	in.ID = strings.TrimSuffix(strings.TrimPrefix(c.CallID, g.idPrefix()), "_start")
-
-	// The run stops where another is asked for, and ends where flow_end
-	// says, which for an abandoned run is after that.
-	var end *Ending
-	for i := at + 1; i < len(t) && end == nil; i++ {
+	// The run stops where another of its workflow is asked for or
+	// started; its ending, and its calls', for an abandoned run, come
+	// after that.
+	ends := map[string]int{}
+	for i := at + 1; i < len(t); i++ {
 		switch it := t[i].(type) {
 		case *openresponses.Message:
 			if it.Role == openresponses.RoleDeveloper {
 				if _, invoked := g.invoked(it.Text()); invoked {
-					in.stop = min(in.stop, i)
+					run.stop = min(run.stop, i)
 				}
 			}
 		case *openresponses.FunctionCall:
-			if it.Name == startTool && strings.HasPrefix(it.CallID, g.idPrefix()) {
-				in.stop = min(in.stop, i)
-			}
-			if it.Name == endTool && it.CallID == g.endID(in.ID) {
-				var e Ending
-				if err := decode([]byte(it.Arguments), &e); err != nil {
-					return in, fmt.Errorf("flow_end: %w", err)
+			if it.Name == startTool && strings.HasPrefix(it.CallID, reserved) && i < run.stop {
+				var q startPayload
+				if decode([]byte(it.Arguments), &q) == nil && q.Parent == "" && q.Workflow == g.Name {
+					run.stop = i
 				}
-				end, in.End = &e, i
-				in.stop = min(in.stop, i)
+			}
+			if it.Name == endTool && strings.HasPrefix(it.CallID, reserved) {
+				if _, seen := ends[it.CallID]; !seen {
+					ends[it.CallID] = i
+				}
 			}
 		}
 	}
-	st, replayErr := in.At(t, in.stop-1)
-	in.State = st
-	if end == nil {
-		return in, nil
+	r := g.replay(spanOf(g, t, at, run.stop))
+	byKey := map[string]*Instance{}
+	for _, f := range r.frames {
+		if k, ok := ends[f.st.endID()]; ok && f.ending == nil {
+			var e Ending
+			if err := decode([]byte(t[k].(*openresponses.FunctionCall).Arguments), &e); err != nil {
+				return run, fmt.Errorf("flow_end: %w", err)
+			}
+			f.ending, f.end = &e, k-at
+		}
+		in := run
+		if f.parent != nil {
+			in = &Instance{Workflow: f.st.Workflow, ID: f.st.Instance, Digest: f.st.g.OwnDigest(), Graph: f.st.g, Inputs: f.st.Inputs,
+				Parent: f.st.Parent, Caller: f.st.Caller, Depth: f.st.Depth, Start: at + f.start, End: -1, Status: Running,
+				root: g, from: at, stop: run.stop}
+			if f.end >= 0 {
+				in.End = at + f.end
+			}
+			if parent := byKey[f.st.Parent]; parent != nil {
+				parent.Children = append(parent.Children, in)
+			}
+		}
+		byKey[f.st.Instance] = in
+		in.State = r.state(f)
+		judge(in, f)
 	}
-	in.Status, in.Reason = end.Status, end.Reason
+	if len(r.frames) > 0 && r.frames[0].end >= 0 {
+		run.End = at + r.frames[0].end
+	}
+	return run, nil
+}
+
+// judge sets a run's status from its ending, and holds the replay to it.
+func judge(in *Instance, f *frame) {
+	st, e := f.st, f.ending
+	if e == nil {
+		return
+	}
+	in.Status, in.Reason, in.Outcome = e.Status, e.Reason, e.Outcome
+	ended := st.Done && st.Outcome != Failed
 	switch {
-	case !slices.Equal(pathOf(st.Steps), end.Path):
+	case !slices.Equal(pathOf(st.Steps), e.Path):
 		in.Problem = "the replayed path is not the one recorded at the end"
-	case end.Status == Done && !st.Done:
+	case e.Status == Done && !ended:
 		in.Problem = "recorded as done, and the replay is not"
-	case end.Status != Done && st.Done:
-		in.Problem = "recorded as " + end.Status + ", and the replay is done"
-	case end.Status != Failed && replayErr != nil:
-		in.Problem = replayErr.Error()
+	case e.Status != Done && ended:
+		in.Problem = "recorded as " + e.Status + ", and the replay is done"
+	case e.Status != Failed && f.failed != nil && !f.st.Ended:
+		in.Problem = f.failed.Error()
 	}
-	return in, nil
+}
+
+// pinnedGraph is the root a start pinned, linked to the workflows it
+// pinned beside it, held to their digests.
+func pinnedGraph(p startPayload) (*Graph, error) {
+	g, err := decodeGraph(p.Definition)
+	if err != nil {
+		return nil, fmt.Errorf("definition: %w", err)
+	}
+	var flows []*Graph
+	for _, name := range slices.Sorted(maps.Keys(p.Definitions)) {
+		pin := p.Definitions[name]
+		c, err := decodeGraph(pin.Definition)
+		if err != nil {
+			return nil, fmt.Errorf("definition of %s: %w", name, err)
+		}
+		if c.OwnDigest() != pin.Digest {
+			return nil, fmt.Errorf("the definition of %s does not match its digest", name)
+		}
+		flows = append(flows, c)
+	}
+	if len(flows) > 0 || slices.ContainsFunc(g.Nodes, func(n Node) bool { return n.Flow != "" }) {
+		if err := g.Link(flows...); err != nil {
+			return nil, fmt.Errorf("definitions: %w", err)
+		}
+	}
+	if g.Digest() != p.Digest {
+		return nil, errors.New("the definition does not match its digest")
+	}
+	return g, nil
 }
 
 // decodeGraph reads a graph back from the JSON its digest is taken of.
@@ -240,6 +350,7 @@ func decodeGraph(raw []byte) (*Graph, error) {
 		return nil, err
 	}
 	g := def.Graph
+	g.Nodes = nil
 	var err error
 	if g.Inputs, err = decodeSchema(def.Inputs); err != nil {
 		return nil, err

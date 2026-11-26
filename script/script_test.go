@@ -113,7 +113,7 @@ func (m *model) CreateStream(_ context.Context, req openresponses.Request, sink 
 	if err != nil {
 		return err
 	}
-	if err := call.Arguments(args); err != nil {
+	if err := call.Arguments(withRun(req, args)); err != nil {
 		return err
 	}
 	if err := call.Close(); err != nil {
@@ -432,4 +432,15 @@ func TestTheModelCannotRunScripts(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(ws.Root(), "ran")); !os.IsNotExist(err) {
 		t.Fatalf("the model ran a script: %v", err)
 	}
+}
+
+// withRun names in a finish or a verdict the run the request's
+// instructions name, as a model reads it from them.
+func withRun(req openresponses.Request, args string) string {
+	_, rest, ok := strings.Cut(req.Instructions, `, run "`)
+	if !ok || !strings.HasPrefix(args, "{") || strings.Contains(args, `"run":`) {
+		return args
+	}
+	run, _, _ := strings.Cut(rest, `"`)
+	return `{"run":"` + run + `",` + args[1:]
 }

@@ -193,7 +193,7 @@ func (m *twoFinishes) CreateStream(_ context.Context, req openresponses.Request,
 		if err != nil {
 			return err
 		}
-		args, err := json.Marshal(finishArgs{Step: step, Outcome: OK})
+		args, err := json.Marshal(finishArgs{Run: runIn(req), Step: step, Outcome: OK})
 		if err != nil {
 			return err
 		}
@@ -222,13 +222,14 @@ func TestOneTurnCannotFinishTheNextStep(t *testing.T) {
 		t.Errorf("model turns = %d, want 2", m.turns)
 	}
 	// Replay holds the rule without the gate, for a record made elsewhere.
-	begin, _ := json.Marshal(startPayload{Workflow: g.Name, Digest: g.Digest(), Format: RecordFormat})
+	const key = "0123456789"
+	begin, _ := json.Marshal(startPayload{Workflow: g.Name, Digest: g.Digest(), Format: RecordFormat, Run: key})
 	forged := agentturn.Transcript{
-		&openresponses.FunctionCall{CallID: g.startID("i"), Name: startTool, Arguments: string(begin)},
-		&openresponses.FunctionCallOutput{CallID: g.startID("i"), Output: openresponses.FunctionCallOutputData{Text: `{"outcome":"ok"}`}},
+		&openresponses.FunctionCall{CallID: keyPrefix(key) + "start", Name: startTool, Arguments: string(begin)},
+		&openresponses.FunctionCallOutput{CallID: keyPrefix(key) + "start", Output: openresponses.FunctionCallOutputData{Text: `{"outcome":"ok"}`}},
 	}
 	for _, step := range []string{"plan", "build"} {
-		args, _ := json.Marshal(finishArgs{Step: step, Outcome: OK})
+		args, _ := json.Marshal(finishArgs{Run: key, Step: step, Outcome: OK})
 		forged = append(forged, &openresponses.FunctionCall{CallID: step, Name: finishTool, Arguments: string(args)})
 	}
 	for _, step := range []string{"plan", "build"} {

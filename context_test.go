@@ -103,7 +103,7 @@ func TestFreshContextSeesOnlyItsStep(t *testing.T) {
 
 func TestFreshContextIsNotSilentlyWidened(t *testing.T) {
 	g := release()
-	if _, err := since(openresponses.Items{openresponses.UserText("a secret")}, g.node("fix")); err == nil {
+	if _, err := since(openresponses.Items{openresponses.UserText("a secret")}, State{Node: g.node("fix"), Instance: "k"}); err == nil {
 		t.Error("a missing opening message sent the whole input")
 	}
 }

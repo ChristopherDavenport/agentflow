@@ -1,9 +1,8 @@
 package agentflow
 
 import (
+	"cmp"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +17,12 @@ import (
 
 // Question is what a Person node asks.
 type Question struct {
+	// Workflow and Run name the run that asks, and Path the way to it
+	// from the run nobody called. A question of a record of format 1
+	// names none of them.
+	Workflow string   `json:"workflow,omitempty"`
+	Run      string   `json:"run,omitempty"`
+	Path     []Place  `json:"path,omitempty"`
 	Step     string   `json:"step"`
 	Question string   `json:"question"`
 	Outcomes []string `json:"outcomes"`
@@ -44,6 +49,7 @@ type Question struct {
 }
 
 type finishArgs struct {
+	Run     string `json:"run,omitempty"`
 	Step    string `json:"step"`
 	Outcome string `json:"outcome"`
 	Data    any    `json:"data,omitempty"`
@@ -63,8 +69,14 @@ func Reply(fn func(context.Context, Question) (Result, bool)) Option {
 	return func(f *flow) { f.reply = fn }
 }
 
+// MaxDepth bounds how deeply calls nest, under the bound the workflow
+// sets for itself; the smaller wins. The run's start records the bound,
+// so a resume keeps it.
+func MaxDepth(n int) Option { return func(f *flow) { f.maxDepth = n } }
+
 type flow struct {
 	g          *Graph
+	maxDepth   int
 	model      openresponses.Streamer
 	modelName  string
 	unattended bool
@@ -88,6 +100,14 @@ func Apply(g *Graph, cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 	if err := g.Validate(); err != nil {
 		return cfg, err
 	}
+	closure := g.closure()
+	for _, x := range closure {
+		for _, n := range x.Nodes {
+			if n.Flow != "" && n.call == nil {
+				return cfg, fmt.Errorf("agentflow: %s: node %q calls %s, and the graph is not linked; call Link", x.Name, n.ID, n.Flow)
+			}
+		}
+	}
 	f := &flow{g: g, model: cfg.Model, modelName: cfg.ModelName}
 	for _, opt := range opts {
 		opt(f)
@@ -108,7 +128,10 @@ func Apply(g *Graph, cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 		return cfg, errors.New("agentflow: the judge needs a model")
 	}
 
-	own := []agenttool.Tool{f.startTool(), f.askTool(), f.finishTool(), f.judgeTool(), f.endTool()}
+	if f.maxDepth < 0 {
+		return cfg, errors.New("agentflow: max depth must not be negative")
+	}
+	own := []agenttool.Tool{f.startTool(), f.askTool(), f.finishTool(), f.judgeTool(), f.endTool(), f.callTool()}
 	if p := cfg.ToolProvider; p != nil {
 		cfg.ToolProvider = func(ctx context.Context) []agenttool.Tool {
 			return append(slices.Clone(p(ctx)), own...)
@@ -117,7 +140,11 @@ func Apply(g *Graph, cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 		cfg.Tools = append(slices.Clone(cfg.Tools), own...)
 	}
 
-	if cfg.ToolProvider == nil && slices.ContainsFunc(g.Nodes, func(n Node) bool { return n.Script != "" }) &&
+	scripts := false
+	for _, x := range closure {
+		scripts = scripts || slices.ContainsFunc(x.Nodes, func(n Node) bool { return n.Script != "" })
+	}
+	if cfg.ToolProvider == nil && scripts &&
 		!slices.ContainsFunc(cfg.Tools, func(t agenttool.Tool) bool { return t.Name() == ScriptTool }) {
 		return cfg, fmt.Errorf("agentflow: the graph has script steps and the config no %q tool", ScriptTool)
 	}
@@ -162,7 +189,8 @@ func (f *flow) samePosition(before, after agentturn.Transcript) error {
 		return err
 	}
 	if a.Instance != b.Instance || a.Node != b.Node || a.Visit != b.Visit || a.Attempt != b.Attempt ||
-		a.Done != b.Done || a.Ended != b.Ended || a.Reported != b.Reported || len(a.Steps) != len(b.Steps) || (a.Advice == nil) != (b.Advice == nil) || (a.Held == nil) != (b.Held == nil) {
+		a.Done != b.Done || a.Ended != b.Ended || a.Reported != b.Reported || len(a.Steps) != len(b.Steps) || (a.Advice == nil) != (b.Advice == nil) || (a.Held == nil) != (b.Held == nil) ||
+		a.Callee != b.Callee || (a.Returned == nil) != (b.Returned == nil) || len(a.Path) != len(b.Path) {
 		return ErrPositionLost
 	}
 	return nil
@@ -193,29 +221,30 @@ func (f *flow) begin(ctx context.Context, info agentturn.TurnStartInfo) (openres
 	return openresponses.Items{openresponses.UserText(text + " Do this step now." + visitTag(st))}, nil
 }
 
-// since returns the input from the message that opened this visit of n.
-func since(input openresponses.Items, n *Node) (openresponses.Items, error) {
+// since returns the input from the message that opened this visit of
+// st's node.
+func since(input openresponses.Items, st State) (openresponses.Items, error) {
 	for i := len(input) - 1; i >= 0; i-- {
-		if m, ok := input[i].(*openresponses.Message); ok && opens(m, n) {
+		if m, ok := input[i].(*openresponses.Message); ok && opens(m, &st) {
 			return slices.Clone(input[i:]), nil
 		}
 	}
 	// Sending everything would show a step what it must not see.
-	return nil, fmt.Errorf("%w: the start of step %q", ErrPositionLost, n.ID)
+	return nil, fmt.Errorf("%w: the start of step %q", ErrPositionLost, st.Node.ID)
 }
 
 // overdue is the ending that has yet to be written, nil when none has.
 func (f *flow) overdue(st State, failed error) *Ending {
 	switch {
-	case st.abandoned != nil && !st.Started:
-		return st.abandoned
+	case len(st.abandoned) > 0 && !st.Started:
+		return st.abandoned[0]
 	case !st.Started || st.Ended || errors.Is(failed, ErrChanged):
 		return nil
 	case failed != nil || st.Done:
 		return ending(st, failed)
 	case st.Failure != "" && f.unattended && f.reply == nil:
 		e := ending(st, nil)
-		e.Status, e.Reason = Failed, st.Node.ID+": "+st.Failure
+		e.Status, e.Reason, e.Step = Failed, st.Node.ID+": "+st.Failure, st.Node.ID
 		return e
 	}
 	return nil
@@ -254,7 +283,7 @@ func (f *flow) prepare(ctx context.Context, req *openresponses.Request) error {
 			if f.history != nil {
 				from = openresponses.Items(all)
 			}
-			if req.Input, err = since(from, n); err != nil {
+			if req.Input, err = since(from, st); err != nil {
 				return err
 			}
 		}
@@ -264,7 +293,7 @@ func (f *flow) prepare(ctx context.Context, req *openresponses.Request) error {
 		}
 		req.Instructions = strings.TrimSpace(req.Instructions + "\n\n" + step)
 		keep = func(name string) bool { return name == finishTool || slices.Contains(n.Tools, name) }
-		if req.Tools, err = stepTools(req.Tools, finishTool, n, nil); err != nil {
+		if req.Tools, err = stepTools(req.Tools, finishTool, st, nil); err != nil {
 			return err
 		}
 	}
@@ -284,7 +313,7 @@ func (f *flow) prepareJudge(req *openresponses.Request, st State, all agentturn.
 	if f.history != nil {
 		from = openresponses.Items(all)
 	}
-	if req.Input, err = since(from, n); err != nil {
+	if req.Input, err = since(from, st); err != nil {
 		return err
 	}
 	ask, err := f.judgeInstructions(st)
@@ -295,7 +324,9 @@ func (f *flow) prepareJudge(req *openresponses.Request, st State, all agentturn.
 	// The verdict takes the shape of what the judge may choose.
 	allowed := *n
 	allowed.Outcomes = append(slices.Clone(n.Judge.Outcomes), HandBack)
-	if req.Tools, err = stepTools(req.Tools, judgeTool, &allowed, map[string]any{"reason": map[string]any{"type": "string"}}); err != nil {
+	judged := st
+	judged.Node = &allowed
+	if req.Tools, err = stepTools(req.Tools, judgeTool, judged, map[string]any{"reason": map[string]any{"type": "string"}}); err != nil {
 		return err
 	}
 	req.Tools = slices.DeleteFunc(slices.Clone(req.Tools), func(t openresponses.Tool) bool {
@@ -308,10 +339,17 @@ func (f *flow) prepareJudge(req *openresponses.Request, st State, all agentturn.
 // stepTools gives flow_finish the shape the step wants, so the model is
 // told by the tool itself and not only in prose. The request is what is
 // recorded, so the record holds what the model was offered.
-func stepTools(tools openresponses.Tools, finish string, n *Node, more map[string]any) (openresponses.Tools, error) {
+func stepTools(tools openresponses.Tools, finish string, st State, more map[string]any) (openresponses.Tools, error) {
+	n := st.Node
 	data := map[string]any{}
 	var shapes []any
 	required := []string{"step", "outcome"}
+	if st.Format != 1 {
+		// A finish names its run, so it is matched by run and step and
+		// never by the step's name alone.
+		data["run"] = map[string]any{"type": "string", "enum": []string{st.Instance}}
+		required = append([]string{"run"}, required...)
+	}
 	for _, outcome := range n.outcomes() {
 		if s := n.Data[outcome]; s != nil {
 			shapes = append(shapes, s)
@@ -354,7 +392,7 @@ func stepTools(tools openresponses.Tools, finish string, n *Node, more map[strin
 func (f *flow) instructions(st State) (string, error) {
 	n := st.Node
 	var b strings.Builder
-	fmt.Fprintf(&b, "You are on step %q of workflow %q.\n%s", n.ID, f.g.Name, n.Prompt)
+	fmt.Fprintf(&b, "You are on step %q of workflow %q.\n%s", n.ID, st.g.Name, n.Prompt)
 	with, err := st.resolveAll(n.With)
 	if err != nil {
 		return "", fmt.Errorf("agentflow: step %q: %w", n.ID, err)
@@ -366,8 +404,8 @@ func (f *flow) instructions(st State) (string, error) {
 		}
 		fmt.Fprintf(&b, "\n\nInputs: %s", j)
 	}
-	fmt.Fprintf(&b, "\n\nWhen the step is done, call %s with step %q and one outcome of: %s.",
-		finishTool, n.ID, strings.Join(n.outcomes(), ", "))
+	fmt.Fprintf(&b, "\n\nWhen the step is done, call %s with step %q%s and one outcome of: %s.",
+		finishTool, n.ID, runClause(st), strings.Join(n.outcomes(), ", "))
 	for _, outcome := range n.outcomes() {
 		if s := n.Data[outcome]; s != nil {
 			j, err := json.Marshal(s)
@@ -390,9 +428,10 @@ func (f *flow) call(st State) (name string, args any, err error) {
 	switch {
 	case n.Kind == Person:
 		q := Question{Step: n.ID, Question: n.Prompt, Outcomes: n.outcomes(), With: with, Advice: st.Advice, Version: n.version()}
-		if f.modes[n.ID] != 0 {
-			q.SentBack = f.g.sentBack(st, n)
-			q.Mode = f.modes[n.ID].String()
+		q.where(st)
+		if mode := f.mode(st); mode != 0 {
+			q.SentBack = st.g.sentBack(st, n)
+			q.Mode = mode.String()
 		}
 		for outcome, s := range n.Data {
 			if q.Form == nil {
@@ -402,7 +441,14 @@ func (f *flow) call(st State) (name string, args any, err error) {
 		}
 		return askTool, q, nil
 	case n.Script != "":
-		return ScriptTool, ScriptCall{Run: n.Script, With: with, Outcomes: n.Outcomes}, nil
+		sc := ScriptCall{Run: n.Script, With: with, Outcomes: n.Outcomes}
+		if skill := skillOf(st.g.Name); skill != skillOf(f.g.Name) {
+			sc.Skill = skill
+		}
+		return ScriptTool, sc, nil
+	case n.Flow != "":
+		c := st.g.Callees[n.Flow]
+		return callTool, callArgs{Workflow: c.Name, Digest: c.OwnDigest(), Run: st.Returned.Instance, With: with}, nil
 	}
 	merged := map[string]any{}
 	if with == nil {
@@ -435,29 +481,43 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 	var args any
 	switch {
 	case over != nil:
-		id, name, args = f.g.endID(over.Instance), endTool, over
+		id, name, args = over.id, endTool, over
 	case st.Done:
 		if err := f.report(e, st); err != nil {
 			return err
 		}
 		return e.Complete()
 	case !st.Started:
-		var b [4]byte
-		if _, err := rand.Read(b[:]); err != nil {
-			return err
-		}
-		definition, err := json.Marshal(f.g)
+		key, err := newKey()
 		if err != nil {
 			return err
 		}
-		id, name, args = f.g.startID(hex.EncodeToString(b[:])), startTool, startPayload{Workflow: f.g.Name, Digest: f.g.Digest(), Inputs: st.Inputs,
-			Format: RecordFormat, Definition: json.RawMessage(definition)}
+		p, err := f.rootStart(key, st.Inputs)
+		if err != nil {
+			return err
+		}
+		id, name, args = keyPrefix(key)+"start", startTool, p
 	case st.Failure != "":
-		id, name = f.g.retryID(st), askTool
-		args = Question{Step: st.Node.ID, Retry: true, Outcomes: []string{retryOutcome, stopOutcome},
+		id, name = st.retryID(), askTool
+		q := Question{Step: st.Node.ID, Retry: true, Outcomes: []string{retryOutcome, stopOutcome},
 			Question: fmt.Sprintf("Step %q failed: %s\nRun it again?", st.Node.ID, st.Failure)}
+		q.where(st)
+		args = q
+	case st.Node.Flow != "" && st.Callee == "":
+		key, err := newKey()
+		if err != nil {
+			return err
+		}
+		with, err := st.resolveAll(st.Node.With)
+		if err != nil {
+			return fmt.Errorf("agentflow: step %q: %w", st.Node.ID, err)
+		}
+		c := st.g.Callees[st.Node.Flow]
+		id, name = keyPrefix(key)+"start", startTool
+		args = startPayload{Workflow: c.Name, Digest: c.OwnDigest(), Inputs: with, Format: RecordFormat,
+			Run: key, Parent: st.Instance, Caller: st.callID(), Depth: st.Depth + 1}
 	default:
-		id = f.g.callID(st)
+		id = st.callID()
 		if name, args, err = f.call(st); err != nil {
 			return err
 		}
@@ -485,7 +545,7 @@ func (f *flow) report(e *openresponses.Emitter, st State) error {
 		return err
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Workflow %s finished.", f.g.Name)
+	fmt.Fprintf(&b, "Workflow %s finished.", st.g.Name)
 	for _, s := range st.Steps {
 		fmt.Fprintf(&b, "\n- %s: %s", s.Node, s.Result.Outcome)
 		if s.Result.By != "" {
@@ -524,7 +584,7 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 	st, _, err := f.read(ctx, t)
 	name, id := info.Call.Name, info.Call.CallID
 	if name == endTool {
-		if over := f.overdue(st, err); over == nil || id != f.g.endID(over.Instance) {
+		if over := f.overdue(st, err); over == nil || id != over.id {
 			return block("only the workflow ends a run")
 		}
 		return nil, nil
@@ -541,18 +601,29 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 	case st.Done:
 		return block("the workflow has finished")
 	case !st.Started:
-		if name != startTool || !strings.HasPrefix(id, f.g.idPrefix()) {
+		if name != startTool || !strings.HasPrefix(id, reserved) {
 			return block("the workflow has not started")
 		}
 	case st.Failure != "":
-		if name != askTool || id != f.g.retryID(st) {
+		if name != askTool || id != st.retryID() {
 			return block(fmt.Sprintf("step %q failed", n.ID))
 		}
 		return f.ask(ctx, info, st)
+	case n.Flow != "" && st.Callee == "":
+		if err := callStart(st, info.Call); err != nil {
+			return block(err.Error())
+		}
+	case n.Flow != "":
+		if err := callReturn(st, info.Call); err != nil {
+			return block(err.Error())
+		}
 	case n.Kind == Agent:
 		if name == finishTool {
 			if step := finishStep(info.Call.Arguments); step != n.ID {
 				return block(fmt.Sprintf("you are on step %q, not %q", n.ID, step))
+			}
+			if run := runOf(info.Call.Arguments); st.Format != 1 && run != st.Instance {
+				return block(fmt.Sprintf("you are on step %q of run %q, not of run %q", n.ID, st.Instance, run))
 			}
 			return nil, nil
 		}
@@ -564,12 +635,15 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 			if step := finishStep(info.Call.Arguments); step != n.ID {
 				return block(fmt.Sprintf("you are judging step %q, not %q", n.ID, step))
 			}
+			if run := runOf(info.Call.Arguments); st.Format != 1 && run != st.Instance {
+				return block(fmt.Sprintf("you are judging step %q of run %q, not of run %q", n.ID, st.Instance, run))
+			}
 			return nil, nil
 		}
 		if !slices.Contains(n.Judge.Tools, name) {
 			return block(fmt.Sprintf("the judge of step %q cannot call %s", n.ID, name))
 		}
-	case id != f.g.callID(st):
+	case id != st.callID():
 		return block(fmt.Sprintf("step %q takes no other calls", n.ID))
 	case n.Kind == Person:
 		return f.ask(ctx, info, st)
@@ -613,9 +687,9 @@ func (f *flow) ask(ctx context.Context, info agentturn.ToolCallInfo, st State) (
 	}
 	// The verdict is read from the transcript, not from the question.
 	why := q.Question
-	if v := st.Advice; !q.Retry && v != nil && f.modes[n.ID] == Decide && v.Outcome != HandBack {
-		if f.g.spent(st, *v) {
-			why = fmt.Sprintf("the judge has sent this back %d times: %s", f.g.sentBack(st, n), q.Question)
+	if v := st.Advice; !q.Retry && v != nil && f.mode(st) == Decide && v.Outcome != HandBack {
+		if st.g.spent(st, *v) {
+			why = fmt.Sprintf("the judge has sent this back %d times: %s", st.g.sentBack(st, n), q.Question)
 		} else {
 			return answer(q, Result{Outcome: v.Outcome, Data: v.Data, By: ByJudge, Reason: v.Reason}, "decided by the judge")
 		}
@@ -635,8 +709,12 @@ func (f *flow) startTool() agenttool.Tool {
 		if err := exact(ctx, &p); err != nil {
 			return Result{}, err
 		}
-		if err := checkData(f.g.Inputs, p.Inputs); err != nil {
-			return Result{}, fmt.Errorf("agentflow: inputs: %w", err)
+		g := f.g.closure()[p.Workflow]
+		if g == nil {
+			return Result{}, fmt.Errorf("agentflow: no workflow %q", p.Workflow)
+		}
+		if err := checkData(g.Inputs, p.Inputs); err != nil {
+			return Result{}, fmt.Errorf("agentflow: inputs of %s: %w", g.Name, err)
 		}
 		return Result{Outcome: OK}, nil
 	}, agenttool.WithReplay(safeReplay))
@@ -682,7 +760,11 @@ func (f *flow) askTool() agenttool.Tool {
 		if err := exact(ctx, &q); err != nil {
 			return Result{}, err
 		}
-		n := f.g.node(q.Step)
+		g := f.g.closure()[cmp.Or(q.Workflow, f.g.Name)]
+		if g == nil {
+			return Result{}, fmt.Errorf("agentflow: no workflow %q", q.Workflow)
+		}
+		n := g.node(q.Step)
 		if n == nil {
 			return Result{}, fmt.Errorf("agentflow: no step %q", q.Step)
 		}
@@ -722,8 +804,12 @@ func (f *flow) finishTool() agenttool.Tool {
 		if err := exact(ctx, &a); err != nil {
 			return Result{}, err
 		}
-		n := f.g.node(a.Step)
-		if n == nil || n.Kind != Agent {
+		st, err := f.current(ctx)
+		if err != nil {
+			return Result{}, err
+		}
+		n := st.Node
+		if n == nil || n.Kind != Agent || n.ID != a.Step || st.Format != 1 && a.Run != st.Instance {
 			return Result{}, fmt.Errorf("agentflow: %q is not a step you can finish", a.Step)
 		}
 		res := Result{Outcome: a.Outcome, Data: unquote(n.Data[a.Outcome], a.Data)}
@@ -751,7 +837,13 @@ func (g *Graph) Answer(pending agentturn.PendingCall, res Result) (agentturn.Ans
 	if err := decode([]byte(pending.Call.Arguments), &q); err != nil {
 		return agentturn.Answer{}, fmt.Errorf("agentflow: question: %w", err)
 	}
-	n := g.node(q.Step)
+	// The question's run is of a workflow g pinned, so the answer is
+	// held to that one's definition.
+	asker := g.closure()[cmp.Or(q.Workflow, g.Name)]
+	if asker == nil {
+		return agentturn.Answer{}, fmt.Errorf("agentflow: no workflow %q", q.Workflow)
+	}
+	n := asker.node(q.Step)
 	if n == nil {
 		return agentturn.Answer{}, fmt.Errorf("agentflow: no step %q", q.Step)
 	}
