@@ -371,8 +371,9 @@ A transcript with no instance starts one. Another begins only at an
 invocation, a developer message reading `agentflow: start <name>`
 (`Graph.Invocation`), which a model cannot write. It also abandons an
 unfinished instance. After an instance has finished and said so, a plain
-prompt is a conversation with the model, with its tools. An instance
-that failed stays failed until an invocation.
+prompt is a conversation with the model, with its tools; so it is after
+an operator abandons the run nobody called (RFC 0006, section 31). An
+instance that failed stays failed until an invocation.
 
 ### Resuming a session (spiked with `History`)
 

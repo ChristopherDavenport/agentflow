@@ -293,3 +293,46 @@ func TestARetryKeepsAKeptChildsSession(t *testing.T) {
 		t.Errorf("the retry read %d openings, want its own and the first visit's", n)
 	}
 }
+
+func TestAfterAnOperatorAbandonsTheConversationIsTheModels(t *testing.T) {
+	g := release()
+	var ran []string
+	m := &fakeModel{outcomes: []string{"findings", ""}}
+	a := newAgent(t, g, m, &ran)
+	q := question(t, start(t, a))
+	end, st, err := OverrideRun(t.Context(), g, a, Override{Run: q.Run, Action: OverrideAbandon})
+	if err != nil || end.Reason != agentturn.ReasonDone || st.Started {
+		t.Fatalf("end = %+v, %v, %+v", end, err, st)
+	}
+	if ends := endings(a.State().Transcript); len(ends) != 1 || ends[0].Status != Abandoned || ends[0].Reason != "overridden: abandon" {
+		t.Fatalf("ends = %+v", ends)
+	}
+	// The program said so, and the person's next words go to the model,
+	// with its tools and none of the workflow's.
+	said := texts(a.State().Transcript)
+	if !strings.Contains(said[len(said)-1], "an operator abandoned run "+q.Run) {
+		t.Errorf("last said %q", said[len(said)-1])
+	}
+	end, err = a.Prompt(t.Context(), openresponses.UserText("what now?"))
+	if err != nil || end.Reason != agentturn.ReasonDone {
+		t.Fatalf("end = %+v, %v", end, err)
+	}
+	last := m.requests[len(m.requests)-1]
+	if last.Model != "fake" || len(m.requests) != 2 {
+		t.Fatalf("asked %s, %d requests", last.Model, len(m.requests))
+	}
+	for _, tool := range last.Tools {
+		if fn, ok := tool.(*openresponses.FunctionTool); ok && (strings.HasPrefix(fn.Name, reserved) || fn.Name == ScriptTool) {
+			t.Errorf("offered %s", fn.Name)
+		}
+	}
+	// An invocation starts a new run.
+	inv, err := g.Invocation(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.outcomes = []string{"clean"}
+	if end, err := a.Prompt(t.Context(), inv); err != nil || end.Reason != agentturn.ReasonDone || !slices.Contains(ran, "report") {
+		t.Errorf("end = %+v, %v, ran %v", end, err, ran)
+	}
+}

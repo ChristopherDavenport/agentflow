@@ -214,7 +214,11 @@ changes nothing: position is still read from recorded results.
   abandoned: the call ends `abandoned`, which fails the calling step, and
   the caller asks whether to retry it, or routes on `failed`.
   Abandoning the run nobody called leaves nothing to start until the
-  workflow is invoked again.
+  workflow is invoked again. The program says so, naming the run, and
+  then the conversation is the model's, with its tools and none of the
+  workflow's, as after a run that finished: an operator who abandons a
+  run usually wants the conversation back. A run that failed still waits
+  for an invocation.
 - A run in a child session is reached through the call that waits on it:
   `OverrideRun` opens the child and asks there, at any depth.
 
@@ -372,7 +376,10 @@ read as a call of their own.
   child's, as the step's own `read` would be: a `read(...)` deny, or an
   `allow` the path misses, refuses the read, the refusal names the rule
   and its note, and the step fails with it. A step given workspace files
-  may name `read` in its rules without offering the tool to its model.
+  may name `read` in its rules without offering the tool to its model:
+  the program reads the step's files through `read`, so a `read(...)`
+  rule is how a step is limited to the files it may be given, even when
+  its model reads nothing itself.
 
 **Where the model sees them.** In context, the program's call and its
 result are in the conversation, after the step's opening message, where

@@ -149,9 +149,11 @@ func (r *replay) overridden(i int, c *openresponses.FunctionCall, out *openrespo
 	case OverrideAbandon:
 		var next *frame
 		if f == r.root {
-			// Nothing starts until the workflow is invoked again.
+			// Nothing starts until the workflow is invoked again, and once
+			// the program has said so the conversation is the model's, as
+			// after a run that finished.
 			next = r.newRoot(nil)
-			next.st.Left = true
+			next.st.Left, next.st.released = true, f.st.Instance
 		}
 		r.abandon(i, f, next, overriddenFor(o.Action))
 		return

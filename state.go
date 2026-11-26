@@ -195,6 +195,10 @@ type State struct {
 	// Left says the runs under way were abandoned with their caller, and
 	// none is to start until an invocation.
 	Left bool
+	// released is the run nobody called that an operator abandoned, after
+	// which, once the program has said so (Reported), the conversation is
+	// the model's, as after a run that finished.
+	released string
 
 	// Aborting says the run has been abandoned and is ending, and Cleaning
 	// that its cleanup path runs first. Cleanup says how that went, once
@@ -633,7 +637,8 @@ func (r *replay) message(i int, m *openresponses.Message) {
 		}
 	case st.Node != nil && opens(m, st):
 		st.Begun = true
-	case m.Role == openresponses.RoleAssistant && st.Done && st.Ended:
+	case m.Role == openresponses.RoleAssistant && st.Done && st.Ended,
+		m.Role == openresponses.RoleAssistant && !st.Started && st.released != "":
 		st.Reported = true
 	}
 }

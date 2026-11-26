@@ -431,8 +431,12 @@ func (f *flow) overdue(st State, failed error) *Ending {
 
 // modelTurn says the model takes the next turn.
 func modelTurn(st State) bool {
-	return st.Done && st.Reported || st.Node != nil && st.Node.Kind == Agent && !st.Node.fresh() && st.Failure == "" && st.Reached == nil
+	return st.Done && st.Reported || st.conversing() || st.Node != nil && st.Node.Kind == Agent && !st.Node.fresh() && st.Failure == "" && st.Reached == nil
 }
+
+// conversing says an operator abandoned the run nobody called, and the
+// program has said so: the conversation is the model's, with its tools.
+func (st State) conversing() bool { return !st.Started && st.released != "" && st.Reported }
 
 // clockDue says the program reads the clock before st's model step
 // works, and expired that the step's time has run out.
@@ -809,7 +813,11 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 		if err != nil {
 			return err
 		}
-		if err := msg.Text("The workflow's runs here were abandoned, and none starts until it is invoked again."); err != nil {
+		text := "The workflow's runs here were abandoned, and none starts until it is invoked again."
+		if st.released != "" {
+			text = fmt.Sprintf("Workflow %s: an operator abandoned run %s. Nothing of it is under way, and invoking the workflow starts a new run.", st.g.Name, st.released)
+		}
+		if err := msg.Text(text); err != nil {
 			return err
 		}
 		if err := msg.Close(); err != nil {
@@ -954,7 +962,7 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 	}
 	n := st.Node
 	switch {
-	case st.Done && st.Reported:
+	case st.Done && st.Reported, st.conversing():
 		if strings.HasPrefix(name, reserved) || name == ScriptTool {
 			return block("only a running workflow calls " + name)
 		}
