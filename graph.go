@@ -236,6 +236,14 @@ type Node struct {
 	// [DefaultLoopVisits] for a node a loop can come back to, and once
 	// for any other.
 	MaxVisits int
+	// PersonPaced, written max_visits: person, lets a person drive the
+	// node's loop. A visit is paced when a person, not rules, a judge, a
+	// default or a timeout, answered a person step of the run since the
+	// node's last visit. Paced visits are held to no bound and count for
+	// none of the tree's steps. Every other visit is held to
+	// [DefaultLoopVisits]. Every cycle through the node must pass a
+	// person step, and MaxVisits stays 0.
+	PersonPaced bool `json:",omitempty"`
 
 	// call is what linking learnt of the callee of a Flow node.
 	call *callee
@@ -564,6 +572,7 @@ func (g *Graph) Validate() error {
 			bad("node %q: max visits must be 0 to 99", n.ID)
 		}
 	}
+	errs = append(errs, g.checkPaced()...)
 	// Until it is linked, a call that declares no outcomes may end the
 	// workflow with any of what it calls.
 	unlinked := slices.ContainsFunc(g.Nodes, func(n Node) bool { return n.Flow != "" && n.call == nil && len(n.Outcomes) == 0 })

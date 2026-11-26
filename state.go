@@ -149,7 +149,9 @@ type State struct {
 	// Node is the node to run next, nil before the start and when done.
 	Node *Node
 	// Visit counts this arrival at Node and Attempt this try, from 1.
-	Visit, Attempt int
+	// Paced is how many of Node's visits a person paced, for a node that
+	// is max_visits: person: those are held to no bound.
+	Visit, Attempt, Paced int
 	// Failure is the output of Node's failed attempt, until a retry.
 	Failure string
 	// Done says the last step has finished, and Reported that the
@@ -172,8 +174,9 @@ type State struct {
 	Callee   string
 	Returned *Ending
 	// Entries counts the steps entered across the whole tree of runs
-	// this one belongs to, attempts and calls included, and Granted the
-	// steps a person granted it past its bound.
+	// this one belongs to, attempts and calls included, toward its bound:
+	// a visit a person paced is not counted. Granted is the steps a
+	// person granted it past its bound.
 	Entries, Granted int
 	// Reached is a bound the run has come to at Node, which waits on a
 	// person to grant more or to stop.
@@ -421,6 +424,10 @@ type frame struct {
 	// be asked about.
 	extra, repeats map[string]int
 	repeating      string
+	// paced counts the visits of each max_visits: person node a person
+	// paced, and mark is how many steps had finished at each node's last
+	// visit, so a person's answer since then can be found.
+	paced, mark map[string]int
 	// came says how the current node was reached, for a bound to say.
 	came string
 	// aborting says the run was abandoned and is ending; cleaning that its
@@ -545,7 +552,7 @@ func (r *replay) newRoot(inputs any) *frame {
 
 func newFrame(st State, start int, parent *frame) *frame {
 	return &frame{st: st, visits: map[string]int{}, since: -1, start: start, end: -1, parent: parent,
-		extra: map[string]int{}, repeats: map[string]int{}}
+		extra: map[string]int{}, repeats: map[string]int{}, paced: map[string]int{}, mark: map[string]int{}}
 }
 
 // top is the innermost run under way, or the root when none is.
@@ -1228,9 +1235,12 @@ func (r *replay) bounds(f *frame) {
 	}
 	g := st.g
 	switch bound := g.visits(n) + f.extra[n.ID]; {
-	case st.Visit > bound:
+	case st.Visit-f.paced[n.ID] > bound:
 		from := "its max_visits"
-		if n.MaxVisits == 0 {
+		switch {
+		case n.PersonPaced:
+			from = fmt.Sprintf("the default for a step on a loop, for visits no person paced (%d more were)", f.paced[n.ID])
+		case n.MaxVisits == 0:
 			from = "the default for a step on a loop"
 		}
 		if f.extra[n.ID] > 0 {
@@ -1303,12 +1313,21 @@ const maxGrant = 999
 // enter makes n f's current node, at item i.
 func (r *replay) enter(f *frame, i int, n *Node) {
 	st := &f.st
+	// A visit a person paced is held to no bound, the tree's steps
+	// included. Every other visit is counted as any step's is.
+	paced := f.pacedEntry(n)
 	st.Node = n
 	f.visits[n.ID]++
-	st.Visit, st.Attempt = f.visits[n.ID], 1
+	if paced {
+		f.paced[n.ID]++
+	}
+	f.mark[n.ID] = len(st.Steps)
+	st.Visit, st.Attempt, st.Paced = f.visits[n.ID], 1, f.paced[n.ID]
 	f.since = i
 	st.clocked, st.Deadline, st.asked, st.reasked, st.reask, st.filed = false, time.Time{}, 0, 0, false, false
-	r.entries++
+	if !paced {
+		r.entries++
+	}
 	st.treeSteps++
 	r.bounds(f)
 }

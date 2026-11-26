@@ -295,7 +295,12 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 	default:
 		set("on_timeout", n.OnTimeout != "", n.OnTimeout)
 	}
-	set("max_visits", n.MaxVisits != 0, n.MaxVisits)
+	switch {
+	case n.PersonPaced:
+		set("max_visits", true, "person")
+	default:
+		set("max_visits", n.MaxVisits != 0, n.MaxVisits)
+	}
 	if j := n.Judge; j != nil {
 		judge := map[string]any{"outcomes": j.Outcomes, "criteria": j.Criteria}
 		if j.Tools != nil {

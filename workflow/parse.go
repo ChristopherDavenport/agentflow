@@ -175,7 +175,8 @@ type settings struct {
 	} `yaml:"judge"`
 	Outcomes   []string  `yaml:"outcomes"`
 	Unattended yaml.Node `yaml:"unattended"`
-	MaxVisits  int       `yaml:"max_visits"`
+	// MaxVisits is a number, or person for a loop a person drives.
+	MaxVisits yaml.Node `yaml:"max_visits"`
 	// The documents the step works with.
 	Documents *stepDocuments `yaml:"documents"`
 	// The files a model step is given as context.
@@ -459,7 +460,14 @@ func node(n *agentflow.Node, s section) error {
 	n.Prompt = strings.TrimSpace(strings.Join(prose, "\n"))
 	n.Description = strings.TrimSpace(set.Description)
 
-	n.Script, n.Tool, n.Tools, n.Outcomes, n.MaxVisits, n.Flow = set.Run, set.Tool, set.Tools, set.Outcomes, set.MaxVisits, set.Flow
+	n.Script, n.Tool, n.Tools, n.Outcomes, n.Flow = set.Run, set.Tool, set.Tools, set.Outcomes, set.Flow
+	switch v := &set.MaxVisits; {
+	case v.IsZero():
+	case v.Kind == yaml.ScalarNode && v.Value == "person":
+		n.PersonPaced = true
+	case v.Kind != yaml.ScalarNode || v.Decode(&n.MaxVisits) != nil:
+		return fmt.Errorf("line %d: max_visits: want a number from 1 to 99, or person for a loop a person drives", v.Line)
+	}
 	if set.Args != nil {
 		if hasReference(set.Args) {
 			return errors.New("args are literals; put a reference under with")
