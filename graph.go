@@ -203,6 +203,14 @@ type Node struct {
 	Unattended string
 	// UnattendedData is the data that goes with it.
 	UnattendedData any
+
+	// A Person node may offer Choices computed from an earlier result,
+	// take an answer in a person's own words as Text, and, with a
+	// Timeout, take OnTimeout and its data when nobody answers in time.
+	Choices       *Choices  `json:",omitempty"`
+	Text          *FreeText `json:",omitempty"`
+	OnTimeout     string    `json:",omitempty"`
+	OnTimeoutData any       `json:",omitempty"`
 	// MaxVisits bounds how often the node runs. 0 means
 	// [DefaultLoopVisits] for a node a loop can come back to, and once
 	// for any other.
@@ -214,6 +222,9 @@ type Node struct {
 	// default to, which [Graph.Validate] works out: with no Context, the
 	// step runs in a child.
 	otherModel bool
+	// pick is the schema of one of a Person node's choices, as the list
+	// they come from declares it, nil when unknown.
+	pick *agenttool.Schema
 }
 
 // callee is a Flow node's contract, as [Graph.Link] reads it from the
@@ -270,7 +281,7 @@ func (n *Node) schemas() map[string]*agenttool.Schema {
 		out[Stuck] = stuckSchema
 		return out
 	}
-	return n.Data
+	return n.asked(n.Data)
 }
 
 // ending is the workflow outcome a node's outcome ends with, when the
@@ -371,6 +382,15 @@ func (g *Graph) Validate() error {
 	}
 	if len(g.Nodes) == 0 {
 		bad("graph has no nodes")
+	}
+	// What a pick is, as the list it comes from declares it.
+	for i := range g.Nodes {
+		if n := &g.Nodes[i]; n.Choices != nil {
+			n.pick = nil
+			if s := g.valueSchema(n.Choices.From); s != nil && s.Type == "array" {
+				n.pick = s.Items
+			}
+		}
 	}
 	seen := map[string]bool{}
 	for i := range g.Nodes {
@@ -480,10 +500,11 @@ func (g *Graph) Validate() error {
 			}
 		}
 		if n.Unattended != "" {
-			if err := checkData(n.Data[n.Unattended], n.UnattendedData); err != nil {
+			if err := checkData(n.schemas()[n.Unattended], n.UnattendedData); err != nil {
 				bad("node %q: unattended data: %v", n.ID, err)
 			}
 		}
+		errs = append(errs, g.checkAsk(n)...)
 		if n.MaxVisits < 0 || n.MaxVisits > 99 {
 			bad("node %q: max visits must be 0 to 99", n.ID)
 		}

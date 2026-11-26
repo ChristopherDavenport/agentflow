@@ -48,6 +48,16 @@ type Question struct {
 	// Limit names the bound the run has reached, when the question is
 	// whether to grant more of it: grant, with the amount, or stop.
 	Limit string `json:"limit,omitempty"`
+	// Choices is what an answer may pick from, as it was resolved when
+	// the question was asked. A pick from anything else is refused.
+	Choices *Offered `json:"choices,omitempty"`
+	// Text says an answer in the person's own words takes its outcome,
+	// the words in its data's member.
+	Text *FreeText `json:"text,omitempty"`
+	// Deadline is when the question takes OnTimeout if nobody has
+	// answered, as the program's clock recorded it; nil for never.
+	Deadline  *time.Time `json:"deadline,omitempty"`
+	OnTimeout string     `json:"on_timeout,omitempty"`
 	// Answer is empty as asked. [Answer] fills it in.
 	Answer *Result `json:"answer,omitempty"`
 }
@@ -539,7 +549,24 @@ func (f *flow) call(st State) (name string, args any, err error) {
 			q.SentBack = st.g.sentBack(st, n)
 			q.Mode = mode.String()
 		}
-		for outcome, s := range n.Data {
+		form := n.schemas()
+		o, err := st.offer(n)
+		if err != nil {
+			return "", nil, fmt.Errorf("agentflow: step %q: %w", n.ID, err)
+		}
+		if o != nil {
+			q.Choices = o
+			form = maps.Clone(form)
+			form[o.Outcome] = o.form(n.Data[o.Outcome])
+		}
+		if t := n.Text; t != nil {
+			q.Text = &FreeText{Outcome: t.Outcome, As: t.member()}
+		}
+		if n.OnTimeout != "" && !st.Deadline.IsZero() {
+			due := st.Deadline
+			q.Deadline, q.OnTimeout = &due, n.OnTimeout
+		}
+		for outcome, s := range form {
 			if q.Form == nil {
 				q.Form = map[string]any{}
 			}
@@ -667,6 +694,9 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 		if args, err = f.judgeCall(st); err != nil {
 			return err
 		}
+	case f.askClockDue(st):
+		name = clockTool
+		id, args = f.clockQuestion(st)
 	case st.Node.Flow != "" && !st.Node.fresh() && st.Callee == "":
 		key, err := newKey()
 		if err != nil {
@@ -827,6 +857,11 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 		if why := f.police(ctx, st, info); why != "" {
 			return block(fmt.Sprintf("step %q refuses this call: %s", n.ID, why))
 		}
+	case n.Kind == Person && name == clockTool:
+		if id == st.clockID() && f.askClockDue(st) {
+			return nil, nil
+		}
+		return block("only the workflow reads the clock")
 	case id != st.callID():
 		return block(fmt.Sprintf("step %q takes no other calls", n.ID))
 	case n.Kind == Person:
@@ -848,7 +883,10 @@ func validAnswer(n *Node, q Question, res Result) error {
 		}
 		return nil
 	case !q.Retry:
-		return n.check(res)
+		if err := n.check(res); err != nil {
+			return err
+		}
+		return q.holds(res)
 	}
 	if res.Outcome != retryOutcome && res.Outcome != stopOutcome {
 		return fmt.Errorf("outcome %q: want %s or %s", res.Outcome, retryOutcome, stopOutcome)
@@ -916,6 +954,14 @@ func (f *flow) ask(ctx context.Context, info agentturn.ToolCallInfo, st State) (
 	// a retry, which ends the workflow.
 	if f.unattended && (q.Retry || q.Limit != "" || n.Unattended != "") {
 		return nil, nil
+	}
+	// A question asked after its time ran out, on a resume that came late,
+	// takes its timeout outcome at once.
+	if res, err := f.answerByTimeout(ctx, q); err != nil || res != nil {
+		if err != nil {
+			return nil, err
+		}
+		return answer(q, *res, "the question's time ran out")
 	}
 	return &agentturn.ToolDecision{Action: agentturn.Defer, Reason: "agentflow: " + why}, nil
 }
@@ -1080,6 +1126,12 @@ func (g *Graph) Answer(pending agentturn.PendingCall, res Result) (agentturn.Ans
 	n := asker.node(q.Step)
 	if n == nil {
 		return agentturn.Answer{}, fmt.Errorf("agentflow: no step %q", q.Step)
+	}
+	switch {
+	case res.By == ByTimeout:
+		return agentturn.Answer{}, errors.New("agentflow: only the question's timeout answers by its timeout")
+	case q.overdue(time.Now()):
+		return agentturn.Answer{}, fmt.Errorf("%w at %s: drive the run, and it takes %q", ErrExpired, q.Deadline.Format(time.RFC3339), q.OnTimeout)
 	}
 	if err := validAnswer(n, q, res); err != nil {
 		return agentturn.Answer{}, fmt.Errorf("agentflow: %w", err)

@@ -592,6 +592,14 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 	}
 	n := st.Node
 	res, invalid := parseResult(n, out.Output.String())
+	if invalid == nil && n.Kind == Person && c.Name == askTool && out.CallID == st.callID() {
+		// An answer is held to what its question offered as it was asked,
+		// which the call records.
+		var q Question
+		if decode([]byte(c.Arguments), &q) == nil {
+			invalid = q.holds(res)
+		}
+	}
 	switch {
 	case st.Reached != nil:
 		if out.CallID != st.limitID() {

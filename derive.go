@@ -63,8 +63,8 @@ func (n *Node) checkSettings() []error {
 	switch {
 	case n.Timeout < 0 || n.Timeout > MaxTimeout:
 		bad("timeout must be above 0 and at most %s", MaxTimeout)
-	case n.Timeout > 0 && (n.Kind == Person || call):
-		bad("a timeout is a script's, a tool's or a model step's")
+	case n.Timeout > 0 && call:
+		bad("a timeout is a script's, a tool's, a model step's or a question's")
 	case n.Timeout > 0 && n.Verdict:
 		bad("a judge's look has the timeout of an unattended model step")
 	}

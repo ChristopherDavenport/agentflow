@@ -150,6 +150,10 @@ type settings struct {
 	Outcomes   []string  `yaml:"outcomes"`
 	Unattended yaml.Node `yaml:"unattended"`
 	MaxVisits  int       `yaml:"max_visits"`
+	// A question's own settings.
+	Choices   yaml.Node `yaml:"choices"`
+	Text      yaml.Node `yaml:"text"`
+	OnTimeout yaml.Node `yaml:"on_timeout"`
 }
 
 // strict decodes one YAML document, refusing keys it does not know.
@@ -462,6 +466,9 @@ func node(n *agentflow.Node, s section) error {
 	if len(n.Data) == 0 {
 		n.Data = nil
 	}
+	if err := question(n, &set); err != nil {
+		return err
+	}
 	switch u := &set.Unattended; {
 	case u.IsZero():
 	case n.Kind != agentflow.Person:
@@ -477,6 +484,97 @@ func node(n *agentflow.Node, s section) error {
 				return v.Decode(&n.UnattendedData)
 			}
 			return fmt.Errorf("unattended: unknown key %q", key)
+		})
+	}
+	return nil
+}
+
+// question reads a person node's choices, free text and timeout outcome.
+func question(n *agentflow.Node, set *settings) error {
+	only := func(key string) error { return fmt.Errorf("only a person node has %s", key) }
+	if c := &set.Choices; !c.IsZero() {
+		if n.Kind != agentflow.Person {
+			return only("choices")
+		}
+		if c.Kind != yaml.MappingNode {
+			return errors.New("choices: want from, and select, outcome or as")
+		}
+		n.Choices = &agentflow.Choices{}
+		from := &yaml.Node{Kind: yaml.MappingNode}
+		if err := pairs(c, func(key string, v *yaml.Node) error {
+			switch key {
+			case "from":
+				from.Content = append(from.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "from"}, v)
+				return nil
+			case "select":
+				var sel string
+				if err := v.Decode(&sel); err != nil {
+					return err
+				}
+				switch sel {
+				case "one":
+				case "many":
+					n.Choices.Many = true
+				default:
+					return fmt.Errorf("choices: select %q: want one or many", sel)
+				}
+				return nil
+			case "outcome":
+				return v.Decode(&n.Choices.Outcome)
+			case "as":
+				return v.Decode(&n.Choices.As)
+			}
+			return fmt.Errorf("choices: unknown key %q", key)
+		}); err != nil {
+			return err
+		}
+		values, err := values(from)
+		if err != nil {
+			return fmt.Errorf("choices: %w", err)
+		}
+		n.Choices.From = values["from"]
+		// A question with one outcome has only that one for a pick to be.
+		if n.Choices.Outcome == "" && len(n.Outcomes) <= 1 {
+			n.Choices.Outcome = agentflow.OK
+			if len(n.Outcomes) == 1 {
+				n.Choices.Outcome = n.Outcomes[0]
+			}
+		}
+	}
+	if t := &set.Text; !t.IsZero() {
+		if n.Kind != agentflow.Person {
+			return only("text")
+		}
+		n.Text = &agentflow.FreeText{}
+		if t.Kind == yaml.ScalarNode {
+			n.Text.Outcome = t.Value
+		} else if err := pairs(t, func(key string, v *yaml.Node) error {
+			switch key {
+			case "outcome":
+				return v.Decode(&n.Text.Outcome)
+			case "as":
+				return v.Decode(&n.Text.As)
+			}
+			return fmt.Errorf("text: unknown key %q", key)
+		}); err != nil {
+			return err
+		}
+	}
+	switch u := &set.OnTimeout; {
+	case u.IsZero():
+	case n.Kind != agentflow.Person:
+		return only("on_timeout")
+	case u.Kind == yaml.ScalarNode:
+		n.OnTimeout = u.Value
+	default:
+		return pairs(u, func(key string, v *yaml.Node) error {
+			switch key {
+			case "outcome":
+				return v.Decode(&n.OnTimeout)
+			case "data":
+				return v.Decode(&n.OnTimeoutData)
+			}
+			return fmt.Errorf("on_timeout: unknown key %q", key)
 		})
 	}
 	return nil

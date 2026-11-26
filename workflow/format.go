@@ -199,6 +199,30 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 	default:
 		set("unattended", n.Unattended != "", n.Unattended)
 	}
+	if c := n.Choices; c != nil {
+		choices := &yamlMap{*valuesNode(map[string]agentflow.Value{"from": c.From})}
+		if c.Many {
+			errs = append(errs, choices.set("select", "many"))
+		}
+		errs = append(errs, choices.set("outcome", c.Outcome))
+		if c.As != "" {
+			errs = append(errs, choices.set("as", c.As))
+		}
+		m.add("choices", &choices.Node)
+	}
+	switch t := n.Text; {
+	case t == nil:
+	case t.As != "":
+		set("text", true, map[string]any{"outcome": t.Outcome, "as": t.As})
+	default:
+		set("text", true, t.Outcome)
+	}
+	switch {
+	case n.OnTimeoutData != nil:
+		set("on_timeout", true, map[string]any{"outcome": n.OnTimeout, "data": n.OnTimeoutData})
+	default:
+		set("on_timeout", n.OnTimeout != "", n.OnTimeout)
+	}
 	set("max_visits", n.MaxVisits != 0, n.MaxVisits)
 	if j := n.Judge; j != nil {
 		judge := map[string]any{"outcomes": j.Outcomes, "criteria": j.Criteria}

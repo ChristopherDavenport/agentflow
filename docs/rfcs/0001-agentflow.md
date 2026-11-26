@@ -200,7 +200,10 @@ and be none. Unknown keys are errors.
 | `context` | model, call | `session` or `fresh`, a child session; see [Context](#context-spiked). `session` is the default, except for a model step that asks for another model than its workflow's, which defaults to `fresh` (RFC 0003, section 14) |
 | `dir`, `instructions` | fresh model, fresh call | the child's working directory, and a file of the skill added to its instructions (RFC 0002, section 10) |
 | `model`, `thinking` | model; `model` also a fresh call | the model a step asks and how hard it reasons; the frontmatter's `model` and `thinking` are the workflow's defaults (RFC 0003, section 14) |
-| `timeout` | script, tool, model | a duration past which the step fails and asks to be retried (RFC 0003, section 13) |
+| `timeout` | script, tool, model, person | a duration past which the step fails and asks to be retried (RFC 0003, section 13); on a person step, past which the question takes `on_timeout` (RFC 0004, section 26) |
+| `on_timeout` | person | the outcome, and data, a question takes when its timeout passes unanswered (RFC 0004, section 26) |
+| `choices` | person | values an answer picks from, one or many, resolved from an earlier result into the question (RFC 0004, section 24) |
+| `text` | person | the outcome an answer in the person's own words takes, the words in its data (RFC 0004, section 25) |
 | `policy` | model, call | `allow` and `deny` rules in agentpolicy's grammar, which can only narrow what the host permits; on a call, for every model step it calls (RFC 0003, section 17) |
 | `child` | fresh model | a child kept across the visits and steps that name it (RFC 0002, section 11) |
 | `outcomes` | all | ways the node can end; `[ok]` if absent |
@@ -531,7 +534,9 @@ ends `input_required`. `Answer` approves it with the answer added to the
 arguments, and the tool returns it. The record reads `hold by policy`,
 then `proceed by human`. Supplying the output directly would be recorded
 as `reject`, which is what the format says of any output a caller writes
-for a call that did not run.
+for a call that did not run. An answer is held to the question as it was
+asked: to the choices it recorded, the words it takes, and its deadline,
+past which `Answer` refuses with `ErrExpired` (RFC 0004).
 
 ### A model that stops (spiked)
 
@@ -552,7 +557,9 @@ When a question is reached, the host tries in order:
 2. a judge the host let decide, marked `by: ai` and decided `by: policy`
    (spiked)
 3. unattended, the node's `unattended` outcome, marked `by` (spiked)
-4. waiting: the run ends `input_required` (spiked)
+4. a question's timeout, once its recorded deadline has passed, marked
+   `by: timeout` and decided `by: policy` (spiked; RFC 0004, section 26)
+5. waiting: the run ends `input_required` (spiked)
 
 The conversation that did the work never answers on a person's behalf.
 

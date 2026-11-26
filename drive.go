@@ -86,6 +86,19 @@ func (f *flow) drive(ctx context.Context, a *agentturn.Agent, end *agentturn.Run
 		case err != nil:
 			return end, st, err
 		case end.Reason == agentturn.ReasonInputRequired:
+			// A question whose time has run out takes its timeout outcome.
+			expired, err := f.expire(end.Pending)
+			if err != nil {
+				return end, st, err
+			}
+			if len(expired) > 0 {
+				next, err := a.Resume(ctx, expired...)
+				if next == nil {
+					return end, st, err
+				}
+				end = next
+				continue
+			}
 			p, args, ok := heldChild(end.Pending)
 			if !ok {
 				return end, st, nil
