@@ -209,6 +209,7 @@ and be none. Unknown keys are errors.
 | `policy` | model, call | `allow` and `deny` rules in agentpolicy's grammar, which can only narrow what the host permits; on a call, for every model step it calls (RFC 0003, section 17) |
 | `child` | fresh model | a child kept across the visits and steps that name it (RFC 0002, section 11) |
 | `on_abort` | frontmatter | the step a cleanup path starts at, run when the run is abandoned (RFC 0006, section 30) |
+| `files` | model | files given to the step as context when it opens, in order: workspace paths, literal or referred to, and `./` files of the skill, read and pinned at load (RFC 0006, section 34) |
 | `documents` | model; script, tool | on a model step, the documents it may `read` and `edit`; on a script or tool step, those it `write`s from members of its result. The frontmatter's `documents` declares them (RFC 0006, section 29) |
 | `outcomes` | all | ways the node can end; `[ok]` if absent |
 | `unattended` | person | outcome, and data, taken when nobody can be asked |

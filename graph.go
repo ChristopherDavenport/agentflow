@@ -191,6 +191,12 @@ type Node struct {
 	// to the step's. Loading reads each one's text into the definition,
 	// so its digest pins what the model is told.
 	Skills []StepSkill `json:",omitempty"`
+	// Files are what a model step is given as context when it opens, in
+	// order: workspace paths, literal or referred to, and ./<path> files of
+	// the skill, whose texts loading reads into SkillFiles, by path within
+	// the skill, so the digest pins them.
+	Files      []Value           `json:",omitempty"`
+	SkillFiles map[string]string `json:",omitempty"`
 	// Reads and Edits name the documents a model step may read, and read
 	// and edit. Writes, on a script or tool step, sets documents from
 	// members of its result's data, by document.
@@ -489,6 +495,12 @@ func (g *Graph) Validate() error {
 		n.otherModel = n.Kind == Agent && n.Model != "" && n.Model != g.Model
 		errs = append(errs, n.checkChild()...)
 		errs = append(errs, n.checkSettings()...)
+		errs = append(errs, n.checkFiles()...)
+		for _, v := range n.Files {
+			if s := g.refSchema(v.From); v.From != "" && s != nil && s.Type != "" && s.Type != "string" && (s.Type != "array" || s.Items != nil && s.Items.Type != "" && s.Items.Type != "string") {
+				bad("node %q: file %s is not a path, nor a list of paths", n.ID, v.From)
+			}
+		}
 		if j := n.Judge; j != nil {
 			switch {
 			case n.Kind != Person:

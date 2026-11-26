@@ -137,6 +137,9 @@ type flow struct {
 	// child is set for a flow run in a child: what its start records,
 	// and the instructions its settings add.
 	child *Child
+	// fileTool and fileField name the host's tool that reads a workspace
+	// file for a step's files, and its path argument.
+	fileTool, fileField string
 	// book counts what each run's model requests use, and prices prices
 	// it, for the summary a run's end records.
 	book   *usageBook
@@ -176,6 +179,13 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 				return cfg, fmt.Errorf("agentflow: %s: node %q calls %s, and the graph is not linked; call Link", x.Name, n.ID, n.Flow)
 			}
 			needs = needs || n.fresh()
+			for _, v := range n.Files {
+				if p, ok := v.Literal.(string); ok && strings.HasPrefix(p, skillPrefix) {
+					if _, read := n.SkillFiles[strings.TrimPrefix(p, skillPrefix)]; !read {
+						return cfg, fmt.Errorf("agentflow: %s: node %q is given the file %s of the skill, which was never read: load the workflow with workflow.Load", x.Name, n.ID, p)
+					}
+				}
+			}
 			for _, sk := range n.Skills {
 				if strings.TrimSpace(sk.Instructions) == "" {
 					return cfg, fmt.Errorf("agentflow: %s: node %q names the skill %s, whose instructions were never read: load the workflow with workflow.LoadWith", x.Name, n.ID, sk.Name)
@@ -229,7 +239,7 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 	if (needs || len(f.modes) > 0) && f.children == nil {
 		return cfg, errors.New("agentflow: the graph runs work in children, a fresh step or call or a judge, and the host gave no Children to open them")
 	}
-	own := append([]agenttool.Tool{f.startTool(), f.askTool(), f.finishTool(), f.judgeTool(), f.endTool(), f.callTool(), f.clockTool(), f.stuckTool(), f.overrideTool()}, f.docTools()...)
+	own := append([]agenttool.Tool{f.startTool(), f.askTool(), f.finishTool(), f.judgeTool(), f.endTool(), f.callTool(), f.clockTool(), f.stuckTool(), f.overrideTool(), f.filesTool()}, f.docTools()...)
 	if p := cfg.ToolProvider; p != nil {
 		cfg.ToolProvider = func(ctx context.Context) []agenttool.Tool {
 			return append(f.timed(p(ctx)), own...)
@@ -247,6 +257,9 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 		return cfg, fmt.Errorf("agentflow: the graph has script steps and the config no %q tool", ScriptTool)
 	}
 	if err := checkTools(closure, cfg); err != nil {
+		return cfg, err
+	}
+	if err := f.checkFileReader(closure, cfg); err != nil {
 		return cfg, err
 	}
 
@@ -431,7 +444,7 @@ func (f *flow) prepare(ctx context.Context, req *openresponses.Request) error {
 	if err != nil {
 		return err
 	}
-	if !modelTurn(st) || f.clockDue(st) || f.expired(st) || st.request != nil {
+	if !modelTurn(st) || f.clockDue(st) || f.expired(st) || st.request != nil || f.filesDue(st) {
 		req.Model = programPrefix + f.g.Name
 		return nil
 	}
@@ -439,7 +452,7 @@ func (f *flow) prepare(ctx context.Context, req *openresponses.Request) error {
 		f.due.set(st.Deadline, st.Instance)
 	}
 	req.Model = f.modelName
-	req.Input = f.visible(req.Input, all, st)
+	req.Input = keepFiles(f.visible(req.Input, all, st), all, st)
 	if c := f.child; c != nil && c.Settings.Instructions != "" {
 		req.Instructions = strings.TrimSpace(req.Instructions + "\n\n" + c.Settings.Instructions)
 	}
@@ -568,6 +581,9 @@ func (f *flow) instructions(st State) (string, error) {
 	fmt.Fprintf(&b, "You are on step %q of workflow %q.\n%s", n.ID, st.g.Name, n.Prompt)
 	skillsText(&b, n.Skills)
 	documentsText(&b, st)
+	if st.hasFiles() {
+		fmt.Fprintf(&b, "\n\nThe step's files were given to you, in order, in the result of the workflow's %s call.", filesTool)
+	}
 	with, err := st.resolveAll(n.With)
 	if err != nil {
 		return "", fmt.Errorf("agentflow: step %q: %w", n.ID, err)
@@ -688,7 +704,7 @@ func (f *flow) call(st State) (name string, args any, err error) {
 		}
 		a := callArgs{Workflow: c.Name, Digest: c.OwnDigest(), Run: key, With: with, Context: ContextFresh, Child: n.Child, Spawn: key, MaxSteps: st.left()}
 		if n.Kind == Agent {
-			a.Documents = st.passedDocuments(n)
+			a.Documents, a.Files = st.passedDocuments(n), st.filesFor(n)
 		}
 		if spawn := st.kept[n.Child]; n.Child != "" && spawn != "" {
 			a.Spawn = spawn
@@ -792,6 +808,8 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 	case f.clockDue(st):
 		name = clockTool
 		id, args = f.clockCall(st, false)
+	case f.filesDue(st):
+		id, name, args = st.filesID(), filesTool, filesArgs{Run: st.Instance, Step: st.Node.ID, Files: st.fileList()}
 	case f.judging(st):
 		id, name = st.judgeID(), judgeTool
 		if args, err = f.judgeCall(st); err != nil {
@@ -873,6 +891,15 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 		if info.Call.Name == ScriptTool || strings.HasPrefix(info.Call.Name, reserved) {
 			return block("only the workflow calls " + info.Call.Name)
 		}
+		// A read the program makes for a step's files is held to the step's
+		// policy, as the step's own would be.
+		if readsFiles(info) {
+			if st, err := f.current(ctx); err == nil && st.Node != nil {
+				if why := f.police(ctx, st, info); why != "" {
+					return block(fmt.Sprintf("step %q may not be given this file: %s", st.Node.ID, why))
+				}
+			}
+		}
 		return nil, nil
 	}
 	t, ok := agentturn.TranscriptFromContext(ctx)
@@ -942,6 +969,12 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 		finish, verb := finishTool, "on"
 		if n.Verdict {
 			finish, verb = judgeTool, "judging"
+		}
+		if name == filesTool {
+			if id == st.filesID() && f.filesDue(st) {
+				return nil, nil
+			}
+			return block("only the workflow gives a step its files")
 		}
 		if name == clockTool {
 			if id == st.clockID() && f.clockDue(st) || id == st.timeoutID() && f.expired(st) {

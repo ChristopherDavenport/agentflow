@@ -73,7 +73,13 @@ func (n *Node) checkSettings() []error {
 		bad("a policy is a model step's, or a call's for what it calls")
 	case n.Policy != nil:
 		// A call's policy covers steps whose tools are their own.
-		if err := n.Policy.check(n.Tools, !call); err != nil {
+		// A step given workspace files may hold their reads to rules, with
+		// the read tool it reads them with.
+		tools := n.Tools
+		if len(n.Files) > 0 && !slices.Contains(tools, "read") {
+			tools = append(slices.Clone(tools), "read")
+		}
+		if err := n.Policy.check(tools, !call); err != nil {
 			bad("policy: %v", err)
 		}
 	}
@@ -156,7 +162,7 @@ func (g *Graph) stepGraph(n *Node) *Graph {
 	// decides what that means.
 	step := Node{ID: n.ID, Kind: Agent, Description: n.Description, Prompt: n.Prompt, Tools: n.Tools, Outcomes: n.Outcomes, Data: n.Data, With: with,
 		Model: cmp.Or(n.Model, g.Model), Thinking: cmp.Or(n.Thinking, g.Thinking), Timeout: n.Timeout, Policy: n.Policy, Skills: n.Skills,
-		Ends: map[string]string{Stuck: Stuck}, Reads: n.Reads, Edits: n.Edits}
+		Ends: map[string]string{Stuck: Stuck}, Reads: n.Reads, Edits: n.Edits, SkillFiles: n.SkillFiles}
 	// The documents it reads are the child's, as its call passes them in.
 	var docs map[string]Document
 	for name := range g.Documents {

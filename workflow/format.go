@@ -149,6 +149,10 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 	written.Sources = ""
 	// The file names a step's instructions, and loading reads them.
 	written.Nodes = slices.Clone(g.Nodes)
+	// And each file of the skill a step is given.
+	for i := range written.Nodes {
+		written.Nodes[i].SkillFiles = nil
+	}
 	// And each document's first text, from its file.
 	if g.Documents != nil {
 		written.Documents = maps.Clone(g.Documents)
@@ -170,6 +174,9 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 				written.Nodes[i].Skills[j] = agentflow.StepSkill{Name: sk.Name}
 			}
 		}
+	}
+	for i := range back.Nodes {
+		back.Nodes[i].SkillFiles = nil
 	}
 	if back.OwnDigest() != written.OwnDigest() {
 		return nil, errors.New("workflow: the graph cannot be written as a file without changing it")
@@ -217,6 +224,13 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 		m.add("with", valuesNode(n.With))
 	}
 	set("tools", n.Tools != nil, n.Tools)
+	if n.Files != nil {
+		var files []any
+		for _, v := range n.Files {
+			files = append(files, written(v))
+		}
+		set("files", true, files)
+	}
 	var skills []string
 	for _, sk := range n.Skills {
 		skills = append(skills, sk.Name)
@@ -301,18 +315,7 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 func valuesNode(values map[string]agentflow.Value) *yaml.Node {
 	m := mapping()
 	for _, name := range slices.Sorted(maps.Keys(values)) {
-		v := values[name].Literal
-		if ref := values[name]; ref.From != "" {
-			expr := strings.Join(append([]string{ref.From}, ref.Or...), ", ")
-			switch {
-			case ref.Optional:
-				expr = "optional(" + expr + ")"
-			case len(ref.Or) > 0:
-				expr = "latest(" + expr + ")"
-			}
-			v = "${{ " + expr + " }}"
-		}
-		if err := m.set(name, v); err != nil {
+		if err := m.set(name, written(values[name])); err != nil {
 			// Left out, so the round trip fails and says so.
 			continue
 		}
@@ -376,4 +379,19 @@ func policyOut(p *agentflow.Policy) map[string]any {
 		out["deny"] = list(p.Deny)
 	}
 	return out
+}
+
+// written is a value as a file writes it: a literal, or one expression.
+func written(ref agentflow.Value) any {
+	if ref.From == "" {
+		return ref.Literal
+	}
+	expr := strings.Join(append([]string{ref.From}, ref.Or...), ", ")
+	switch {
+	case ref.Optional:
+		expr = "optional(" + expr + ")"
+	case len(ref.Or) > 0:
+		expr = "latest(" + expr + ")"
+	}
+	return "${{ " + expr + " }}"
 }

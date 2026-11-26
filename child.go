@@ -55,7 +55,9 @@ type Child struct {
 	// documents are the texts the call passed in of the documents its step
 	// reads.
 	documents map[string]string
-	made      **flow
+	// files are what the call passed in for its step to be given.
+	files []fileRef
+	made  **flow
 }
 
 // ChildSettings are what a step says of the child it runs in.
@@ -84,7 +86,7 @@ func (c Child) Apply(cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 	p := c.parent
 	f := &flow{g: c.g, maxDepth: p.maxDepth, maxSteps: p.maxSteps, unattended: p.unattended, reply: p.reply, delegations: p.delegations,
 		modes: p.modes, judgeName: p.judgeName, children: p.children, models: p.models, idle: p.idle, matchers: p.matchers, policyOpts: p.policyOpts,
-		book: p.book, prices: p.prices}
+		book: p.book, prices: p.prices, fileTool: p.fileTool, fileField: p.fileField}
 	own := c
 	f.child = &own
 	for _, opt := range opts {
@@ -146,7 +148,7 @@ func (f *flow) childFor(st State, call *openresponses.FunctionCall, a callArgs) 
 		return Child{}, err
 	}
 	c := Child{Run: a.Run, Spawn: a.Spawn, Caller: call.CallID, Parent: st.Instance, Workflow: g.Name, Kept: a.Child,
-		Depth: st.Depth + 1, Path: slices.Clone(st.Path), parent: f, g: g, maxDepth: st.maxDepth, maxSteps: a.MaxSteps, documents: a.Documents}
+		Depth: st.Depth + 1, Path: slices.Clone(st.Path), parent: f, g: g, maxDepth: st.maxDepth, maxSteps: a.MaxSteps, documents: a.Documents, files: a.Files}
 	switch {
 	case call.Name == judgeTool:
 		c.Step, c.Judge = n.ID, true

@@ -178,6 +178,8 @@ type settings struct {
 	MaxVisits  int       `yaml:"max_visits"`
 	// The documents the step works with.
 	Documents *stepDocuments `yaml:"documents"`
+	// The files a model step is given as context.
+	Files yaml.Node `yaml:"files"`
 	// A question's own settings.
 	Choices   yaml.Node `yaml:"choices"`
 	Text      yaml.Node `yaml:"text"`
@@ -474,6 +476,11 @@ func node(n *agentflow.Node, s section) error {
 	n.Context = set.Context
 	n.Dir, n.Model, n.InstructionsFile, n.Child = set.Dir, set.Model, set.Instructions, set.Child
 	n.Thinking, n.Policy = set.Thinking, set.Policy.policy()
+	files, err := fileValues(&set.Files)
+	if err != nil {
+		return fmt.Errorf("files: %w", err)
+	}
+	n.Files = files
 	if d := set.Documents; d != nil {
 		n.Reads, n.Edits, n.Writes = d.Read, d.Edit, d.Write
 	}
@@ -496,7 +503,6 @@ func node(n *agentflow.Node, s section) error {
 	for _, name := range set.Skills {
 		n.Skills = append(n.Skills, agentflow.StepSkill{Name: name})
 	}
-	var err error
 	if n.With, err = values(&set.With); err != nil {
 		return fmt.Errorf("with: %w", err)
 	}
@@ -863,4 +869,35 @@ func fieldSchema(n *yaml.Node) (s *agenttool.Schema, required bool, err error) {
 		return nil
 	})
 	return s, required, err
+}
+
+// fileValues reads a model step's files: each a path, or a reference to
+// one or to a list of them.
+func fileValues(n *yaml.Node) ([]agentflow.Value, error) {
+	if n.IsZero() || n.Tag == "!!null" {
+		return nil, nil
+	}
+	if n.Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("line %d: want a list of paths", n.Line)
+	}
+	var out []agentflow.Value
+	for _, item := range n.Content {
+		var s string
+		if item.Kind != yaml.ScalarNode || item.Decode(&s) != nil || s == "" {
+			return nil, fmt.Errorf("line %d: a file is a path or a reference to one", item.Line)
+		}
+		v := agentflow.Literal(s)
+		if m := reference.FindStringSubmatch(s); m != nil {
+			v = agentflow.From(m[1])
+		} else if m := function.FindStringSubmatch(s); m != nil {
+			var err error
+			if v, err = call(m[1], m[2]); err != nil {
+				return nil, fmt.Errorf("line %d: %w", item.Line, err)
+			}
+		} else if hasReference(s) {
+			return nil, fmt.Errorf("line %d: a reference is the whole value, ${{ ... }}", item.Line)
+		}
+		out = append(out, v)
+	}
+	return out, nil
 }

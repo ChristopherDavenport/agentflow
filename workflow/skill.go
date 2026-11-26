@@ -8,8 +8,10 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"path"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ChristopherDavenport/agentflow"
 	"github.com/ChristopherDavenport/agentskill"
@@ -231,6 +233,9 @@ func scriptsIn(g *agentflow.Graph, skill string, files map[string][]byte) error 
 			n.Instructions = strings.TrimSpace(string(text))
 		}
 	}
+	if err := skillFiles(g, skill, files); err != nil {
+		return err
+	}
 	for name, d := range g.Documents {
 		if d.From == "" {
 			continue
@@ -280,4 +285,46 @@ func snapshot(fsys fs.FS) (map[string][]byte, string, error) {
 		fmt.Fprintf(h, "%q %x\n", p, sum)
 	}
 	return files, "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// skillFiles reads the ./ files of the skill each model step of g is
+// given into the definition, so the digest pins them. Anything wrong with
+// one is an error here, never when the step runs.
+func skillFiles(g *agentflow.Graph, skill string, files map[string][]byte) error {
+	paths := slices.Sorted(maps.Keys(files))
+	for i := range g.Nodes {
+		n := &g.Nodes[i]
+		for _, v := range n.Files {
+			p, ok := v.Literal.(string)
+			rel, inSkill := strings.CutPrefix(p, "./")
+			if v.From != "" || !ok || !inSkill {
+				continue
+			}
+			bad := func(format string, args ...any) error {
+				return fmt.Errorf("workflow: skill %q: node %q: file %s: "+format, append([]any{skill, n.ID, p}, args...)...)
+			}
+			text, found := files[rel]
+			switch {
+			case path.Clean(rel) != rel || path.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, "../"):
+				return bad("want a clean path within the skill")
+			case !found && slices.ContainsFunc(paths, func(q string) bool { return strings.HasPrefix(q, rel+"/") }):
+				return bad("is a directory; name the files in it")
+			case !found:
+				var shown []string
+				for _, q := range paths {
+					shown = append(shown, "./"+q)
+				}
+				return bad("not in the skill%s", agentflow.Suggest(p, shown))
+			case len(text) > agentflow.MaxFile:
+				return bad("over %d bytes", agentflow.MaxFile)
+			case !utf8.Valid(text):
+				return bad("not text: it is not valid UTF-8")
+			}
+			if n.SkillFiles == nil {
+				n.SkillFiles = map[string]string{}
+			}
+			n.SkillFiles[rel] = string(text)
+		}
+	}
+	return nil
 }

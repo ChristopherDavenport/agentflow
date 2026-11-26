@@ -311,6 +311,11 @@ func (g *Graph) checkRefs() []error {
 				use("node "+n.ID, v, at)
 			}
 		}
+		for _, v := range n.Files {
+			if plain(v) {
+				use("node "+n.ID+": files", v, at)
+			}
+		}
 		for _, outcome := range n.outcomes() {
 			if n.Next[outcome] != "" || g.cleans(n.ID) {
 				continue
@@ -366,6 +371,11 @@ func (g *Graph) checkAlternatives() []error {
 		n := &g.Nodes[i]
 		for _, name := range slices.Sorted(maps.Keys(n.With)) {
 			check("node "+n.ID, n.With[name], func(refs []ref) bool {
+				return !g.reached(refs)[n.ID][0]
+			})
+		}
+		for _, v := range n.Files {
+			check("node "+n.ID+": files", v, func(refs []ref) bool {
 				return !g.reached(refs)[n.ID][0]
 			})
 		}

@@ -39,6 +39,9 @@ type callArgs struct {
 	// host lets it answer.
 	Step string `json:"step,omitempty"`
 	Mode string `json:"mode,omitempty"`
+	// Files are the files a fresh model step is given, passed into its
+	// child, which reads them there.
+	Files []fileRef `json:"files,omitempty"`
 	// Documents are the texts of the documents a fresh model step reads,
 	// passed into its child.
 	Documents map[string]string `json:"documents,omitempty"`
@@ -100,7 +103,7 @@ func (f *flow) rootStart(inputs any) (startPayload, error) {
 		Definition: json.RawMessage(definition), MaxDepth: f.depth(), MaxSteps: f.steps()}
 	if c := f.child; c != nil {
 		p.Run, p.Parent, p.Caller, p.Depth, p.Path, p.Context = c.Run, c.Parent, c.Caller, c.Depth, c.Path, ContextFresh
-		p.MaxDepth, p.MaxSteps, p.Documents = c.maxDepth, c.maxSteps, c.documents
+		p.MaxDepth, p.MaxSteps, p.Documents, p.Files = c.maxDepth, c.maxSteps, c.documents, c.files
 	} else if p.Run, err = newKey(); err != nil {
 		return startPayload{}, err
 	}
@@ -187,6 +190,8 @@ func callFresh(st State, c *openresponses.FunctionCall) error {
 		return errors.New("what came of a child is the program's to say, when it has ended")
 	case a.MaxSteps != st.left():
 		return fmt.Errorf("step %q gives its child the %d steps its tree has left", n.ID, st.left())
+	case n.Kind == Agent && !sameJSON(a.Files, st.filesFor(n)):
+		return fmt.Errorf("step %q passes its child the files it is given", n.ID)
 	case n.Kind == Agent && !sameJSON(a.Documents, st.passedDocuments(n)):
 		return fmt.Errorf("step %q passes its child the documents as they stand", n.ID)
 	}

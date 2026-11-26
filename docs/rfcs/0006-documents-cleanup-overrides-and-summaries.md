@@ -292,3 +292,73 @@ is in the record from then on. Counting lives as long as the process:
 
 `Instance.Summary` reads a run's summary back from `Runs`, as recorded:
 the same summary, from any session that holds the end.
+
+## 34. Files as a model step's context
+
+````markdown
+## review
+```yaml
+files: [docs/spec.md, "${{ steps.gather.outputs.paths }}", ./prompts/style.md]
+```
+Review the change against the spec.
+````
+
+A model step may be given files when it opens, in the order written:
+
+- **Workspace files**: a relative path, literal or from a reference to a
+  path or a list of paths. In a child they are below the child's `dir`.
+- **Files of the skill**: a path starting `./`, within the skill.
+
+**Files of the skill are the loader's.** Loading reads each one from the
+skill's snapshot into the definition (`SkillFiles`), so the digest pins
+it, as it does `instructions:`. Anything wrong with one is an error of
+package `workflow` at load, never a failing step: a path not in the
+skill, with the name that was meant; a directory; a path that leaves the
+skill; a file over 256 KiB; or one that is not UTF-8 text. `Apply`
+refuses a step whose skill file was never read, as a graph built by hand
+that names one without its text.
+
+**Workspace files are read when the step opens**, by a call the program
+makes, `flow_files`, with the step's run, its name and its files in
+order. Its result holds every file's text, a skill's from the
+definition, so what the model was given is in the record, and replay
+never reads a disk again: a run resumed after a kill sends the model the
+same texts without a read. The program reads a workspace file through the
+host's own read tool (`read`, with its `path`, unless `FileReader` names
+another), called with `agentturn.Invoke`, so the host's hooks see each
+read as a call of their own.
+
+- **A workspace path's shape is checked at load**: relative, clean, and
+  inside the workspace, or the child's `dir`. A path a reference gives is
+  checked when it is read. A reference whose schema is known must be a
+  path or a list of paths.
+- **A file that cannot be read fails the step**, and the step asks to be
+  retried, as a script that fails does: a missing file, a path of the
+  wrong shape, a refusal, or a file over 256 KiB, or all of them over
+  1 MiB. Nothing is cut.
+- **Policy.** Each read is held to the step's policy, its calls' and its
+  child's, as the step's own `read` would be: a `read(...)` deny, or an
+  `allow` the path misses, refuses the read, the refusal names the rule
+  and its note, and the step fails with it. A step given workspace files
+  may name `read` in its rules without offering the tool to its model.
+
+**Where the model sees them.** In context, the program's call and its
+result are in the conversation, after the step's opening message, where
+the model reads them; the step's instructions say so. Nothing is hidden
+or kept on the side. A compaction that folds them away does not lose
+them: they are read from the record, and put back after the opening
+message of the request that needs them, which the record then holds as
+sent. In a fresh child the call passes the files in, resolved by the
+caller; the child's start records them, and the child's program makes the
+`flow_files` call in the child's own session, with the child's read tool.
+
+**Judges are given no files.** A judge reads what its question carries,
+the question, its `with` and the criteria; the person's view of a file is
+a front's to show (item 23). A judge that should read a file is told its
+path in `with` and given a read tool.
+
+**Files and documents.** Documents ([section 29](#29-documents)) are the
+workflow's own named markdown, edited by calls, their every version in
+the record. Files are read-only context from the workspace or the skill,
+read once when a step opens. A step that should change a file is given a
+tool to write it; one that should keep a draft keeps a document.

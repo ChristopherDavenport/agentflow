@@ -231,6 +231,11 @@ type State struct {
 	// asked counts the bounds asked about in it.
 	clocked bool
 	asked   int
+	// filed says the program has given the attempt's model step its
+	// files, and passedFiles are, for the step of a run in a child, the
+	// files its call passed in.
+	filed       bool
+	passedFiles []fileRef
 	// reasked counts the retry questions put again after an override
 	// that was refused, and reask says a question waits to be put again
 	// should the override waiting on it be refused.
@@ -301,6 +306,9 @@ type startPayload struct {
 	// called, so the child reads on its own.
 	Context string  `json:"context,omitempty"`
 	Path    []Place `json:"path,omitempty"`
+	// Files are, for a run in a child, the files its call passed in for
+	// its step.
+	Files []fileRef `json:"files,omitempty"`
 	// Documents are, for a run in a child, the texts its call passed in of
 	// the documents its step reads.
 	Documents map[string]string `json:"documents,omitempty"`
@@ -786,7 +794,7 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 		if answer.Outcome == retryOutcome {
 			st.Attempt, st.Failure = st.Attempt+1, ""
 			st.Callee, st.Returned, st.calleeInputs = "", nil, nil
-			st.clocked, st.Deadline, st.asked, st.reasked, st.reask = false, time.Time{}, 0, 0, false
+			st.clocked, st.Deadline, st.asked, st.reasked, st.reask, st.filed = false, time.Time{}, 0, 0, false, false
 			if n.Kind == Agent {
 				// The step opens again, and what came before is not about
 				// this attempt.
@@ -797,6 +805,16 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 			r.bounds(f)
 		} else {
 			f.failed = fmt.Errorf("%w: %s: %s", ErrStepFailed, n.ID, st.Failure)
+		}
+		return
+	case c.Name == filesTool && strings.HasPrefix(c.CallID, reserved):
+		// The step's files were given, or could not be, which fails it.
+		if out.CallID == st.filesID() {
+			if r, err := parseResult(&Node{ID: "files"}, out.Output.String()); err == nil && r.Outcome == OK {
+				st.filed = true
+			} else {
+				st.Failure = out.Output.String()
+			}
 		}
 		return
 	case c.Name == clockTool && strings.HasPrefix(c.CallID, reserved):
@@ -974,6 +992,7 @@ func (r *replay) started(i int, f *frame, c *openresponses.FunctionCall, out *op
 		root.path = p.Path
 		root.st.Documents, root.st.docAt = initialDocuments(r.g, p.Inputs, p.Documents)
 		root.st.started = startedAt(out.Output.String())
+		root.st.passedFiles = p.Files
 		root.start = r.at[c.CallID]
 		// A child is given what its caller's tree had left, none included.
 		r.maxSteps = p.MaxSteps
@@ -1232,7 +1251,7 @@ func (r *replay) enter(f *frame, i int, n *Node) {
 	f.visits[n.ID]++
 	st.Visit, st.Attempt = f.visits[n.ID], 1
 	f.since = i
-	st.clocked, st.Deadline, st.asked, st.reasked, st.reask = false, time.Time{}, 0, 0, false
+	st.clocked, st.Deadline, st.asked, st.reasked, st.reask, st.filed = false, time.Time{}, 0, 0, false, false
 	r.entries++
 	st.treeSteps++
 	r.bounds(f)
