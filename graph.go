@@ -346,7 +346,10 @@ type Graph struct {
 	Name string
 	// Description says what the workflow is for, as a step's does.
 	Description string `json:",omitempty"`
-	Nodes       []Node
+	// Hidden says the workflow is only for other workflows to call: no
+	// model starts it by asking for its skill.
+	Hidden bool `json:",omitempty"`
+	Nodes  []Node
 	// Inputs is the schema of what an invocation carries.
 	Inputs *agenttool.Schema
 	// Outputs is what the finished workflow gives back, whatever its

@@ -30,6 +30,12 @@ const TriggerKind = "workflow"
 // A nil end drives an agent as it stands, one restored with calls
 // pending, say.
 //
+// A run a model ended by asking for a workflow's skill (see [Requested])
+// is met: the program invokes the workflow the agent follows, under a
+// trigger of kind [TriggerKind], and drives the new run; for any other
+// workflow it returns the end with a [*StartRequest], whose config is
+// the host's to apply before it calls [Invoke].
+//
 // It returns the end and state of the run that waits or stopped: a's, or
 // a child's waiting on a question, whose pending calls are answered with
 // [Resume]. It uses the options a was given by [Apply], with opts added;
@@ -68,7 +74,8 @@ func (f *flow) drive(ctx context.Context, a *agentturn.Agent, end *agentturn.Run
 		end = &agentturn.RunEnd{Reason: agentturn.ReasonInputRequired, Pending: pending}
 	}
 	for {
-		st, _, err := f.read(ctx, a.State().Transcript)
+		st, all, err := f.read(ctx, a.State().Transcript)
+		req, requested := startRequested(end, all)
 		switch {
 		case end == nil:
 			return nil, st, errors.New("agentflow: no run to drive")
@@ -85,6 +92,22 @@ func (f *flow) drive(ctx context.Context, a *agentturn.Agent, end *agentturn.Run
 			return end, st, end.Err
 		case err != nil:
 			return end, st, err
+		case requested && req.Workflow != f.g.Name:
+			// Another workflow's config is the host's to apply.
+			return end, st, req
+		case requested:
+			// The model asked; the program invokes.
+			item, err := f.g.Invocation(req.Inputs)
+			if err != nil {
+				return end, st, err
+			}
+			from := agentturn.ContextWithTrigger(ctx, agentturn.Trigger{Kind: TriggerKind, Ref: f.g.Name})
+			next, err := a.Prompt(from, item)
+			if next == nil {
+				return end, st, err
+			}
+			end = next
+			continue
 		case end.Reason == agentturn.ReasonInputRequired:
 			// A question whose time has run out takes its timeout outcome.
 			expired, err := f.expire(end.Pending)
