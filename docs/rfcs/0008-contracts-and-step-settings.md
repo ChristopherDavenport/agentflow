@@ -11,6 +11,48 @@ the definition and recorded results; unknown keys are load errors.
 
 ## 1. Values from the record in a step's text and its policy
 
+### 1a. A policy that takes its paths from the record (spiked)
+
+```yaml
+policy:
+  allow:
+    - {rule: write, path: "${{ steps.plan.outputs.files }}", note: the plan's files}
+  deny:
+    - {rule: bash, command: "${{ steps.guard.outputs.forbidden }}"}
+```
+
+- A rule entry may name a tool alone and take what it matches from the
+  record: `path`, or `command`, one reference to a string or a list of
+  them. It stands for one rule per value, `write(src/a.go)`,
+  `write(src/b.go)`, in agentpolicy's grammar. A rule from data with a
+  specifier of its own, with both keys, or with a literal in place of the
+  reference, is a load error; a fixed path is written `write(src/a.go)`.
+- The reference is checked at load as a `with` value is: it must have a
+  value on every path into the step, and where its schema is known it
+  must be a string or a list of strings. The tool is checked as any
+  rule's is, against the step's tools and, at `Apply`, against the host's
+  matchers, with a stand-in specifier.
+- It is read from the record when the step works, the step's own from its
+  run's record and a call's from the calling run's, and it still only
+  narrows: it is one more policy every call must pass, before the host's
+  own hook. A path must be clean and below the workspace's root, as rules
+  are written there in a child too; a command must be one the grammar can
+  hold.
+- The step's instructions list the rules as they resolved, so the request,
+  and its record, holds the effective limit. A refusal names the resolved
+  rule.
+- A value that does not resolve fails the step, which asks to be retried,
+  and no model works under it:
+  - a model step in the current context: the program calls `flow_limits`
+    before the model's first turn, whose error is the step's failure;
+  - a fresh step or a fresh call: the gate refuses the call into the
+    child, as it refuses a `dir` that is no path, so no child is opened;
+  - a call in the current context: the gate refuses the callee's start.
+- A fresh step's child gets its caller's policies already resolved, as
+  its call's record made them, so the child's own record says what it was
+  held to. A judge's rules are fixed: one that takes a value from the
+  record is a load error.
+
 ### 1b. A question whose text is computed (spiked)
 
 ````markdown

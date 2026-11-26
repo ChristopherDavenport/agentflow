@@ -27,6 +27,7 @@ const (
 	callTool   = "flow_call"
 	clockTool  = "flow_clock"
 	stuckTool  = "flow_stuck"
+	limitsTool = "flow_limits"
 
 	// The outcomes of the question a failed step raises.
 	retryOutcome = "retry"
@@ -274,10 +275,13 @@ type State struct {
 	limit string
 }
 
-// caller is a call a run is nested in.
+// caller is a call a run is nested in, with its policy as it stands
+// resolved from that run's record.
 type caller struct {
 	node     *Node
 	workflow string
+	policy   *Policy
+	err      error
 }
 
 // limits are the bounds a run can reach, by the name an ending records.
@@ -420,6 +424,10 @@ func (st State) judgeID() string { return st.callID() + "-judge" }
 // attempt, and timeoutID that of the one that says its time ran out.
 func (st State) clockID() string   { return st.callID() + "-clock" }
 func (st State) timeoutID() string { return st.callID() + "-timeout" }
+
+// limitsID is the ID of the call that says a step's policy cannot be
+// read from the record.
+func (st State) limitsID() string { return st.callID() + "-limits" }
 
 // limitID is the ID of the question a bound raises.
 func (st State) limitID() string { return st.callID() + "-limit" + strconv.Itoa(st.asked+1) }
@@ -624,8 +632,9 @@ func (r *replay) state(f *frame) State {
 		if s == f {
 			break
 		}
-		if s.st.Node != nil {
-			st.callers = append(st.callers, caller{s.st.Node, s.st.Workflow})
+		if n := s.st.Node; n != nil {
+			p, err := n.Policy.resolved(s.st)
+			st.callers = append(st.callers, caller{n, s.st.Workflow, p, err})
 		}
 	}
 	return st
@@ -916,6 +925,13 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 			} else {
 				st.Failure = out.Output.String()
 			}
+		}
+		return
+	case c.Name == limitsTool && strings.HasPrefix(c.CallID, reserved):
+		// The step's policy could not be read from the record: its output
+		// is the step's failure, whatever it says.
+		if out.CallID == st.limitsID() {
+			st.Failure = out.Output.String()
 		}
 		return
 	case c.Name == clockTool && strings.HasPrefix(c.CallID, reserved):

@@ -733,13 +733,20 @@ func (r *ruleSpec) UnmarshalYAML(n *yaml.Node) error {
 		return fmt.Errorf("line %d: a rule is a string, or a mapping with rule and note", n.Line)
 	}
 	return pairs(n, func(key string, v *yaml.Node) error {
+		var err error
 		switch key {
 		case "rule":
 			return v.Decode(&r.Rule)
 		case "note":
 			return v.Decode(&r.Note)
+		case "path":
+			r.Path, err = pathValue(v, "a rule's path is a reference to a path, or a list of them")
+			return err
+		case "command":
+			r.Command, err = pathValue(v, "a rule's command is a reference to a command, or a list of them")
+			return err
 		}
-		return fmt.Errorf("line %d: a rule has no key %q%s", v.Line, key, agentflow.Suggest(key, []string{"rule", "note"}))
+		return fmt.Errorf("line %d: a rule has no key %q%s", v.Line, key, agentflow.Suggest(key, []string{"rule", "note", "path", "command"}))
 	})
 }
 

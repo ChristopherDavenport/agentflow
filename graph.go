@@ -554,6 +554,13 @@ func (g *Graph) Validate() error {
 				bad("node %q: file %s is not a path, nor a list of paths", n.ID, v.From)
 			}
 		}
+		for _, v := range n.Policy.dataValues() {
+			for _, from := range v.refs() {
+				if s := g.refSchema(from); s != nil && s.Type != "" && s.Type != "string" && (s.Type != "array" || s.Items != nil && s.Items.Type != "" && s.Items.Type != "string") {
+					bad("node %q: policy: %s is not a string, nor a list of them", n.ID, from)
+				}
+			}
+		}
 		if j := n.Judge; j != nil {
 			switch {
 			case n.Kind != Person:

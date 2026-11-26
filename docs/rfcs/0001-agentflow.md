@@ -211,7 +211,7 @@ and be none. Unknown keys are errors.
 | `on_timeout` | person | the outcome, and data, a question takes when its timeout passes unanswered (RFC 0004, section 26) |
 | `choices` | person | values an answer picks from, one or many, resolved from an earlier result into the question (RFC 0004, section 24) |
 | `text` | person | the outcome an answer in the person's own words takes, the words in its data (RFC 0004, section 25) |
-| `policy` | model, call | `allow` and `deny` rules in agentpolicy's grammar, which can only narrow what the host permits; on a call, for every model step it calls (RFC 0003, section 17) |
+| `policy` | model, call | `allow` and `deny` rules in agentpolicy's grammar, which can only narrow what the host permits; on a call, for every model step it calls (RFC 0003, section 17). A rule may take its paths or commands from the record (RFC 0008, section 1) |
 | `child` | fresh model | a child kept across the visits and steps that name it (RFC 0002, section 11) |
 | `context`, `hidden` | frontmatter | `context: fresh` runs every call to the workflow in a child; `hidden: true` lets only a calling workflow run it (RFC 0008, section 4) |
 | `on_abort` | frontmatter | the step a cleanup path starts at, run when the run is abandoned (RFC 0006, section 30) |

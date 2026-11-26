@@ -249,7 +249,7 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 	if (needs || len(f.modes) > 0) && f.children == nil {
 		return cfg, errors.New("agentflow: the graph runs work in children, a fresh step or call or a judge, and the host gave no Children to open them")
 	}
-	own := append([]agenttool.Tool{f.startTool(), f.askTool(), f.finishTool(), f.judgeTool(), f.endTool(), f.callTool(), f.clockTool(), f.stuckTool(), f.overrideTool(), f.filesTool(), f.shownTool()}, f.docTools()...)
+	own := append([]agenttool.Tool{f.startTool(), f.askTool(), f.finishTool(), f.judgeTool(), f.endTool(), f.callTool(), f.clockTool(), f.stuckTool(), f.overrideTool(), f.filesTool(), f.shownTool(), f.limitsTool()}, f.docTools()...)
 	if p := cfg.ToolProvider; p != nil {
 		cfg.ToolProvider = func(ctx context.Context) []agenttool.Tool {
 			return append(f.timed(p(ctx)), own...)
@@ -492,7 +492,7 @@ func (f *flow) prepare(ctx context.Context, req *openresponses.Request) error {
 	if err != nil {
 		return err
 	}
-	if !modelTurn(st) || f.clockDue(st) || f.expired(st) || st.request != nil || f.filesDue(st) {
+	if !modelTurn(st) || f.clockDue(st) || f.expired(st) || st.request != nil || f.filesDue(st) || f.limitsDue(st) {
 		req.Model = programPrefix + f.g.Name
 		return nil
 	}
@@ -865,6 +865,8 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 			Question: fmt.Sprintf("Step %q failed: %s\nRun it again?", st.Node.ID, st.Failure)}
 		q.where(st)
 		args = q
+	case f.limitsDue(st):
+		id, name, args = st.limitsID(), limitsTool, limitsArgs{Run: st.Instance, Step: st.Node.ID, Reason: f.policyErr(st).Error()}
 	case f.expired(st):
 		name = clockTool
 		id, args = f.clockCall(st, true)
@@ -1020,6 +1022,12 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 			return block(err.Error())
 		}
 		return &agentturn.ToolDecision{Action: agentturn.Defer, Reason: fmt.Sprintf("agentflow: a judge looks at step %q in a child", n.ID)}, nil
+	case id == st.callID() && (n.fresh() || n.Flow != "" && st.Callee == "") && f.policyErr(st) != nil:
+		// A policy read from the record that does not resolve fails the
+		// call, which asks to retry: a child is never opened under it.
+		return block(fmt.Sprintf("step %q: %v", n.ID, f.policyErr(st)))
+	case n.Flow != "" && st.Callee == "" && !n.fresh() && f.policyErr(st) != nil:
+		return block(fmt.Sprintf("step %q: %v", n.ID, f.policyErr(st)))
 	case n.Dir.set() && id == st.callID() && (n.fresh() || n.Script != ""):
 		// The directory is read from the record as the call is made: one
 		// that is no path below the root fails the step, which asks to
@@ -1058,6 +1066,12 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 				return nil, nil
 			}
 			return block("only the workflow gives a step its files")
+		}
+		if name == limitsTool {
+			if id == st.limitsID() && f.limitsDue(st) {
+				return nil, nil
+			}
+			return block("only the workflow says a step's policy cannot be read")
 		}
 		if name == clockTool {
 			if id == st.clockID() && f.clockDue(st) || id == st.timeoutID() && f.expired(st) {

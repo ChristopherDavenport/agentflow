@@ -83,6 +83,9 @@ func (n *Node) checkSettings() []error {
 		if err := j.Policy.check(j.Tools, true); err != nil {
 			bad("judge: policy: %v", err)
 		}
+		if j.Policy.fromData() {
+			bad("judge: policy: a judge's rules are fixed, and take nothing from the record")
+		}
 	}
 	seen := map[string]bool{}
 	for _, sk := range n.Skills {

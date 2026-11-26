@@ -390,10 +390,20 @@ func policyOut(p *agentflow.Policy) map[string]any {
 	list := func(rules []agentflow.PolicyRule) []any {
 		out := []any{}
 		for _, r := range rules {
-			if r.Note == "" {
+			entry := map[string]any{"rule": r.Rule}
+			if r.Note != "" {
+				entry["note"] = r.Note
+			}
+			if r.Path.From != "" || r.Path.Literal != nil {
+				entry["path"] = written(r.Path)
+			}
+			if r.Command.From != "" || r.Command.Literal != nil {
+				entry["command"] = written(r.Command)
+			}
+			if len(entry) == 1 {
 				out = append(out, r.Rule)
 			} else {
-				out = append(out, map[string]any{"rule": r.Rule, "note": r.Note})
+				out = append(out, entry)
 			}
 		}
 		return out
