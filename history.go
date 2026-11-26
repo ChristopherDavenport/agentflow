@@ -1,6 +1,7 @@
 package agentflow
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -157,26 +158,109 @@ func (f *flow) transform(host func(context.Context, agentturn.Transcript) (agent
 	}
 }
 
-// SummaryFilter keeps the workflow's own messages out of what is
-// summarised: the invocation, each step's opening message and the
-// reminders. A summary that took one in would tell a later step, in the
-// person's voice, that an earlier one is under way. Give it to the
-// compactor that writes the summary, as compact.WithFilter takes it. It
-// does [agentturn.DefaultFilter]'s work too, which that option
+// SummaryFilter shapes what a summarizer reads of a workflow. Give it
+// to the compactor that writes the summary, as compact.WithFilter takes
+// it. It does [agentturn.DefaultFilter]'s work too, which that option
 // replaces.
 //
-// It shapes only what the summarizer reads. The request keeps its
-// messages and its hash.
+// The workflow's own messages, the invocation, each step's opening
+// message and the reminders, are left out: a summary that took one in
+// would tell a later step that an earlier one is under way. A call the
+// model did not make, the program's and a judge's, is replaced with its
+// result by a note saying whose it was, since a summarizer cannot tell
+// and writes that the assistant did it.
+//
+// It shapes only what the summarizer reads. The request keeps its items
+// and its hash.
 func SummaryFilter(t agentturn.Transcript) agentturn.Transcript {
-	return slices.DeleteFunc(slices.Clone(agentturn.DefaultFilter(t)), notice)
+	items := agentturn.DefaultFilter(t)
+	outputs := map[string]string{}
+	others := map[string]bool{}
+	for _, item := range items {
+		switch it := item.(type) {
+		case *openresponses.FunctionCall:
+			others[it.CallID] = others[it.CallID] || notTheModels(it)
+		case *openresponses.FunctionCallOutput:
+			outputs[it.CallID] = it.Output.String()
+		}
+	}
+	var out agentturn.Transcript
+	noted := map[string]bool{}
+	for _, item := range items {
+		switch it := item.(type) {
+		case *openresponses.Message:
+			if notice(it) {
+				continue
+			}
+		case *openresponses.FunctionCall:
+			if others[it.CallID] {
+				result, answered := outputs[it.CallID]
+				noted[it.CallID] = true
+				out = append(out, openresponses.DeveloperText(note(it, result, answered)))
+				continue
+			}
+		case *openresponses.FunctionCallOutput:
+			switch {
+			case noted[it.CallID]:
+				continue
+			// A program's result whose call is not among these.
+			case strings.HasPrefix(it.CallID, reserved):
+				out = append(out, openresponses.DeveloperText(recordPrefix+"a step the workflow ran, not the assistant, gave: "+it.Output.String()))
+				continue
+			}
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+// recordPrefix starts a note [SummaryFilter] writes in place of a call.
+const recordPrefix = "Workflow record: "
+
+// notTheModels says the working model did not make c: the program makes
+// IDs with the reserved prefix, and only a judge calls flow_judge.
+func notTheModels(c *openresponses.FunctionCall) bool {
+	return strings.HasPrefix(c.CallID, reserved) || c.Name == judgeTool
+}
+
+// note says what a call the model did not make did, and who made it.
+func note(c *openresponses.FunctionCall, result string, answered bool) string {
+	if !answered {
+		result = "no result yet"
+	}
+	var res Result
+	_ = decode([]byte(result), &res)
+	switch c.Name {
+	case judgeTool:
+		var a judgeArgs
+		_ = decode([]byte(c.Arguments), &a)
+		return fmt.Sprintf("%sa separate judge model, not the assistant, gave a verdict on step %q: %s, giving the reason %q", recordPrefix, a.Step, a.Outcome, a.Reason)
+	case askTool:
+		var q Question
+		_ = decode([]byte(c.Arguments), &q)
+		if res.Outcome == "" {
+			return fmt.Sprintf("%sthe workflow, not the assistant, asked %q (step %q): %s", recordPrefix, q.Question, q.Step, result)
+		}
+		who := map[string]string{"": "the person", ByJudge: "a judge model", "rules": "the host's rules", "unattended default": "the unattended default"}[res.By]
+		said := fmt.Sprintf("%sthe workflow, not the assistant, asked %q (step %q). %s answered %s", recordPrefix, q.Question, q.Step, cmp.Or(who, res.By), res.Outcome)
+		if res.Reason != "" {
+			said += fmt.Sprintf(", giving the reason %q", res.Reason)
+		}
+		return said
+	case endTool:
+		var e Ending
+		_ = decode([]byte(c.Arguments), &e)
+		return fmt.Sprintf("%sthe workflow run ended: %s. %s", recordPrefix, e.Status, e.Reason)
+	case ScriptTool:
+		var sc ScriptCall
+		_ = decode([]byte(c.Arguments), &sc)
+		return fmt.Sprintf("%sthe workflow, not the assistant, ran the script %s. Result: %s", recordPrefix, sc.Run, result)
+	}
+	return fmt.Sprintf("%sthe workflow, not the assistant, called %s. Result: %s", recordPrefix, c.Name, result)
 }
 
 // notice says item is something the workflow says to the model.
-func notice(item openresponses.Item) bool {
-	m, ok := item.(*openresponses.Message)
-	if !ok {
-		return false
-	}
+func notice(m *openresponses.Message) bool {
 	prefixes := []string{beginPrefix, nudgePrefix, noVerdict}
 	switch m.Role {
 	case openresponses.RoleDeveloper:

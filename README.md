@@ -86,7 +86,8 @@ cfg, err := agentflow.Apply(graph, base, history) // and agentflow.Drive(..., hi
 ```
 
 A compactor needs one thing from the workflow, or its summaries tell
-later steps that earlier ones are still running:
+later steps that earlier ones are still running, and credit the model with
+what the program did:
 
 ```go
 compact.NewLocal(summarizer, compact.WithOnFold(rec.Fold),

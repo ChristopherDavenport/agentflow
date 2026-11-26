@@ -470,8 +470,30 @@ step would read. `SummaryFilter`, given to the compactor
 and the reminders out of what is summarised, without changing a request
 or its hash. A host that builds its compactor without it gets the old
 behaviour: agentflow is handed only the compactor's `Transform` and
-cannot add it. Calls and their outputs are still summarised. Not tried
-with a real model since.
+cannot add it. Calls and their outputs are still summarised.
+
+Tried again with claude-haiku-5-5 and the filter, 2 runs of 9 folds
+each, with 3 folds before an injected failure: both resumed an already
+folded session and finished with each script run once; no workflow
+message reached a summary request, no summary spoke of a step as under
+way, and no hash was wrong. The requests without one were the fresh
+`build` and the judges, 7 and 8 of 22 and 23 responses.
+
+**Summaries misattributed the program's calls.** The summarizer cannot
+tell a call the program made from one the model made, and wrote "I chose
+this step and its form myself", "an extra check the assistant chose",
+and of one step "I did not run the diff" before closing it. So
+`SummaryFilter` now hands the summarizer each call the working model did
+not make, the program's and `flow_judge`, with its result, as a developer
+message saying whose it was. A judge's own look at files, and the
+workflow's closing report, still read as the assistant's.
+
+Two live runs with that, claude-haiku-5-5, 9 and 8 folds: no summary
+said the assistant had run a script, asked a question or taken the
+person's decision, and they named the workflow as the actor. What they
+still give the assistant, it did. Reasons are now quoted, after one
+summary took "because: small" for a truncated reason; that wording has
+not been tried live.
 
 Without `History` the transcript is the record, as long as nothing drops
 from it: a transform that drops what position is read from is refused

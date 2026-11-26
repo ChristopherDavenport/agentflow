@@ -148,6 +148,20 @@ func TestCompactionDuringAWorkflow(t *testing.T) {
 					}
 				}
 			}
+			// A summarizer cannot tell who made a call, so it is handed
+			// none the model did not make.
+			all, notes := strings.Join(sum.read, "\n"), 0
+			for _, read := range sum.read {
+				notes += strings.Count(read, recordPrefix)
+				for _, call := range []string{"call script", "call " + askTool, "call " + endTool} {
+					if strings.Contains(read, call) {
+						t.Errorf("the summarizer was shown the program's %q", call)
+					}
+				}
+			}
+			if notes == 0 || !strings.Contains(all, "call "+finishTool) && !fresh {
+				t.Errorf("notes = %d, the model's own calls kept = %v", notes, strings.Contains(all, "call "+finishTool))
+			}
 			total, missing, wrong := unverified(t, store, s.ID())
 			t.Logf("%d responses, no hash %v, wrong hash %v, %d folds", total, missing, wrong, len(sum.read))
 			if len(wrong) > 0 {
@@ -384,11 +398,47 @@ func TestSummaryFilterDropsOnlyWhatTheWorkflowSays(t *testing.T) {
 		openresponses.UserText("quoting " + beginPrefix),
 		&openresponses.FunctionCall{CallID: "flow_pr_1_gather_v1", Name: "script"},
 	}
-	want := []string{"please fix it", "Be brief.", "quoting " + beginPrefix, "call script"}
+	want := []string{"please fix it", "Be brief.", "quoting " + beginPrefix,
+		recordPrefix + "the workflow, not the assistant, called script. Result: no result yet"}
 	if got := texts(openresponses.Items(SummaryFilter(in))); !slices.Equal(got, want) {
 		t.Errorf("kept %q, want %q", got, want)
 	}
 	if len(in) != 8 || texts(openresponses.Items(in))[4] != "please fix it" {
 		t.Error("the input was changed")
+	}
+}
+
+func TestSummaryFilterSaysWhoDidWhat(t *testing.T) {
+	call := func(id, name, args string) *openresponses.FunctionCall {
+		return &openresponses.FunctionCall{CallID: id, Name: name, Arguments: args}
+	}
+	out := func(id, text string) *openresponses.FunctionCallOutput {
+		return &openresponses.FunctionCallOutput{CallID: id, Output: openresponses.FunctionCallOutputData{Text: text}}
+	}
+	got := SummaryFilter(agentturn.Transcript{
+		call("flow_p_1_lint_v1", ScriptTool, `{"run":"scripts/lint.sh","with":{"big":"value"}}`),
+		out("flow_p_1_lint_v1", `{"outcome":"sound"}`),
+		call("flow_p_1_ok_v1", askTool, `{"step":"ok","question":"Go?","mode":"shadow"}`),
+		out("flow_p_1_ok_v1", `{"outcome":"go","reason":"small"}`),
+		call("flow_p_1_ship_v1", askTool, `{"step":"ship","question":"Ship?"}`),
+		out("flow_p_1_ship_v1", `{"outcome":"publish","by":"ai"}`),
+		call("call_9", judgeTool, `{"step":"ok","outcome":"go","reason":"fits"}`),
+		out("call_9", `{"outcome":"go","reason":"fits"}`),
+		out("flow_p_1_gone_v1", `{"outcome":"ok"}`),
+		call("call_1", "read", `{"path":"a"}`),
+		out("call_1", "contents"),
+		call("call_2", finishTool, `{"step":"fix"}`),
+		out("call_2", `{"outcome":"ok"}`),
+	})
+	want := []string{
+		recordPrefix + `the workflow, not the assistant, ran the script scripts/lint.sh. Result: {"outcome":"sound"}`,
+		recordPrefix + `the workflow, not the assistant, asked "Go?" (step "ok"). the person answered go, giving the reason "small"`,
+		recordPrefix + `the workflow, not the assistant, asked "Ship?" (step "ship"). a judge model answered publish`,
+		recordPrefix + `a separate judge model, not the assistant, gave a verdict on step "ok": go, giving the reason "fits"`,
+		recordPrefix + `a step the workflow ran, not the assistant, gave: {"outcome":"ok"}`,
+		"call read", "output", "call " + finishTool, "output",
+	}
+	if got := texts(openresponses.Items(got)); !slices.Equal(got, want) {
+		t.Errorf("got  %q\nwant %q", got, want)
 	}
 }
