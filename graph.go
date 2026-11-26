@@ -349,6 +349,11 @@ type Graph struct {
 	Nodes       []Node
 	// Inputs is the schema of what an invocation carries.
 	Inputs *agenttool.Schema
+	// InputDefaults are the values of inputs an invocation or a caller may
+	// leave out, by name. A run's start records its inputs with them
+	// filled in, so the record holds what the run was given. An input with
+	// a default is not required.
+	InputDefaults map[string]any `json:",omitempty"`
 	// Outputs is what the finished workflow gives back, whatever its
 	// outcome.
 	Outputs map[string]Value
@@ -448,6 +453,7 @@ func (g *Graph) Validate() error {
 	if g.Outputs != nil && g.OutputsBy != nil {
 		bad("outputs are either by outcome or for every outcome")
 	}
+	errs = append(errs, g.checkDefaults()...)
 	if len(g.Nodes) == 0 {
 		bad("graph has no nodes")
 	}

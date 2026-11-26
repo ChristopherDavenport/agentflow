@@ -103,7 +103,8 @@ func (f *flow) rootStart(inputs any) (startPayload, error) {
 	if err != nil {
 		return startPayload{}, err
 	}
-	p := startPayload{Workflow: f.g.Name, Digest: f.g.Digest(), Inputs: inputs, Format: RecordFormat,
+	// The start records the inputs the run was given, defaults filled in.
+	p := startPayload{Workflow: f.g.Name, Digest: f.g.Digest(), Inputs: f.g.withDefaults(inputs), Format: RecordFormat,
 		Definition: json.RawMessage(definition), MaxDepth: f.depth(), MaxSteps: f.steps()}
 	if c := f.child; c != nil {
 		p.Run, p.Parent, p.Caller, p.Depth, p.Path, p.Context = c.Run, c.Parent, c.Caller, c.Depth, c.Path, ContextFresh
@@ -225,7 +226,7 @@ func callReturn(st State, c *openresponses.FunctionCall) error {
 		return errors.New("the call is not readable")
 	case a.Run != st.Returned.Instance || a.Workflow != st.g.Callees[n.Flow].Name:
 		return fmt.Errorf("step %q called run %q", n.ID, st.Returned.Instance)
-	case !sameJSON(a.With, st.calleeInputs):
+	case !sameJSON(st.g.Callees[n.Flow].withDefaults(a.With), st.calleeInputs):
 		return fmt.Errorf("step %q passed run %q other inputs than it started with", n.ID, a.Run)
 	}
 	return nil

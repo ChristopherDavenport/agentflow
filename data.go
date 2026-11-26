@@ -282,8 +282,8 @@ func (g *Graph) checkRefs() []error {
 			switch {
 			case g.Inputs == nil || !declares(g.Inputs, r.path[0]):
 				bad("not an input of the workflow%s", suggest(r.path[0], memberNames(g.Inputs)))
-			case !slices.Contains(g.Inputs.Required, r.path[0]):
-				bad("not a required input of the workflow")
+			case !g.certainInput(r.path[0]):
+				bad("not a required input of the workflow, nor one with a default")
 			}
 			return
 		}
@@ -486,7 +486,7 @@ func (g *Graph) reached(refs []ref) map[string]map[uint]bool {
 	var first uint
 	for i, r := range refs {
 		// A document always has a text, empty at first.
-		if r.doc != "" || r.step == "" && g.Inputs != nil && slices.Contains(g.Inputs.Required, r.path[0]) {
+		if r.doc != "" || r.step == "" && g.certainInput(r.path[0]) {
 			first |= 1 << i
 		}
 	}

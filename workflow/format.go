@@ -34,7 +34,19 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 		}
 	}
 	if g.Inputs != nil {
-		front.add("inputs", fields(g.Inputs))
+		inputs := fields(g.Inputs)
+		// An input's default is written beside its schema.
+		for i := 0; i+1 < len(inputs.Content); i += 2 {
+			if d, ok := g.InputDefaults[inputs.Content[i].Value]; ok {
+				var v yaml.Node
+				if err := v.Encode(d); err != nil {
+					return nil, err
+				}
+				m := inputs.Content[i+1]
+				m.Content = append(m.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "default"}, &v)
+			}
+		}
+		front.add("inputs", inputs)
 	}
 	if g.Outputs != nil {
 		front.add("outputs", valuesNode(g.Outputs))

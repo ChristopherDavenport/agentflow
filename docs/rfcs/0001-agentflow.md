@@ -236,7 +236,10 @@ outputs:
 ```
 
 Outputs may instead be given by outcome, as a step's are; see
-[RFC 0002](0002-nesting-and-children.md).
+[RFC 0002](0002-nesting-and-children.md). An input that is not required
+may have a `default`, which a run's start records in its inputs when the
+invocation or the caller leaves it out; see
+[RFC 0008](0008-contracts-and-step-settings.md), section 2.
 
 ```yaml
 tool: git_tag

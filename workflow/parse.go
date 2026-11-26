@@ -223,7 +223,7 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 			return nil, fmt.Errorf("workflow: frontmatter: %w", err)
 		}
 		var err error
-		if g.Inputs, err = objectSchema(&fm.Inputs); err != nil {
+		if g.Inputs, g.InputDefaults, err = inputsSchema(&fm.Inputs); err != nil {
 			return nil, fmt.Errorf("workflow: inputs: %w", err)
 		}
 		outputs, g.MaxDepth, g.MaxSteps, g.Model, g.Thinking = fm.Outputs, fm.MaxDepth, fm.MaxSteps, fm.Model, fm.Thinking
@@ -878,6 +878,43 @@ func objectSchema(n *yaml.Node) (*agenttool.Schema, error) {
 	return s, nil
 }
 
+// inputsSchema reads a workflow's inputs: an object schema whose fields
+// may each have a default, which only an input has.
+func inputsSchema(n *yaml.Node) (*agenttool.Schema, map[string]any, error) {
+	var defaults map[string]any
+	var stripped []*yaml.Node
+	err := pairs(n, func(name string, v *yaml.Node) error {
+		field := v
+		if v.Kind == yaml.MappingNode {
+			field = &yaml.Node{Kind: yaml.MappingNode, Tag: v.Tag, Line: v.Line, Column: v.Column}
+			for i := 0; i+1 < len(v.Content); i += 2 {
+				if v.Content[i].Value != "default" {
+					field.Content = append(field.Content, v.Content[i], v.Content[i+1])
+					continue
+				}
+				var d any
+				if err := v.Content[i+1].Decode(&d); err != nil {
+					return fmt.Errorf("%s: default: %w", name, err)
+				}
+				if hasReference(d) {
+					return fmt.Errorf("%s: a default is a literal", name)
+				}
+				if defaults == nil {
+					defaults = map[string]any{}
+				}
+				defaults[name] = d
+			}
+		}
+		stripped = append(stripped, &yaml.Node{Kind: yaml.ScalarNode, Value: name}, field)
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	s, err := objectSchema(&yaml.Node{Kind: yaml.MappingNode, Content: stripped})
+	return s, defaults, err
+}
+
 var types = []string{"string", "number", "integer", "boolean", "array", "object"}
 
 func fieldSchema(n *yaml.Node) (s *agenttool.Schema, required bool, err error) {
@@ -905,6 +942,8 @@ func fieldSchema(n *yaml.Node) (s *agenttool.Schema, required bool, err error) {
 				s.Properties, s.Required = object.Properties, object.Required
 			}
 			return err
+		case "default":
+			return errors.New("only a workflow's input has a default")
 		default:
 			return unknownKey("", key, "type", "required", "description", "enum", "items", "properties")
 		}

@@ -871,7 +871,7 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 		c := st.g.Callees[st.Node.Flow]
 		f.book.started(key)
 		id, name = keyPrefix(key)+"start", startTool
-		args = startPayload{Workflow: c.Name, Digest: c.OwnDigest(), Inputs: with, Format: RecordFormat,
+		args = startPayload{Workflow: c.Name, Digest: c.OwnDigest(), Inputs: c.withDefaults(with), Format: RecordFormat,
 			Run: key, Parent: st.Instance, Caller: st.callID(), Depth: st.Depth + 1}
 	default:
 		id = st.callID()
