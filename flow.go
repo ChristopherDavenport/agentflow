@@ -137,6 +137,10 @@ type flow struct {
 	// child is set for a flow run in a child: what its start records,
 	// and the instructions its settings add.
 	child *Child
+	// book counts what each run's model requests use, and prices prices
+	// it, for the summary a run's end records.
+	book   *usageBook
+	prices func(model string, u openresponses.Usage) (float64, bool)
 	// due is the deadline of the model step the last request was shaped
 	// for, so the model's stream is cut there.
 	due *deadline
@@ -248,6 +252,9 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 
 	cfg.Model = f
 	f.due = &deadline{}
+	if f.book == nil {
+		f.book = &usageBook{}
+	}
 	if transform := cfg.Transform; transform != nil {
 		cfg.Transform = f.transform(transform)
 	}
@@ -429,7 +436,7 @@ func (f *flow) prepare(ctx context.Context, req *openresponses.Request) error {
 		return nil
 	}
 	if f.due != nil {
-		f.due.set(st.Deadline)
+		f.due.set(st.Deadline, st.Instance)
 	}
 	req.Model = f.modelName
 	req.Input = f.visible(req.Input, all, st)
@@ -708,6 +715,7 @@ func (f *flow) call(st State) (name string, args any, err error) {
 // its step. A stream cut there ends in [ErrStepTimeout], which no retry
 // mends, and the program records the step's failure on its next turn.
 func (f *flow) serve(ctx context.Context, req openresponses.Request, sink openresponses.EventSink) error {
+	sink = f.counting(sink, req.Model)
 	var due time.Time
 	if f.due != nil {
 		due = f.due.get()
@@ -742,6 +750,7 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 	var args any
 	switch {
 	case over != nil:
+		over.Summary = f.summarize(st)
 		id, name, args = over.id, endTool, over
 	case st.request != nil:
 		id, name, args = st.requestID, overrideTool, *st.request
@@ -767,6 +776,7 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 		if err != nil {
 			return err
 		}
+		f.book.started(p.Run)
 		id, name, args = keyPrefix(p.Run)+"start", startTool, p
 	case st.Reached != nil:
 		id, name, args = st.limitID(), askTool, limitQuestion(st)
@@ -800,6 +810,7 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 			return fmt.Errorf("agentflow: step %q: %w", st.Node.ID, err)
 		}
 		c := st.g.Callees[st.Node.Flow]
+		f.book.started(key)
 		id, name = keyPrefix(key)+"start", startTool
 		args = startPayload{Workflow: c.Name, Digest: c.OwnDigest(), Inputs: with, Format: RecordFormat,
 			Run: key, Parent: st.Instance, Caller: st.callID(), Depth: st.Depth + 1}
@@ -1085,7 +1096,8 @@ func (f *flow) startTool() agenttool.Tool {
 		if err := checkData(g.Inputs, p.Inputs); err != nil {
 			return Result{}, fmt.Errorf("agentflow: inputs of %s: %w", g.Name, err)
 		}
-		return Result{Outcome: OK}, nil
+		// The time it started is a result, so a summary reads it back.
+		return Result{Outcome: OK, Data: map[string]any{"at": time.Now().UTC().Format(time.RFC3339Nano)}}, nil
 	}, agenttool.WithReplay(safeReplay))
 }
 

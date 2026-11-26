@@ -83,7 +83,8 @@ func (c Child) Apply(cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 	}
 	p := c.parent
 	f := &flow{g: c.g, maxDepth: p.maxDepth, maxSteps: p.maxSteps, unattended: p.unattended, reply: p.reply, delegations: p.delegations,
-		modes: p.modes, judgeName: p.judgeName, children: p.children, models: p.models, idle: p.idle, matchers: p.matchers, policyOpts: p.policyOpts}
+		modes: p.modes, judgeName: p.judgeName, children: p.children, models: p.models, idle: p.idle, matchers: p.matchers, policyOpts: p.policyOpts,
+		book: p.book, prices: p.prices}
 	own := c
 	f.child = &own
 	for _, opt := range opts {
@@ -303,7 +304,7 @@ func letGo(st State, p agentturn.PendingCall, a callArgs, done State, failed err
 	}
 	// What the child's runs spent counts toward the caller's tree, however
 	// they came out: a failed child's steps and a judge's look included.
-	a.Entries, a.Granted = done.Entries, done.Granted
+	a.Entries, a.Granted, a.Summary = done.Entries, done.Granted, done.Summary
 	args, err := json.Marshal(a)
 	if err != nil {
 		return nil, err

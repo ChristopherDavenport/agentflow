@@ -57,6 +57,9 @@ type Ending struct {
 	// Limit names the bound across the tree of runs the run failed on,
 	// such as depth, so every run it is nested in fails with it.
 	Limit string `json:"limit,omitempty"`
+	// Summary sums up how the run went: its time, its steps and what its
+	// model requests used, the runs it called included.
+	Summary *Summary `json:"summary,omitempty"`
 	// Cleanup says how an abandoned run's cleanup path went: done, or why
 	// it stopped. It is empty for a run with none.
 	Cleanup string `json:"cleanup,omitempty"`
@@ -120,6 +123,8 @@ type Instance struct {
 	// unknown format, a definition that does not match its digest, or a
 	// replay that disagrees with the recorded ending.
 	Problem string
+	// Summary is what its end summed up, nil while it has none.
+	Summary *Summary
 	// Children are the runs it called, in the order they started.
 	Children []*Instance
 
@@ -334,7 +339,7 @@ func judge(in *Instance, f *frame) {
 	if e == nil {
 		return
 	}
-	in.Status, in.Reason, in.Outcome = e.Status, e.Reason, e.Outcome
+	in.Status, in.Reason, in.Outcome, in.Summary = e.Status, e.Reason, e.Outcome, e.Summary
 	ended := st.Done && st.Outcome != Failed
 	switch {
 	case !slices.Equal(pathOf(st.Steps), e.Path):

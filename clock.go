@@ -30,12 +30,20 @@ type clockArgs struct {
 type deadline struct {
 	mu sync.Mutex
 	at time.Time
+	// run is the run the request is for, whose usage it counts toward.
+	run string
 }
 
-func (d *deadline) set(at time.Time) {
+func (d *deadline) set(at time.Time, run string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.at = at
+	d.at, d.run = at, run
+}
+
+func (d *deadline) forRun() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.run
 }
 
 func (d *deadline) get() time.Time {

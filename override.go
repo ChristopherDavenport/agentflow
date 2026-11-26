@@ -162,6 +162,7 @@ func (r *replay) overridden(i int, c *openresponses.FunctionCall, out *openrespo
 			f.since, st.Nudges, st.Begun, st.refused = i, 0, false, 0
 		}
 		r.entries++
+		st.treeSteps++
 	case OverrideJump:
 		f.since, st.Nudges, st.Begun, st.refused = i, 0, false, 0
 		f.came = "an operator jumped to it"

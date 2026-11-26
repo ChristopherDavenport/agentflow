@@ -237,3 +237,58 @@ in the question's `note`. A program step records it and is not told.
 Refusals are results, recorded with the reason: no such run under way, a
 run that waits on another, no such step (with the name that was meant), a
 step that cannot run from here, or runs already being abandoned.
+
+## 32. A summary when a run ends
+
+Every `flow_end` carries a `summary` beside the path, the outcome and the
+reason it already holds:
+
+```json
+{"instance": "3fa9c2d1e0", "status": "done", "outcome": "clean", "path": [...],
+ "summary": {
+   "started": "2026-11-26T10:00:00Z", "ended": "2026-11-26T10:04:12Z",
+   "steps": 9,
+   "usage": {"requests": 6, "input_tokens": 52000, "output_tokens": 4100, "cost": 0.21},
+   "calls": [{"workflow": "pr-review", "run": "77b01c4a9e", "status": "done", "outcome": "clean",
+              "summed": true, "steps": 5, "usage": {"requests": 4, "input_tokens": 30000, "output_tokens": 2600, "cost": 0.12}}]}}
+```
+
+- **Time** comes from what is recorded. `flow_start`'s result now holds
+  the time the start was recorded, which replay reads back, and the
+  program reads the clock once more as it writes the end, which records
+  it. Neither decides anything: control flow reads no time but a
+  timeout's, through `flow_clock`.
+- **Steps** are the step entries of the run, attempts and jumps
+  included, and of every run it called, in context or in a child.
+- **Usage** is what the run's model requests used, and the requests of
+  every run it called. `calls` lists the runs it called directly, each
+  with its own totals; each of those has its own summary, with its own
+  calls, in its own end, in this session or its child's. A child's end
+  goes back to its caller with the call's result, so the caller's
+  summary needs no other session.
+- **Cost** is the host's to price: `Prices(func(model, usage) (cost,
+  ok))`. agentflow does not import agenteval, and knows no prices.
+  Requests of a model it has no price for are counted, left out of
+  `cost`, and their models listed in `unpriced`; with no `Prices`, every
+  model is unpriced.
+
+**Where the counts come from, and what is partial.** Usage is not in the
+record's items: it is on the session's response entries, which agentflow
+does not read. So the program counts each model request as it serves it,
+by the run the request was for, and writes the sum into the end, where it
+is in the record from then on. Counting lives as long as the process:
+
+- A run whose start this process wrote counts every request it made.
+- A run that started before a restart counts only the requests since,
+  and says so: `partial` gives the reason. A summary is never padded or
+  guessed; the requests before are in the session's responses, which a
+  host can add up with agentsession's `DelegatedWork` and its own reader.
+- A run is partial if a run it called is: `partial` keeps the first
+  reason it meets, and a call whose end wrote no summary makes it partial
+  too.
+- The program's own turns, sent to `agentflow/<workflow>`, use nothing
+  and are not counted, which also answers RFC 0001's open question 6 for
+  summaries.
+
+`Instance.Summary` reads a run's summary back from `Runs`, as recorded:
+the same summary, from any session that holds the end.

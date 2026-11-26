@@ -398,7 +398,8 @@ step's input taken from the record.
 ### Leaving, and reading it back (spiked)
 
 An instance's end is written, not inferred. The program calls `flow_end`
-with the instance, a status, a reason, the path taken and the outputs:
+with the instance, a status, a reason, the path taken, the outputs and a
+summary of its time, steps and usage (RFC 0006, section 32):
 
 | Status | When |
 |---|---|
@@ -941,7 +942,8 @@ that competes with the finish instruction.
    so a policy that asks by default asks about them. A host must allow
    them.
 6. **Cost and eval tools** see `agentflow/` responses with no usage.
-   They should skip them, not report an unpriced model.
+   They should skip them, not report an unpriced model. A run's own end
+   now sums up what its model requests used (RFC 0006, section 32).
 7. **Run directories** show in a repository's status while a script runs.
 8. **Gates.** A `check` script that rejects a model's result before the
    step finishes.

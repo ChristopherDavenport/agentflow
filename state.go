@@ -101,6 +101,9 @@ type Result struct {
 	Entries int    `json:"entries,omitempty"`
 	Granted int    `json:"granted,omitempty"`
 	Limit   string `json:"limit,omitempty"`
+	// Summary is, for a call into a child, what the child's end summed
+	// up, which the caller's summary takes in.
+	Summary *Summary `json:"summary,omitempty"`
 }
 
 // Step is one finished node.
@@ -198,6 +201,14 @@ type State struct {
 	// over: done, or why it stopped.
 	Aborting, Cleaning bool
 	Cleanup            string
+	// Summary is what the run's end summed up, once it is written.
+	Summary *Summary
+	// started is when the run started, as its start's result says;
+	// treeSteps counts the steps it and the runs it called entered; and
+	// called are the runs it called, as each one's end summed it up.
+	started   time.Time
+	treeSteps int
+	called    []Called
 	// Note is what an operator said with the override that brought the
 	// run to its step, or ran it again, until the step finishes.
 	Note string
@@ -504,6 +515,10 @@ func (r *replay) top() *frame {
 func (r *replay) state(f *frame) State {
 	st := f.st
 	st.Documents = maps.Clone(f.st.Documents)
+	st.called = slices.Clone(f.st.called)
+	if f.ending != nil {
+		st.Summary = f.ending.Summary
+	}
 	st.Aborting, st.Cleaning, st.Cleanup = f.aborting, f.cleaning && f.cleaned == "", f.cleaned
 	st.endNow = f.aborting && f.ending == nil && f.st.Started && (f.cleaned != "" || !f.cleaning)
 	if o := r.request; o != nil {
@@ -778,6 +793,7 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 				f.since, st.Nudges, st.Begun, st.refused = i, 0, false, 0
 			}
 			r.entries++
+			st.treeSteps++
 			r.bounds(f)
 		} else {
 			f.failed = fmt.Errorf("%w: %s: %s", ErrStepFailed, n.ID, st.Failure)
@@ -810,6 +826,8 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 		entries, granted := spent(out.Output.String())
 		r.entries += entries
 		r.granted += granted
+		st.treeSteps += entries
+		st.called = append(st.called, calledFresh(argsOf(c), out.Output.String()))
 		v, ok := verdictOf(n, out)
 		switch {
 		case st.Held != nil:
@@ -878,6 +896,8 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 			entries, granted := spent(out.Output.String())
 			r.entries += entries
 			r.granted += granted
+			st.treeSteps += entries
+			st.called = append(st.called, calledFresh(argsOf(c), out.Output.String()))
 			var said Result
 			if decode([]byte(out.Output.String()), &said) == nil && said.Limit != "" {
 				f.failed, st.limit = &limitError{limits[said.Limit], said.Reason}, said.Limit
@@ -953,6 +973,7 @@ func (r *replay) started(i int, f *frame, c *openresponses.FunctionCall, out *op
 			Depth: p.Depth, Fresh: p.Context == ContextFresh, g: r.g, prefix: prefix, maxDepth: cmpDepth(p.MaxDepth)}
 		root.path = p.Path
 		root.st.Documents, root.st.docAt = initialDocuments(r.g, p.Inputs, p.Documents)
+		root.st.started = startedAt(out.Output.String())
 		root.start = r.at[c.CallID]
 		// A child is given what its caller's tree had left, none included.
 		r.maxSteps = p.MaxSteps
@@ -985,6 +1006,7 @@ func (r *replay) started(i int, f *frame, c *openresponses.FunctionCall, out *op
 	child := newFrame(State{Started: true, Instance: p.Run, Workflow: g.Name, Parent: p.Parent, Caller: p.Caller, Depth: p.Depth,
 		Inputs: p.Inputs, g: g, prefix: prefix, maxDepth: st.maxDepth}, r.at[c.CallID], f)
 	child.st.Documents, child.st.docAt = initialDocuments(g, p.Inputs, nil)
+	child.st.started = startedAt(out.Output.String())
 	r.stack = append(r.stack, child)
 	r.frames = append(r.frames, child)
 	r.enter(child, i, &g.Nodes[0])
@@ -1053,6 +1075,8 @@ func (r *replay) ended(i int, c *openresponses.FunctionCall, out *openresponses.
 	// The caller learns what came of the call.
 	if p := f.parent; p != nil && p.st.Callee == f.st.Instance {
 		p.st.Returned = &e
+		p.st.treeSteps += f.st.treeSteps
+		p.st.called = append(p.st.called, calledOf(f.st.Workflow, f.st.Instance, e.Status, e.Outcome, e.Summary))
 		if treeWide(e.Limit) && p.failed == nil {
 			p.failed, p.st.limit = &limitError{limits[e.Limit], e.Reason}, e.Limit
 		}
@@ -1210,6 +1234,7 @@ func (r *replay) enter(f *frame, i int, n *Node) {
 	f.since = i
 	st.clocked, st.Deadline, st.asked, st.reasked, st.reask = false, time.Time{}, 0, 0, false
 	r.entries++
+	st.treeSteps++
 	r.bounds(f)
 }
 

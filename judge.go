@@ -329,9 +329,10 @@ func (f *flow) judgeTool() agenttool.Tool {
 			_ = decode(call.Args, &p)
 			out = struct {
 				Verdict
-				Entries int `json:"entries,omitempty"`
-				Granted int `json:"granted,omitempty"`
-			}{v, p.Entries, p.Granted}
+				Entries int      `json:"entries,omitempty"`
+				Granted int      `json:"granted,omitempty"`
+				Summary *Summary `json:"summary,omitempty"`
+			}{v, p.Entries, p.Granted, p.Summary}
 		}
 		b, err := json.Marshal(out)
 		if err != nil {
