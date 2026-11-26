@@ -290,11 +290,11 @@ func (st State) filesFor(n *Node) []fileRef {
 // checkFileReader holds a config that names its tools to offer the read
 // tool a step's workspace files need, where a step in this context is
 // given any. A child's tools are its opener's.
-func (f *flow) checkFileReader(closure map[string]*Graph, cfg agentturn.Config) error {
+func (f *flow) checkFileReader(local map[string]*Graph, cfg agentturn.Config) error {
 	if cfg.ToolProvider != nil {
 		return nil
 	}
-	for _, x := range closure {
+	for _, x := range local {
 		for i := range x.Nodes {
 			n := &x.Nodes[i]
 			if n.Kind != Agent || n.fresh() {

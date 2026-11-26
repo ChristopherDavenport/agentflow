@@ -108,6 +108,11 @@ func (c Child) Apply(cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 // an agent seeded with what the child's session holds. A kept child's
 // session holds its earlier runs. A graph with a fresh step, a fresh call
 // or a step the host lets a judge answer needs it.
+//
+// c.Apply checks the child's tools against its steps, as Apply does a
+// root's: an opener returns its error as it is, or wrapped with %w, and a
+// child whose config does not offer what its steps call, or not as they
+// call it, fails the call that waits on it, which the step asks to retry.
 func Children(open func(ctx context.Context, c Child) (context.Context, *agentturn.Agent, error)) Option {
 	return func(f *flow) { f.children = open }
 }
@@ -220,6 +225,12 @@ func (f *flow) settle(ctx context.Context, st State, p agentturn.PendingCall, a 
 		return nil, nil, st, err
 	}
 	cctx, child, cf, err := f.open(ctx, c)
+	if unfit := (*unfitChild)(nil); errors.As(err, &unfit) {
+		// The child cannot run its steps on the tools it was given: the call
+		// that waits on it fails, as the step's own call would.
+		ans, err := unfitCall(p, a, unfit)
+		return ans, nil, st, err
+	}
 	if err != nil {
 		return nil, nil, st, err
 	}
@@ -317,6 +328,24 @@ func letGo(st State, p agentturn.PendingCall, a callArgs, done State, failed err
 		return nil, err
 	}
 	ans := agentturn.ApproveWith(p.Call.CallID, args).WithBy("policy").WithReason("agentflow: the child's run has ended")
+	return &ans, nil
+}
+
+// unfitCall is the answer that lets a held call go when its child's config
+// does not fit the child's steps: a failure the step asks to retry, or for
+// a judge's look no verdict, so the person is asked.
+func unfitCall(p agentturn.PendingCall, a callArgs, unfit *unfitChild) (*agentturn.Answer, error) {
+	why := "agentflow: the child cannot run on the tools it was given: " + strings.TrimPrefix(unfit.Error(), "agentflow: ")
+	if p.Call.Name == judgeTool {
+		a.Verdict = &Verdict{Outcome: HandBack, Reason: why, None: true}
+	} else {
+		a.Failure = why
+	}
+	args, err := json.Marshal(a)
+	if err != nil {
+		return nil, err
+	}
+	ans := agentturn.ApproveWith(p.Call.CallID, args).WithBy("policy").WithReason("agentflow: the child's config does not fit its steps")
 	return &ans, nil
 }
 

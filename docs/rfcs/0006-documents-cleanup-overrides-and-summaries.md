@@ -397,3 +397,19 @@ before, by the tool's own validation of its arguments:
   opener's: the child's `Apply` checks them against the child's config;
 - a reference with no schema, such as a script's untyped output, and a
   parameter with no type.
+
+**The same holds for which tools a step names.** `Apply` holds the tools
+program steps call, and those model steps working in context may, to what
+the config offers, and the script and read tools likewise, for the graph
+and what it calls in context only. A workflow a fresh call runs works on
+its child's tools, so a tool only its child is offered is no error of the
+parent's.
+
+**A child is checked as its opener builds it.** `Child.Apply` makes the
+same checks of the child's config, for the child's workflow and what it
+calls in context. A config that does not fit is not the host's error: the
+call that waits on the child fails with the check's own words, which the
+step asks to retry, as its own call failing would, or, for a judge's look,
+gives no verdict, so the person is asked. Unattended, the run fails with
+them. An opener returns `Child.Apply`'s error as it is or wrapped with
+`%w`.

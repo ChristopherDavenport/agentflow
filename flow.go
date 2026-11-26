@@ -248,22 +248,26 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 		cfg.Tools = append(f.timed(cfg.Tools), own...)
 	}
 
+	// The tools are checked for what runs on them: the graph and what it
+	// calls in this context. A workflow a fresh call runs works on its
+	// child's tools, which its child's Apply checks.
+	local := g.inContext()
 	scripts := false
-	for _, x := range closure {
+	for _, x := range local {
 		scripts = scripts || slices.ContainsFunc(x.Nodes, func(n Node) bool { return n.Script != "" })
 	}
 	if cfg.ToolProvider == nil && scripts &&
 		!slices.ContainsFunc(cfg.Tools, func(t agenttool.Tool) bool { return t.Name() == ScriptTool }) {
-		return cfg, fmt.Errorf("agentflow: the graph has script steps and the config no %q tool", ScriptTool)
+		return cfg, f.unfit(fmt.Errorf("agentflow: the graph has script steps and the config no %q tool", ScriptTool))
 	}
-	if err := checkTools(closure, cfg); err != nil {
-		return cfg, err
+	if err := checkTools(local, cfg); err != nil {
+		return cfg, f.unfit(err)
 	}
-	if err := f.checkFileReader(closure, cfg); err != nil {
-		return cfg, err
+	if err := f.checkFileReader(local, cfg); err != nil {
+		return cfg, f.unfit(err)
 	}
 	if err := checkArgs(g, cfg); err != nil {
-		return cfg, err
+		return cfg, f.unfit(err)
 	}
 
 	cfg.Model = f
@@ -295,12 +299,31 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 	return cfg, nil
 }
 
+// unfitChild is a child's config that does not offer what the child's
+// steps call, or not as they call it, found as its opener builds it. The
+// call that waits on the child fails with it, as the step's own call
+// would, rather than the host's run.
+type unfitChild struct{ err error }
+
+func (e *unfitChild) Error() string { return e.err.Error() }
+func (e *unfitChild) Unwrap() error { return e.err }
+
+// unfit marks err, a check of the config's tools, as a child's, whose call
+// it fails. A root's is the host's error at Apply.
+func (f *flow) unfit(err error) error {
+	if f.child == nil {
+		return err
+	}
+	return &unfitChild{err}
+}
+
 // checkTools holds the tools steps name to those the config offers,
 // where it says what they are: a tool a program step calls, and those a
-// model step working in this context may. A child's tools are its
-// opener's, and a config with a ToolProvider names its tools only as it
-// runs.
-func checkTools(closure map[string]*Graph, cfg agentturn.Config) error {
+// model step working in this context may. local is the workflows that run
+// on the config, the graph and those it calls in context: a child's tools
+// are its opener's, which the child's own Apply checks, and a config with
+// a ToolProvider names its tools only as it runs.
+func checkTools(local map[string]*Graph, cfg agentturn.Config) error {
 	if cfg.ToolProvider != nil {
 		return nil
 	}
@@ -316,8 +339,8 @@ func checkTools(closure map[string]*Graph, cfg agentturn.Config) error {
 			errs = append(errs, fmt.Errorf("agentflow: %s: node %q names the tool %s, which the config does not offer%s", x.Name, n.ID, tool, suggest(tool, offered)))
 		}
 	}
-	for _, name := range slices.Sorted(maps.Keys(closure)) {
-		x := closure[name]
+	for _, name := range slices.Sorted(maps.Keys(local)) {
+		x := local[name]
 		for i := range x.Nodes {
 			n := &x.Nodes[i]
 			switch {
