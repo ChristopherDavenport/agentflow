@@ -169,6 +169,11 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 				return cfg, fmt.Errorf("agentflow: %s: node %q calls %s, and the graph is not linked; call Link", x.Name, n.ID, n.Flow)
 			}
 			needs = needs || n.fresh()
+			for _, sk := range n.Skills {
+				if strings.TrimSpace(sk.Instructions) == "" {
+					return cfg, fmt.Errorf("agentflow: %s: node %q names the skill %s, whose instructions were never read: load the workflow with workflow.LoadWith", x.Name, n.ID, sk.Name)
+				}
+			}
 			if n.Model != "" && f.models != nil && !slices.Contains(f.models, n.Model) {
 				return cfg, fmt.Errorf("agentflow: %s: node %q asks for model %q, which the host does not serve: want one of %s", x.Name, n.ID, n.Model, strings.Join(f.models, ", "))
 			}
@@ -491,6 +496,7 @@ func (f *flow) instructions(st State) (string, error) {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are on step %q of workflow %q.\n%s", n.ID, st.g.Name, n.Prompt)
+	skillsText(&b, n.Skills)
 	with, err := st.resolveAll(n.With)
 	if err != nil {
 		return "", fmt.Errorf("agentflow: step %q: %w", n.ID, err)
@@ -517,6 +523,19 @@ func (f *flow) instructions(st State) (string, error) {
 		stuckTool, n.ID, runClause(st))
 	f.limitsText(&b, st)
 	return b.String(), nil
+}
+
+// skillsText adds the instructions of the skills a step names. Their
+// files are not served: a step reads them only with a tool the host
+// offers it.
+func skillsText(b *strings.Builder, skills []StepSkill) {
+	if len(skills) == 0 {
+		return
+	}
+	b.WriteString("\n\nSkills for this step, to follow as you do it:")
+	for _, sk := range skills {
+		fmt.Fprintf(b, "\n<skill name=%q>\n%s\n</skill>", sk.Name, strings.TrimSpace(sk.Instructions))
+	}
 }
 
 // limitsText says what limits st's step works under: its policies and

@@ -133,6 +133,7 @@ type settings struct {
 	With        yaml.Node      `yaml:"with"`
 	Outputs     yaml.Node      `yaml:"outputs"`
 	Tools       []string       `yaml:"tools"`
+	Skills      []string       `yaml:"skills"`
 	Context     string         `yaml:"context"`
 	// A child's own settings, with context: fresh.
 	Dir          string `yaml:"dir"`
@@ -445,6 +446,12 @@ func node(n *agentflow.Node, s section) error {
 	}
 	if n.Kind != agentflow.Agent && n.Tools != nil {
 		return errors.New("only a model node has tools")
+	}
+	if set.Skills != nil && n.Kind != agentflow.Agent {
+		return errors.New("only a model node names skills")
+	}
+	for _, name := range set.Skills {
+		n.Skills = append(n.Skills, agentflow.StepSkill{Name: name})
 	}
 	var err error
 	if n.With, err = values(&set.With); err != nil {

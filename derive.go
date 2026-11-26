@@ -82,6 +82,18 @@ func (n *Node) checkSettings() []error {
 			bad("judge: policy: %v", err)
 		}
 	}
+	seen := map[string]bool{}
+	for _, sk := range n.Skills {
+		switch {
+		case n.Kind != Agent || n.Verdict:
+			bad("skills are a model step's")
+		case !skillName.MatchString(sk.Name):
+			bad("skill %q: want 1 to 64 letters, digits, _ or -", sk.Name)
+		case seen[sk.Name]:
+			bad("skill %q is named twice", sk.Name)
+		}
+		seen[sk.Name] = true
+	}
 	if slices.Contains(n.Outcomes, Stuck) || n.Data[Stuck] != nil {
 		bad("%q is the outcome flow_stuck reports, so no step declares it or its data", Stuck)
 	}
@@ -143,7 +155,7 @@ func (g *Graph) stepGraph(n *Node) *Graph {
 	// The child reports a stuck model as its outcome, and the caller
 	// decides what that means.
 	step := Node{ID: n.ID, Kind: Agent, Description: n.Description, Prompt: n.Prompt, Tools: n.Tools, Outcomes: n.Outcomes, Data: n.Data, With: with,
-		Model: cmp.Or(n.Model, g.Model), Thinking: cmp.Or(n.Thinking, g.Thinking), Timeout: n.Timeout, Policy: n.Policy,
+		Model: cmp.Or(n.Model, g.Model), Thinking: cmp.Or(n.Thinking, g.Thinking), Timeout: n.Timeout, Policy: n.Policy, Skills: n.Skills,
 		Ends: map[string]string{Stuck: Stuck}}
 	// The step's model is its workflow's, so the step reads its own
 	// child's conversation rather than opening another.

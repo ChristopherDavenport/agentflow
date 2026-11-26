@@ -93,3 +93,42 @@ func TestAFrontReadsAQuestionsDescription(t *testing.T) {
 		t.Error("a new description keeps the version")
 	}
 }
+
+func TestAStepsSkillsAreInItsInstructions(t *testing.T) {
+	for _, context := range []string{ContextSession, ContextFresh} {
+		t.Run(context, func(t *testing.T) {
+			g := release()
+			review := g.node("review")
+			review.Context = context
+			review.Skills = []StepSkill{{Name: "go-style", Instructions: "Wrap errors with %w."}}
+			var ran []string
+			m := &fakeModel{outcomes: []string{"clean"}}
+			a := newAgent(t, g, m, &ran)
+			end, _, err := Drive(t.Context(), g, a, start(t, a))
+			if err != nil || end.Reason != agentturn.ReasonDone {
+				t.Fatalf("reason = %s, err = %v", end.Reason, err)
+			}
+			var told bool
+			for _, req := range m.requests {
+				told = told || strings.Contains(req.Instructions, "<skill name=\"go-style\">\nWrap errors with %w.\n</skill>")
+			}
+			if !told {
+				t.Errorf("no request was told the skill: %q", m.requests[0].Instructions)
+			}
+		})
+	}
+}
+
+func TestASkillMustBeRead(t *testing.T) {
+	g := release()
+	g.node("review").Skills = []StepSkill{{Name: "go-style"}}
+	_, err := kinApply(g, agentturn.Config{Model: &fakeModel{}, ModelName: "fake"})
+	if err == nil || !strings.Contains(err.Error(), "whose instructions were never read") {
+		t.Errorf("err = %v", err)
+	}
+	g.node("review").Skills = nil
+	g.node("triage").Skills = []StepSkill{{Name: "go-style", Instructions: "x"}}
+	if err := g.Validate(); err == nil || !strings.Contains(err.Error(), "skills are a model step's") {
+		t.Errorf("a person's skills: %v", err)
+	}
+}

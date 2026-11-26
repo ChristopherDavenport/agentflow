@@ -51,13 +51,15 @@ type Workflow struct {
 type Find func(name string) (*agentskill.Skill, error)
 
 // Load reads a skill marked as a workflow. It may call workflow files of
-// its own skill; one that calls another skill needs [LoadWith].
+// its own skill; one that calls another skill, or whose steps name
+// skills, needs [LoadWith].
 func Load(s *agentskill.Skill) (*Workflow, error) { return LoadWith(s, nil) }
 
 // LoadWith reads a skill marked as a workflow, with every workflow it
 // can reach: a file of the same skill, named ./<path>.md, or another
 // workflow skill, found by find. It links them and checks every call
-// against what it calls.
+// against what it calls. find also finds the skills model steps name,
+// whose instructions it reads into the definition.
 func LoadWith(s *agentskill.Skill, find Find) (*Workflow, error) {
 	root, files, err := loadSkill(s)
 	if err != nil {
@@ -118,10 +120,58 @@ func LoadWith(s *agentskill.Skill, find Find) (*Workflow, error) {
 			queue = append(queue, c)
 		}
 	}
+	for _, g := range append([]*agentflow.Graph{root}, w.Flows...) {
+		if err := readSkills(g, find); err != nil {
+			return nil, err
+		}
+	}
 	if err := root.Link(w.Flows...); err != nil {
 		return nil, fmt.Errorf("workflow: skill %q: %w", s.Name, err)
 	}
 	return w, nil
+}
+
+// FromCatalog finds skills, workflows or not, in a catalog.
+func FromCatalog(c *agentskill.Catalog) Find {
+	return func(name string) (*agentskill.Skill, error) {
+		s, ok := c.Lookup(name)
+		if !ok {
+			return nil, errors.New("no such skill")
+		}
+		return s, nil
+	}
+}
+
+// readSkills reads the instructions of each skill a model step of g
+// names, found by find, into the definition: the digest then pins what
+// the step's model is told, whatever becomes of the skill later. A
+// skill's allowed-tools are not read: naming a skill grants nothing.
+func readSkills(g *agentflow.Graph, find Find) error {
+	for i := range g.Nodes {
+		n := &g.Nodes[i]
+		for j := range n.Skills {
+			sk := &n.Skills[j]
+			if find == nil {
+				return fmt.Errorf("workflow: %s: node %q names the skill %s, and nothing was given to find skills", g.Name, n.ID, sk.Name)
+			}
+			s, err := find(sk.Name)
+			if err == nil && (s == nil || s.Name != sk.Name) {
+				err = errors.New("no such skill")
+			}
+			if err != nil {
+				return fmt.Errorf("workflow: %s: node %q names the skill %s: %w", g.Name, n.ID, sk.Name, err)
+			}
+			text, err := s.Instructions()
+			if err != nil {
+				return fmt.Errorf("workflow: %s: node %q names the skill %s: %w", g.Name, n.ID, sk.Name, err)
+			}
+			if strings.TrimSpace(text) == "" {
+				return fmt.Errorf("workflow: %s: node %q names the skill %s, which says nothing", g.Name, n.ID, sk.Name)
+			}
+			sk.Instructions = text
+		}
+	}
+	return nil
 }
 
 // loadSkill reads the workflow a skill marks, from a snapshot of its

@@ -136,6 +136,13 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 		if written.Nodes[i].InstructionsFile != "" {
 			written.Nodes[i].Instructions = ""
 		}
+		// So does each skill's text.
+		if skills := written.Nodes[i].Skills; skills != nil {
+			written.Nodes[i].Skills = make([]agentflow.StepSkill, len(skills))
+			for j, sk := range skills {
+				written.Nodes[i].Skills[j] = agentflow.StepSkill{Name: sk.Name}
+			}
+		}
 	}
 	if back.OwnDigest() != written.OwnDigest() {
 		return nil, errors.New("workflow: the graph cannot be written as a file without changing it")
@@ -183,6 +190,11 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 		m.add("with", valuesNode(n.With))
 	}
 	set("tools", n.Tools != nil, n.Tools)
+	var skills []string
+	for _, sk := range n.Skills {
+		skills = append(skills, sk.Name)
+	}
+	set("skills", skills != nil, skills)
 	set("context", n.Context != "", n.Context)
 	set("dir", n.Dir != "", n.Dir)
 	set("model", n.Model != "", n.Model)

@@ -29,6 +29,7 @@ var (
 	// <workflow>:<step>, and one made to judge a step <workflow>:<step>:judge.
 	derivedName = regexp.MustCompile(`^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*:[A-Za-z0-9_-]{1,20}(:judge)?$`)
 	childName   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,40}$`)
+	skillName   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 	flowName    = regexp.MustCompile(`^([A-Za-z0-9_-]+|\./[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*\.md)$`)
 	nodeID      = regexp.MustCompile(`^[A-Za-z0-9_-]{1,20}$`)
 )
@@ -186,6 +187,10 @@ type Node struct {
 	// Policy limits what a model step's tools may touch. On a call, it
 	// limits every model step and judge of the runs it calls.
 	Policy *Policy `json:",omitempty"`
+	// Skills are skills a model step names, whose instructions are added
+	// to the step's. Loading reads each one's text into the definition,
+	// so its digest pins what the model is told.
+	Skills []StepSkill `json:",omitempty"`
 	// Verdict says the node is a judge's: it ends with flow_judge, giving
 	// a reason. Only a workflow agentflow makes to judge a step has one.
 	Verdict bool `json:",omitempty"`
@@ -229,6 +234,14 @@ type Node struct {
 	// pick is the schema of one of a Person node's choices, as the list
 	// they come from declares it, nil when unknown.
 	pick *agenttool.Schema
+}
+
+// StepSkill is a skill a model step names, with the instructions loading
+// read from it. A skill named here grants nothing: its allowed-tools are
+// not the step's, which a workflow cannot widen.
+type StepSkill struct {
+	Name         string
+	Instructions string `json:",omitempty"`
 }
 
 // callee is a Flow node's contract, as [Graph.Link] reads it from the
