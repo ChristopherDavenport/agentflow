@@ -718,7 +718,7 @@ func (f *flow) call(st State) (name string, args any, err error) {
 		}
 		return askTool, q, nil
 	case n.Script != "":
-		sc := ScriptCall{Run: n.Script, With: with, Outcomes: n.Outcomes}
+		sc := ScriptCall{Run: n.Script, With: with, Outcomes: n.Outcomes, Dir: st.dirArg(n)}
 		if skill := skillOf(st.g.Name); skill != skillOf(f.rootName()) {
 			sc.Skill = skill
 		}
@@ -735,7 +735,7 @@ func (f *flow) call(st State) (name string, args any, err error) {
 		if err != nil {
 			return "", nil, err
 		}
-		a := callArgs{Workflow: c.Name, Digest: c.OwnDigest(), Run: key, With: with, Context: ContextFresh, Child: n.Child, Spawn: key, MaxSteps: st.left()}
+		a := callArgs{Workflow: c.Name, Digest: c.OwnDigest(), Run: key, With: with, Context: ContextFresh, Child: n.Child, Spawn: key, MaxSteps: st.left(), Dir: st.dirArg(n)}
 		if n.Kind == Agent {
 			a.Documents, a.Files = st.passedDocuments(n), st.filesFor(n)
 		}
@@ -988,6 +988,20 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 			return block(err.Error())
 		}
 		return &agentturn.ToolDecision{Action: agentturn.Defer, Reason: fmt.Sprintf("agentflow: a judge looks at step %q in a child", n.ID)}, nil
+	case n.Dir.set() && id == st.callID() && (n.fresh() || n.Script != ""):
+		// The directory is read from the record as the call is made: one
+		// that is no path below the root fails the step, which asks to
+		// retry. A child works in the one its call recorded.
+		if _, err := st.dirOf(n); err != nil {
+			return block(fmt.Sprintf("step %q: %v", n.ID, err))
+		}
+		if n.Script != "" {
+			return nil, nil
+		}
+		if err := callFresh(st, info.Call); err != nil {
+			return block(err.Error())
+		}
+		return &agentturn.ToolDecision{Action: agentturn.Defer, Reason: fmt.Sprintf("agentflow: step %q runs in a child", n.ID)}, nil
 	case n.fresh():
 		// The work is done in a child, and the call waits on it.
 		if err := callFresh(st, info.Call); err != nil {

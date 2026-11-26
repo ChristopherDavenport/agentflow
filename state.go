@@ -231,8 +231,10 @@ type State struct {
 	abandonedFor string
 	// refused counts the verdicts a judge gave that it may not give.
 	refused int
-	// kept are the children the run keeps, by name, each with its spawn.
-	kept map[string]string
+	// kept are the children the run keeps, by name, each with its spawn,
+	// and keptDir the directory each was started in.
+	kept    map[string]string
+	keptDir map[string]string
 	// callers are the calls the run is nested in, in the transcript,
 	// outermost first.
 	callers []caller
@@ -781,6 +783,10 @@ func (r *replay) call(i int, c *openresponses.FunctionCall) {
 				}
 				if f.st.kept[a.Child] == "" {
 					f.st.kept[a.Child] = a.Spawn
+					if f.st.keptDir == nil {
+						f.st.keptDir = map[string]string{}
+					}
+					f.st.keptDir[a.Child] = a.Dir
 				}
 			}
 		}

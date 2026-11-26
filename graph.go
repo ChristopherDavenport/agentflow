@@ -129,6 +129,10 @@ type ScriptCall struct {
 	With  map[string]any `json:"with,omitempty"`
 	// Outcomes is the node's declared ones, none when it only succeeds.
 	Outcomes []string `json:"outcomes,omitempty"`
+	// Dir is the directory below the workspace's root the script runs
+	// in, resolved from the record as the call was made; empty for the
+	// root.
+	Dir string `json:"dir,omitempty"`
 }
 
 // Node is one step.
@@ -171,7 +175,11 @@ type Node struct {
 	// name; and Instructions, text added to its instructions, read from
 	// the skill's file InstructionsFile. Child names a child kept across
 	// the visits and steps of a run that name it, on a model step.
-	Dir              string `json:",omitempty"`
+	//
+	// Dir is a literal path or a reference to one, resolved from the
+	// record when the step's call is made and recorded in its arguments.
+	// A script step takes it too, and runs there.
+	Dir              Value  `json:",omitzero"`
 	Instructions     string `json:",omitempty"`
 	InstructionsFile string `json:",omitempty"`
 	Child            string `json:",omitempty"`
@@ -504,6 +512,7 @@ func (g *Graph) Validate() error {
 		errs = append(errs, n.checkChild()...)
 		errs = append(errs, n.checkSettings()...)
 		errs = append(errs, n.checkFiles()...)
+		errs = append(errs, g.checkDir(n)...)
 		for _, v := range n.Files {
 			if s := g.refSchema(v.From); v.From != "" && s != nil && s.Type != "" && s.Type != "string" && (s.Type != "array" || s.Items != nil && s.Items.Type != "" && s.Items.Type != "string") {
 				bad("node %q: file %s is not a path, nor a list of paths", n.ID, v.From)

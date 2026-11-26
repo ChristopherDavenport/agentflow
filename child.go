@@ -63,7 +63,8 @@ type Child struct {
 // ChildSettings are what a step says of the child it runs in.
 type ChildSettings struct {
 	// Dir is the child's working directory, below the workspace's root,
-	// empty for the root. script.Sub makes a workspace of it.
+	// empty for the root: the one its call recorded, resolved from the
+	// record when the call was made. script.Sub makes a workspace of it.
 	Dir string
 	// Model names the model the child asks, empty for the caller's, and
 	// Thinking how hard it reasons, for a fresh model step.
@@ -186,14 +187,14 @@ func (f *flow) childFor(st State, call *openresponses.FunctionCall, a callArgs) 
 		c.policies = f.chain(st)
 	case n.Kind == Agent:
 		c.Step = n.ID
-		c.Settings = ChildSettings{Dir: n.Dir, Model: n.Model, Thinking: cmp.Or(n.Thinking, st.g.Thinking), Instructions: n.Instructions, Tools: n.Tools}
+		c.Settings = ChildSettings{Dir: a.Dir, Model: n.Model, Thinking: cmp.Or(n.Thinking, st.g.Thinking), Instructions: n.Instructions, Tools: n.Tools}
 		if st.Note != "" {
 			c.Settings.Instructions = strings.TrimSpace(c.Settings.Instructions + "\n\nNote from the operator: " + st.Note)
 		}
 		// The step's own policy is its node's in the child.
 		c.policies = f.chain(st)
 	default:
-		c.Settings = ChildSettings{Dir: n.Dir, Model: n.Model, Instructions: n.Instructions}
+		c.Settings = ChildSettings{Dir: a.Dir, Model: n.Model, Instructions: n.Instructions}
 		c.policies = f.policies(st)
 	}
 	return c, nil

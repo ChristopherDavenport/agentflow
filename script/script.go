@@ -12,6 +12,11 @@
 // "..."}, or a line of plain text, which is a message alone. Each is a
 // progress update of the call, as any long-running tool reports one. It
 // changes nothing of the result.
+//
+// A script runs in its step's dir, a directory below the workspace's
+// root the call names, and at the root when it names none. Paths in the
+// environment are absolute when the workspace has a root on the host,
+// and otherwise lead from the directory the script runs in.
 package script
 
 import (
@@ -61,7 +66,8 @@ type options struct {
 // Files gives the files scripts are run from, by slash path. They are
 // written to a new directory of the workspace for each run and removed
 // after it, so what runs is what was loaded and not what the workspace
-// holds. The script still starts at the workspace's root.
+// holds. The script still starts in its working directory, the
+// workspace's root or its step's dir.
 func Files(files map[string][]byte) Option { return func(o *options) { o.files = files } }
 
 // Skills gives the files of every skill a run's workflows are of, by
@@ -105,6 +111,18 @@ func run(ctx context.Context, ws agentworkspace.Workspace, timeout time.Duration
 	if !filepath.IsLocal(a.Run) {
 		return res, fmt.Errorf("script %q: not a path within the workspace", a.Run)
 	}
+	if a.Dir != "" {
+		// The program checked it against the record; the workspace holds
+		// it to itself as well.
+		if !fs.ValidPath(a.Dir) || a.Dir == "." {
+			return res, fmt.Errorf("script %q: dir %q: %w", a.Run, a.Dir, agentworkspace.ErrOutside)
+		}
+		if info, err := fs.Stat(ws.FS(), a.Dir); err != nil {
+			return res, fmt.Errorf("script %q: dir %q: %w", a.Run, a.Dir, err)
+		} else if !info.IsDir() {
+			return res, fmt.Errorf("script %q: dir %q is not a directory", a.Run, a.Dir)
+		}
+	}
 	with := a.With
 	if with == nil {
 		with = map[string]any{}
@@ -125,11 +143,14 @@ func run(ctx context.Context, ws agentworkspace.Workspace, timeout time.Duration
 		// The result is read by now, so a leftover file is only litter.
 		_ = ws.Remove(context.WithoutCancel(ctx), name)
 	}()
+	// absolute names p, a path from the workspace's root, as the script
+	// sees it: from the filesystem's root when the workspace has one,
+	// else from the directory it runs in.
 	absolute := func(p string) string {
 		if root := ws.Root(); root != "" {
 			return path.Join(root, p)
 		}
-		return p
+		return up(a.Dir) + p
 	}
 	progress := ".agentflow-progress-" + hex.EncodeToString(id[:])
 	if err := ws.WriteFile(ctx, progress, nil, 0o600); err != nil {
@@ -148,7 +169,8 @@ func run(ctx context.Context, ws agentworkspace.Workspace, timeout time.Duration
 	}
 	watch := watchProgress(ctx, ws.FS(), progress)
 	out, err := ws.Exec(ctx, agentworkspace.Command{
-		Args:    []string{"./" + program},
+		Args:    []string{"./" + up(a.Dir) + program},
+		Dir:     a.Dir,
 		Env:     env,
 		Stdin:   stdin,
 		Timeout: timeout,
@@ -175,6 +197,15 @@ func run(ctx context.Context, ws agentworkspace.Workspace, timeout time.Duration
 		return res, fmt.Errorf("script %q: %w", a.Run, err)
 	}
 	return res, nil
+}
+
+// up leads from dir, a path below the workspace's root, back to the
+// root: empty for the root itself.
+func up(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	return strings.Repeat("../", strings.Count(dir, "/")+1)
 }
 
 // materialise writes files under dir. The remove it returns takes away

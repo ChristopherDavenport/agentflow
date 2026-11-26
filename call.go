@@ -27,6 +27,10 @@ type callArgs struct {
 	Run      string         `json:"run"`
 	With     map[string]any `json:"with,omitempty"`
 	Context  string         `json:"context,omitempty"`
+	// Dir is the directory the child works in, resolved from the record
+	// as the call was made: what the child is given, and what a kept
+	// child's later calls are held to.
+	Dir string `json:"dir,omitempty"`
 	// Child is the name of a child the run keeps, and Spawn the spawn ID
 	// of the child's session: the run's key, or the key of the run that
 	// first started a kept child.
@@ -190,6 +194,8 @@ func callFresh(st State, c *openresponses.FunctionCall) error {
 		return errors.New("what came of a child is the program's to say, when it has ended")
 	case a.MaxSteps != st.left():
 		return fmt.Errorf("step %q gives its child the %d steps its tree has left", n.ID, st.left())
+	case a.Dir != st.dirArg(n):
+		return fmt.Errorf("step %q works in the directory its record gives, not %q", n.ID, a.Dir)
 	case n.Kind == Agent && !sameJSON(a.Files, st.filesFor(n)):
 		return fmt.Errorf("step %q passes its child the files it is given", n.ID)
 	case n.Kind == Agent && !sameJSON(a.Documents, st.passedDocuments(n)):
