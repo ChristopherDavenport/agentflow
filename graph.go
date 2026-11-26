@@ -547,6 +547,7 @@ func (g *Graph) Validate() error {
 		errs = append(errs, n.checkFiles()...)
 		errs = append(errs, n.checkShow()...)
 		errs = append(errs, g.checkOffer(n)...)
+		errs = append(errs, n.checkTemplate()...)
 		errs = append(errs, g.checkDir(n)...)
 		for _, v := range n.Files {
 			if s := g.refSchema(v.From); v.From != "" && s != nil && s.Type != "" && s.Type != "string" && (s.Type != "array" || s.Items != nil && s.Items.Type != "" && s.Items.Type != "string") {

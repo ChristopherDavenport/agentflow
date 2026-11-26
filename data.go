@@ -306,6 +306,11 @@ func (g *Graph) checkRefs() []error {
 		if c := n.Choices; c != nil && plain(c.From) {
 			use("node "+n.ID+": choices", c.From, at)
 		}
+		for _, v := range n.questionValues() {
+			if plain(v) {
+				use("node "+n.ID+": question", v, at)
+			}
+		}
 		for _, name := range slices.Sorted(maps.Keys(n.With)) {
 			if v := n.With[name]; plain(v) {
 				use("node "+n.ID, v, at)
@@ -389,6 +394,11 @@ func (g *Graph) checkAlternatives() []error {
 		}
 		if c := n.Choices; c != nil {
 			check("node "+n.ID+": choices", c.From, func(refs []ref) bool {
+				return !g.reached(refs)[n.ID][0]
+			})
+		}
+		for _, v := range n.questionValues() {
+			check("node "+n.ID+": question", v, func(refs []ref) bool {
 				return !g.reached(refs)[n.ID][0]
 			})
 		}

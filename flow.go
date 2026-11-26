@@ -21,11 +21,15 @@ import (
 type Question struct {
 	// Workflow and Run name the run that asks, and Path the way to it
 	// from the run nobody called.
-	Workflow string   `json:"workflow,omitempty"`
-	Run      string   `json:"run,omitempty"`
-	Path     []Place  `json:"path,omitempty"`
-	Step     string   `json:"step"`
-	Question string   `json:"question"`
+	Workflow string  `json:"workflow,omitempty"`
+	Run      string  `json:"run,omitempty"`
+	Path     []Place `json:"path,omitempty"`
+	Step     string  `json:"step"`
+	Question string  `json:"question"`
+	// Template is the question as the step writes it, before the values it
+	// names were filled in, when it names any: answers are joined across
+	// sessions by Version, which is read from it, never from Question.
+	Template string   `json:"template,omitempty"`
 	Outcomes []string `json:"outcomes"`
 	// With is the node's inputs, to show beside the question.
 	With map[string]any `json:"with,omitempty"`
@@ -698,7 +702,14 @@ func (f *flow) call(st State) (name string, args any, err error) {
 	}
 	switch {
 	case n.Kind == Person:
-		q := Question{Step: n.ID, Question: n.Prompt, Outcomes: n.outcomes(), With: with, Advice: st.Advice, Version: n.version(), Note: st.Note}
+		text, err := st.rendered(n.Prompt)
+		if err != nil {
+			return "", nil, fmt.Errorf("agentflow: step %q: question: %w", n.ID, err)
+		}
+		q := Question{Step: n.ID, Question: text, Outcomes: n.outcomes(), With: with, Advice: st.Advice, Version: n.version(), Note: st.Note}
+		if templated(n.Prompt) {
+			q.Template = n.Prompt
+		}
 		q.where(st)
 		if mode := f.mode(st); mode != 0 {
 			q.SentBack = st.g.sentBack(st, n)

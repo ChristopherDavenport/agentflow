@@ -250,6 +250,9 @@ type State struct {
 	// files its call passed in.
 	filed       bool
 	passedFiles []fileRef
+	// question is, for a judge's run, the text of the question it judges as
+	// the person is asked it, which its call passed in.
+	question string
 	// reasked counts the retry questions put again after an override
 	// that was refused, and reask says a question waits to be put again
 	// should the override waiting on it be refused.
@@ -326,6 +329,9 @@ type startPayload struct {
 	// Documents are, for a run in a child, the texts its call passed in of
 	// the documents its step reads.
 	Documents map[string]string `json:"documents,omitempty"`
+	// Question is, for a judge's run, the question's text as the person is
+	// asked it, when it names values.
+	Question string `json:"question,omitempty"`
 }
 
 // pinned is one workflow a run may reach, as its start recorded it.
@@ -1087,7 +1093,7 @@ func (r *replay) started(i int, f *frame, c *openresponses.FunctionCall, out *op
 		root.path = p.Path
 		root.st.Documents, root.st.docAt = initialDocuments(r.g, p.Inputs, p.Documents)
 		root.st.started = startedAt(out.Output.String())
-		root.st.passedFiles = p.Files
+		root.st.passedFiles, root.st.question = p.Files, p.Question
 		root.start = r.at[c.CallID]
 		// A child is given what its caller's tree had left, none included.
 		r.maxSteps = p.MaxSteps

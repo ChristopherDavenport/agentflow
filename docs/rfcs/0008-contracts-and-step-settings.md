@@ -9,6 +9,44 @@ position a pure function of the definitions and the record; resuming
 needs only the store and the definitions; control flow depends only on
 the definition and recorded results; unknown keys are load errors.
 
+## 1. Values from the record in a step's text and its policy
+
+### 1b. A question whose text is computed (spiked)
+
+````markdown
+## ship
+```yaml
+outcomes: [yes, no]
+```
+Ship ${{ steps.build.outputs.version }} to ${{ inputs.env }}?
+````
+
+- A person step's question may hold `${{ }}` expressions, each one
+  expression as `with` takes it: a reference, `latest(...)` or
+  `optional(...)`. It is the only place a value is put into text. A model
+  step's prompt that holds one is a load error: a model is given values
+  through `with`, which its instructions show as inputs.
+- Each expression is checked at load as a `with` value is: a plain
+  reference must have a value on every path into the step, `latest` must
+  have one of its references, and every name must be one some outcome or
+  input declares, with a suggestion for a misspelt step.
+- When the question is put, each is filled in from the record: a string
+  as it is, an `optional` with no value as nothing, and any other value as
+  JSON. Values are data, under the rules `with` has: secrets are never
+  data.
+- The question's arguments record both: `question`, the text as the
+  person is asked it, and `template`, the text as the step writes it.
+  `version` is computed from the step's definition, the template among it,
+  never from the rendered text, so answers to one question join across
+  sessions whatever values it was filled in with. A question that names no
+  values carries no `template`.
+- A judge reads the rendered text. Its call carries it as `question`, which
+  the gate holds to what the record renders, its child's start records it,
+  and the judge's instructions give it beside the question as written. A
+  judge's own prompt, which quotes the step's text, is not a template.
+- A resumed run reads the question from the pending call, so the rendered
+  text is what was asked, however the values would come out now.
+
 ## 2. Input defaults (spiked)
 
 ```yaml

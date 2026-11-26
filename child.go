@@ -55,9 +55,11 @@ type Child struct {
 	// documents are the texts the call passed in of the documents its step
 	// reads.
 	documents map[string]string
-	// files are what the call passed in for its step to be given.
-	files []fileRef
-	made  **flow
+	// files are what the call passed in for its step to be given, and
+	// question, for a judge, the question's text as the person is asked it.
+	files    []fileRef
+	question string
+	made     **flow
 }
 
 // ChildSettings are what a step says of the child it runs in.
@@ -180,7 +182,7 @@ func (f *flow) childFor(st State, call *openresponses.FunctionCall, a callArgs) 
 		return Child{}, err
 	}
 	c := Child{Run: a.Run, Spawn: a.Spawn, Caller: call.CallID, Parent: st.Instance, Workflow: g.Name, Kept: a.Child,
-		Depth: st.Depth + 1, Path: slices.Clone(st.Path), parent: f, g: g, maxDepth: st.maxDepth, maxSteps: a.MaxSteps, documents: a.Documents, files: a.Files}
+		Depth: st.Depth + 1, Path: slices.Clone(st.Path), parent: f, g: g, maxDepth: st.maxDepth, maxSteps: a.MaxSteps, documents: a.Documents, files: a.Files, question: a.Question}
 	switch {
 	case call.Name == judgeTool:
 		c.Step, c.Judge = n.ID, true

@@ -258,6 +258,13 @@ interpolation, no other functions and no `if:`: a decision is a step with
 a named outcome, so every branch is in the diagram. In Go these are
 `From`, `Latest` and `Optional`.
 
+The one place a value is put into text is a person step's question,
+which may hold these expressions to be filled in when it is asked. The
+question records both the text as asked and the text as written, and its
+`version` is read from the written text, so answers still join across
+sessions; see [RFC 0008](0008-contracts-and-step-settings.md), section 1.
+A model step's prompt takes none: its values go through `with`.
+
 | Expression | Value |
 |---|---|
 | `${{ ref }}` | the reference's; one must exist on every path here |

@@ -43,6 +43,9 @@ type callArgs struct {
 	// host lets it answer.
 	Step string `json:"step,omitempty"`
 	Mode string `json:"mode,omitempty"`
+	// Question is, for a judge of a question whose text names values, the
+	// text as the person is asked it, which the judge reads.
+	Question string `json:"question,omitempty"`
 	// Files are the files a fresh model step is given, passed into its
 	// child, which reads them there.
 	Files []fileRef `json:"files,omitempty"`
@@ -108,7 +111,7 @@ func (f *flow) rootStart(inputs any) (startPayload, error) {
 		Definition: json.RawMessage(definition), MaxDepth: f.depth(), MaxSteps: f.steps()}
 	if c := f.child; c != nil {
 		p.Run, p.Parent, p.Caller, p.Depth, p.Path, p.Context = c.Run, c.Parent, c.Caller, c.Depth, c.Path, ContextFresh
-		p.MaxDepth, p.MaxSteps, p.Documents, p.Files = c.maxDepth, c.maxSteps, c.documents, c.files
+		p.MaxDepth, p.MaxSteps, p.Documents, p.Files, p.Question = c.maxDepth, c.maxSteps, c.documents, c.files, c.question
 	} else if p.Run, err = newKey(); err != nil {
 		return startPayload{}, err
 	}
