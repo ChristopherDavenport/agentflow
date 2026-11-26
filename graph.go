@@ -134,6 +134,10 @@ type ScriptCall struct {
 type Node struct {
 	ID   string
 	Kind Kind
+	// Description says what the step is for, to people and the fronts
+	// that show them a run. No model is sent it: it is in the definition,
+	// which only the program reads, and nowhere else.
+	Description string `json:",omitempty"`
 
 	// A Run node runs Script, or calls Tool with Args, or calls the
 	// workflow Flow names. A nil Args is {}.
@@ -295,8 +299,10 @@ func (n *Node) ending(outcome string) string {
 
 // Graph is a workflow. The first node is where it starts.
 type Graph struct {
-	Name  string
-	Nodes []Node
+	Name string
+	// Description says what the workflow is for, as a step's does.
+	Description string `json:",omitempty"`
+	Nodes       []Node
 	// Inputs is the schema of what an invocation carries.
 	Inputs *agenttool.Schema
 	// Outputs is what the finished workflow gives back, whatever its
@@ -350,6 +356,18 @@ func (g *Graph) Outcomes() []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// Describe is the description of step id, or of the workflow for "".
+// It is for people: no model is sent it.
+func (g *Graph) Describe(id string) string {
+	if id == "" {
+		return g.Description
+	}
+	if n := g.node(id); n != nil {
+		return n.Description
+	}
+	return ""
 }
 
 func (g *Graph) node(id string) *Node {

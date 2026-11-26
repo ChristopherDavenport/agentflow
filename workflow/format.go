@@ -28,6 +28,11 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 	}
 	var b strings.Builder
 	front := mapping()
+	if g.Description != "" {
+		if err := front.set("description", g.Description); err != nil {
+			return nil, err
+		}
+	}
 	if g.Inputs != nil {
 		front.add("inputs", fields(g.Inputs))
 	}
@@ -163,6 +168,7 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 			errs = append(errs, m.set(key, v))
 		}
 	}
+	set("description", n.Description != "", n.Description)
 	set("run", n.Script != "", n.Script)
 	set("flow", n.Flow != "", n.Flow)
 	set("tool", n.Tool != "", n.Tool)

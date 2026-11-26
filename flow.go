@@ -60,6 +60,11 @@ type Question struct {
 	OnTimeout string     `json:"on_timeout,omitempty"`
 	// Answer is empty as asked. [Answer] fills it in.
 	Answer *Result `json:"answer,omitempty"`
+
+	// Description is the step's, for the person: [Graph.Question] reads
+	// it from the definition. It is never in the question's arguments,
+	// which a model in the same context reads.
+	Description string `json:"-"`
 }
 
 type finishArgs struct {
@@ -1110,22 +1115,9 @@ func (f *flow) finishTool() agenttool.Tool {
 // a call a person let proceed. An output supplied in its place would be
 // recorded as a rejection.
 func (g *Graph) Answer(pending agentturn.PendingCall, res Result) (agentturn.Answer, error) {
-	var q Question
-	if pending.Call == nil || pending.Call.Name != askTool {
-		return agentturn.Answer{}, errors.New("agentflow: not a workflow question")
-	}
-	if err := decode([]byte(pending.Call.Arguments), &q); err != nil {
-		return agentturn.Answer{}, fmt.Errorf("agentflow: question: %w", err)
-	}
-	// The question's run is of a workflow g pinned, so the answer is
-	// held to that one's definition.
-	asker, err := g.find(cmp.Or(q.Workflow, g.Name))
+	q, n, err := g.asked(pending)
 	if err != nil {
 		return agentturn.Answer{}, err
-	}
-	n := asker.node(q.Step)
-	if n == nil {
-		return agentturn.Answer{}, fmt.Errorf("agentflow: no step %q", q.Step)
 	}
 	switch {
 	case res.By == ByTimeout:
@@ -1142,4 +1134,36 @@ func (g *Graph) Answer(pending agentturn.PendingCall, res Result) (agentturn.Ans
 		return agentturn.Answer{}, err
 	}
 	return agentturn.ApproveWith(pending.Call.CallID, args).WithBy("human"), nil
+}
+
+// Question reads a pending question as a front shows it: its arguments,
+// with the step's description from the definition its run pinned.
+func (g *Graph) Question(pending agentturn.PendingCall) (Question, error) {
+	q, n, err := g.asked(pending)
+	if err != nil {
+		return Question{}, err
+	}
+	q.Description = n.Description
+	return q, nil
+}
+
+// asked reads a pending question and the step that asks it, held to the
+// definition of a workflow g pinned.
+func (g *Graph) asked(pending agentturn.PendingCall) (Question, *Node, error) {
+	var q Question
+	if pending.Call == nil || pending.Call.Name != askTool {
+		return Question{}, nil, errors.New("agentflow: not a workflow question")
+	}
+	if err := decode([]byte(pending.Call.Arguments), &q); err != nil {
+		return Question{}, nil, fmt.Errorf("agentflow: question: %w", err)
+	}
+	asker, err := g.find(cmp.Or(q.Workflow, g.Name))
+	if err != nil {
+		return Question{}, nil, err
+	}
+	n := asker.node(q.Step)
+	if n == nil {
+		return Question{}, nil, fmt.Errorf("agentflow: no step %q", q.Step)
+	}
+	return q, n, nil
 }

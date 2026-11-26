@@ -142,12 +142,12 @@ func (g *Graph) stepGraph(n *Node) *Graph {
 	inputs, with := inputsOf(n)
 	// The child reports a stuck model as its outcome, and the caller
 	// decides what that means.
-	step := Node{ID: n.ID, Kind: Agent, Prompt: n.Prompt, Tools: n.Tools, Outcomes: n.Outcomes, Data: n.Data, With: with,
+	step := Node{ID: n.ID, Kind: Agent, Description: n.Description, Prompt: n.Prompt, Tools: n.Tools, Outcomes: n.Outcomes, Data: n.Data, With: with,
 		Model: cmp.Or(n.Model, g.Model), Thinking: cmp.Or(n.Thinking, g.Thinking), Timeout: n.Timeout, Policy: n.Policy,
 		Ends: map[string]string{Stuck: Stuck}}
 	// The step's model is its workflow's, so the step reads its own
 	// child's conversation rather than opening another.
-	return &Graph{Name: g.Name + ":" + n.ID, Nodes: []Node{step}, Inputs: inputs, Sources: g.Sources, Model: step.Model}
+	return &Graph{Name: g.Name + ":" + n.ID, Description: g.Description, Nodes: []Node{step}, Inputs: inputs, Sources: g.Sources, Model: step.Model}
 }
 
 // judgeGraph is the workflow a judge of n runs in its child: a model step
@@ -165,7 +165,7 @@ func (g *Graph) judgeGraph(n *Node) *Graph {
 		}
 	}
 	prompt := fmt.Sprintf("The question: %s\n\nWhat to weigh:\n%s", n.Prompt, n.Judge.Criteria)
-	judge := Node{ID: n.ID, Kind: Agent, Verdict: true, Prompt: prompt, Tools: n.Judge.Tools, Outcomes: outcomes, Data: data, With: with, Policy: n.Judge.Policy}
+	judge := Node{ID: n.ID, Kind: Agent, Verdict: true, Description: n.Description, Prompt: prompt, Tools: n.Judge.Tools, Outcomes: outcomes, Data: data, With: with, Policy: n.Judge.Policy}
 	return &Graph{Name: g.Name + ":" + n.ID + ":judge", Nodes: []Node{judge}, Inputs: inputs, Sources: g.Sources}
 }
 

@@ -114,23 +114,26 @@ func split(lines []string, offset int) (preamble section, sections []section, er
 }
 
 type frontmatter struct {
-	Inputs   yaml.Node `yaml:"inputs"`
-	Outputs  yaml.Node `yaml:"outputs"`
-	MaxDepth int       `yaml:"max_depth"`
-	MaxSteps int       `yaml:"max_steps"`
-	Model    string    `yaml:"model"`
-	Thinking string    `yaml:"thinking"`
+	Description string    `yaml:"description"`
+	Inputs      yaml.Node `yaml:"inputs"`
+	Outputs     yaml.Node `yaml:"outputs"`
+	MaxDepth    int       `yaml:"max_depth"`
+	MaxSteps    int       `yaml:"max_steps"`
+	Model       string    `yaml:"model"`
+	Thinking    string    `yaml:"thinking"`
 }
 
 type settings struct {
-	Run     string         `yaml:"run"`
-	Flow    string         `yaml:"flow"`
-	Tool    string         `yaml:"tool"`
-	Args    map[string]any `yaml:"args"`
-	With    yaml.Node      `yaml:"with"`
-	Outputs yaml.Node      `yaml:"outputs"`
-	Tools   []string       `yaml:"tools"`
-	Context string         `yaml:"context"`
+	// Description is for people, and no model is sent it.
+	Description string         `yaml:"description"`
+	Run         string         `yaml:"run"`
+	Flow        string         `yaml:"flow"`
+	Tool        string         `yaml:"tool"`
+	Args        map[string]any `yaml:"args"`
+	With        yaml.Node      `yaml:"with"`
+	Outputs     yaml.Node      `yaml:"outputs"`
+	Tools       []string       `yaml:"tools"`
+	Context     string         `yaml:"context"`
 	// A child's own settings, with context: fresh.
 	Dir          string `yaml:"dir"`
 	Model        string `yaml:"model"`
@@ -187,6 +190,7 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 			return nil, fmt.Errorf("workflow: inputs: %w", err)
 		}
 		outputs, g.MaxDepth, g.MaxSteps, g.Model, g.Thinking = fm.Outputs, fm.MaxDepth, fm.MaxSteps, fm.Model, fm.Thinking
+		g.Description = strings.TrimSpace(fm.Description)
 		offset = end + 2
 		lines = lines[offset:]
 	}
@@ -410,6 +414,7 @@ func node(n *agentflow.Node, s section) error {
 		prose = append(prose, fence)
 	}
 	n.Prompt = strings.TrimSpace(strings.Join(prose, "\n"))
+	n.Description = strings.TrimSpace(set.Description)
 
 	n.Script, n.Tool, n.Tools, n.Outcomes, n.MaxVisits, n.Flow = set.Run, set.Tool, set.Tools, set.Outcomes, set.MaxVisits, set.Flow
 	if set.Args != nil {

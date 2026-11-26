@@ -146,6 +146,11 @@ func loadSkill(s *agentskill.Skill) (*agentflow.Graph, map[string][]byte, error)
 	if err != nil {
 		return nil, nil, fmt.Errorf("workflow: skill %q: %s: %w", s.Name, file, err)
 	}
+	// A workflow that says nothing of itself is what its skill says it
+	// is for.
+	if g.Description == "" {
+		g.Description = strings.TrimSpace(s.Description)
+	}
 	if err := scriptsIn(g, s.Name, files); err != nil {
 		return nil, nil, err
 	}

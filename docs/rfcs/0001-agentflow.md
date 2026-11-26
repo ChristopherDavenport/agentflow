@@ -191,6 +191,7 @@ and be none. Unknown keys are errors.
 
 | Key | Nodes | Meaning |
 |---|---|---|
+| `description` | all | what the step is for, for people and fronts; no model is sent it. The frontmatter's is the workflow's (RFC 0005, section 15) |
 | `run` | program | script path within the skill |
 | `tool`, `args` | program | a tool to call instead, with fixed arguments |
 | `flow` | program | a workflow to call instead: a skill's name, or `./<path>.md` in this skill; see [RFC 0002](0002-nesting-and-children.md) |
