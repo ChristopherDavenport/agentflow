@@ -140,7 +140,10 @@ outputs:
 caller the outcome `failed`, with the data `{reason, workflow, step}`.
 The caller routes on it like any other outcome. With no edge for
 `failed`, the calling step fails instead, and raises its retry question
-([section 5](#5-failure-at-each-level)). An end may be named `failed`:
+([section 5](#5-failure-at-each-level)). So an unrouted `failed` is no
+way out of the calling workflow: it is not among that workflow's
+outcomes, and no outputs are asked for on it. A live trial found the
+outputs of the flat form asked for there. An end may be named `failed`:
 reaching it ends the invocation `failed` with that outcome, and it
 declares no outputs.
 

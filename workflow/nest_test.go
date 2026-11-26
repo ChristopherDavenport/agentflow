@@ -80,7 +80,9 @@ func TestWorkflowsCallFilesAndOtherSkills(t *testing.T) {
 	if !slices.Equal(names, []string{"parent/flows/sub", "child"}) || len(w.Skills) != 2 {
 		t.Errorf("flows = %v, skills = %d", names, len(w.Skills))
 	}
-	if got := w.Graph.Outcomes(); !slices.Equal(got, []string{"done", "failed"}) {
+	// A call that does not route on failed fails its step: failed is
+	// not a way out of the workflow.
+	if got := w.Graph.Outcomes(); !slices.Equal(got, []string{"done"}) {
 		t.Errorf("outcomes = %v", got)
 	}
 	// What a file loads is written back the same.
@@ -172,5 +174,27 @@ func TestOutputsByOutcomeAndDepthReadBack(t *testing.T) {
 	bad := strings.Replace(src, "  no: {}\n", "  no:\n    v: ${{ steps.a.outputs.v }}\n", 1)
 	if _, err := workflow.Parse("t", []byte(bad)); err == nil || !strings.Contains(err.Error(), "output v after a no") {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// A workflow with outputs in the flat form calls another and does not
+// route on failed: that failure fails the step, so the outputs are not
+// asked for on a path that ends nothing. Found by a live trial.
+func TestAnUnroutedFailureIsNoWayOut(t *testing.T) {
+	middle, err := workflow.Parse("middle", []byte("---\noutputs:\n  parity: ${{ steps.inner.outputs.parity }}\n---\n"+
+		"```mermaid\nflowchart TD\n  inner[[inner]] -->|ok| done((done))\n```\n\n## inner\n```yaml\nflow: leaf\n```\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := workflow.Parse("leaf", []byte("---\noutputs:\n  parity: ${{ steps.say.outputs.parity }}\n---\n"+
+		"```mermaid\nflowchart TD\n  say[[say]]\n```\n\n## say\n```yaml\ntool: say\noutputs:\n  ok:\n    parity: {type: string, required: true}\n```\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := middle.Link(leaf); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	if got := middle.Outcomes(); !slices.Equal(got, []string{"done"}) {
+		t.Errorf("outcomes = %v", got)
 	}
 }
