@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ChristopherDavenport/agentpolicy"
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
@@ -96,8 +97,11 @@ type flow struct {
 	maxSteps int
 	// idle is the timeout of an unattended model step that sets none.
 	idle *time.Duration
-	// subjects are what the host's tools touch, for a step's policy.
-	subjects   map[string][]Subject
+	// matchers and policyOpts are the host's, for agentpolicy to read a
+	// step's policy with, and engines the policies built with them.
+	matchers   func(dir string) map[string]agentpolicy.ToolMatcher
+	policyOpts []agentpolicy.Option
+	engines    *engines
 	model      openresponses.Streamer
 	modelName  string
 	unattended bool
@@ -153,9 +157,6 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 			if n.Model != "" && f.models != nil && !slices.Contains(f.models, n.Model) {
 				return cfg, fmt.Errorf("agentflow: %s: node %q asks for model %q, which the host does not serve: want one of %s", x.Name, n.ID, n.Model, strings.Join(f.models, ", "))
 			}
-			if err := f.policed(x, &n, cfg.Tools); err != nil {
-				return cfg, err
-			}
 		}
 		if x.Model != "" && f.models != nil && !slices.Contains(f.models, x.Model) {
 			return cfg, fmt.Errorf("agentflow: %s asks for model %q, which the host does not serve: want one of %s", x.Name, x.Model, strings.Join(f.models, ", "))
@@ -166,6 +167,9 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 	}
 	if f.idle != nil && (*f.idle < 0 || *f.idle > MaxTimeout) {
 		return cfg, fmt.Errorf("agentflow: an unattended timeout must be 0 to %s", MaxTimeout)
+	}
+	if err := f.buildPolicies(); err != nil {
+		return cfg, err
 	}
 	f.model, f.modelName = cfg.Model, cfg.ModelName
 	if f.modelName == "" {

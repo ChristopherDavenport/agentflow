@@ -118,6 +118,10 @@ func TestJudgeDecides(t *testing.T) {
 	if got := stepOf(st, "triage"); got.Result.Outcome != "report" || got.Result.By != ByJudge || got.Advice.Reason != "because" {
 		t.Errorf("triage = %+v", got)
 	}
+	// The judge's look is a step of the tree.
+	if st.Entries != len(st.Steps)+1 {
+		t.Errorf("entries = %d, steps %d", st.Entries, len(st.Steps))
+	}
 	// The judge works in a child: its model, none of the work.
 	req := m.requests[1]
 	if in := texts(req.Input); req.Model != "critic" || len(in) != 2 || !strings.HasPrefix(in[0], invocationPrefix+"pr:triage:judge") || !strings.HasPrefix(in[1], beginning("triage")) {

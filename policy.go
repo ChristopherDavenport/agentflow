@@ -8,253 +8,215 @@ import (
 	slash "path"
 	"slices"
 	"strings"
+	"sync"
 
-	"github.com/ChristopherDavenport/agenttool"
+	"github.com/ChristopherDavenport/agentpolicy"
 	"github.com/ChristopherDavenport/agentturn"
 )
 
-// Policy limits what a model step's tools may touch. Paths are slash
-// paths below the workspace's root, matched by patterns in which * is
-// any part of one name and ** any number of names. Commands are matched
-// by their leading words. A refusal is decided before an allowance, and
-// names the rule that made it.
-type Policy struct {
-	// Write, if set, are the only paths the step may write.
-	Write []string `json:"write,omitempty" yaml:"write,omitempty"`
-	// NoWrite are paths it may not write.
-	NoWrite []string `json:"no_write,omitempty" yaml:"no_write,omitempty"`
-	// NoRead are paths it may not read, nor write, since a write can show
-	// what it replaced.
-	NoRead []string `json:"no_read,omitempty" yaml:"no_read,omitempty"`
-	// Bash, if set, are the only commands it may run, each by its leading
-	// words: "go test" allows "go test ./...".
-	Bash []string `json:"bash,omitempty" yaml:"bash,omitempty"`
-	// NoBash are commands it may not run, by their leading words.
-	NoBash []string `json:"no_bash,omitempty" yaml:"no_bash,omitempty"`
-}
-
-// Access is what a tool does with one of its arguments.
-type Access int
-
-const (
-	// Reads says the argument is a path the tool reads.
-	Reads Access = iota + 1
-	// Writes says it is a path the tool writes.
-	Writes
-	// Executes says it is a command the tool runs.
-	Executes
-)
-
-func (a Access) String() string {
-	switch a {
-	case Reads:
-		return "read"
-	case Writes:
-		return "write"
-	case Executes:
-		return "run"
-	}
-	return fmt.Sprintf("access %d", int(a))
-}
-
-// Subject names one argument of a tool that a step's policy decides on:
-// a string, or an array of strings, at the top of the call's arguments.
-type Subject struct {
-	Arg    string
-	Access Access
-}
-
-// ToolSubjects tells a step's policy what the host's tools touch, by
-// tool name. A tool named with no subjects touches no path and runs no
-// command. Under a policy, a tool that is not named here and makes no
-// claim of its own ([agenttool.Factual]) cannot be read, and is refused:
-// [Apply] refuses a step that names one in its tools.
+// Policy narrows what a model step's tools may do, in agentpolicy's
+// rule grammar: "read", "edit(src/**)", "bash(go test:*)". It can only
+// refuse. A call it lets through is still the host's own BeforeToolCall
+// to decide, so a workflow cannot give itself what the host does not.
 //
-// A tool that claims facts is decided on the calls it says the call
-// amounts to, each by the subjects of the tool it names, so a shell that
-// says which files a command reads is held to the path rules too. Facts
-// a host does not trust ([agenttool.Facts.Hint]) are decided beside the
-// call itself.
-func ToolSubjects(subjects map[string][]Subject) Option {
-	return func(f *flow) {
-		f.subjects = map[string][]Subject{}
-		for name, s := range subjects {
-			f.subjects[name] = slices.Clone(s)
+// Deny refuses the calls its rules match. Allow, if set, refuses every
+// call none of its rules matches. Deny is read first, as agentpolicy
+// reads it. A path in a rule is below the workspace's root, in a child
+// too.
+type Policy struct {
+	Allow []PolicyRule `json:"allow,omitempty"`
+	Deny  []PolicyRule `json:"deny,omitempty"`
+}
+
+// PolicyRule is one rule, and the note that says why it is there, which
+// a refusal and the step's instructions give after it.
+type PolicyRule struct {
+	Rule string `json:"rule"`
+	Note string `json:"note,omitempty"`
+}
+
+func (p *Policy) empty() bool { return p == nil || len(p.Allow)+len(p.Deny) == 0 }
+
+// rules parses the rules of one list.
+func rules(list []PolicyRule) ([]agentpolicy.Rule, error) {
+	var out []agentpolicy.Rule
+	for _, r := range list {
+		parsed, err := agentpolicy.ParseRules(r.Rule)
+		switch {
+		case err != nil:
+			return nil, fmt.Errorf("rule %q: %w", r.Rule, err)
+		case len(parsed) != 1:
+			return nil, fmt.Errorf("rule %q: want one rule to an entry", r.Rule)
 		}
+		parsed[0].Note = r.Note
+		out = append(out, parsed[0])
 	}
+	return out, nil
 }
 
-func (p *Policy) empty() bool {
-	return p == nil || len(p.Write)+len(p.NoWrite)+len(p.NoRead)+len(p.Bash)+len(p.NoBash) == 0
+// parsed is the policy as agentpolicy reads it. A policy with an
+// allowance denies by default what it does not allow, and one without
+// allows by default what it does not deny, which the host then decides.
+func (p *Policy) parsed() (agentpolicy.Policy, error) {
+	allow, err := rules(p.Allow)
+	if err != nil {
+		return agentpolicy.Policy{}, fmt.Errorf("allow: %w", err)
+	}
+	deny, err := rules(p.Deny)
+	if err != nil {
+		return agentpolicy.Policy{}, fmt.Errorf("deny: %w", err)
+	}
+	out := agentpolicy.Policy{Allow: allow, Deny: deny, Default: agentpolicy.Allow()}
+	if p.Allow != nil {
+		out.Default = agentpolicy.Deny()
+	}
+	return out, nil
 }
 
-// check holds a policy's rules to what they can say.
-func (p *Policy) check() error {
+// check holds a policy's rules to the grammar, and to the tools of the
+// step it is on where those are known: a rule for a tool the step does
+// not offer could never be read.
+func (p *Policy) check(tools []string, known bool) error {
 	if p == nil {
 		return nil
 	}
 	var errs []error
-	for _, rules := range []struct {
-		key  string
-		list []string
-	}{{"write", p.Write}, {"no_write", p.NoWrite}, {"no_read", p.NoRead}} {
-		for _, r := range rules.list {
-			if err := checkPattern(r); err != nil {
-				errs = append(errs, fmt.Errorf("%s %q: %w", rules.key, r, err))
+	if p.Allow != nil && len(p.Allow) == 0 {
+		errs = append(errs, errors.New("an empty allow allows nothing: leave the key out, or name what is allowed"))
+	}
+	parsed, err := p.parsed()
+	if err != nil {
+		return err
+	}
+	if known {
+		for _, r := range slices.Concat(parsed.Allow, parsed.Deny) {
+			if !r.Glob() && !slices.Contains(tools, r.Tool) {
+				errs = append(errs, fmt.Errorf("rule %s: the step offers no tool %s", r, r.Tool))
 			}
 		}
-	}
-	for _, rules := range []struct {
-		key  string
-		list []string
-	}{{"bash", p.Bash}, {"no_bash", p.NoBash}} {
-		for _, r := range rules.list {
-			if len(strings.Fields(r)) == 0 {
-				errs = append(errs, fmt.Errorf("%s: an empty command", rules.key))
-			}
-		}
-	}
-	if p.Write != nil && len(p.Write) == 0 || p.Bash != nil && len(p.Bash) == 0 {
-		errs = append(errs, errors.New("an empty allowance allows nothing: leave the key out, or name what is allowed"))
 	}
 	return errors.Join(errs...)
 }
 
-func checkPattern(p string) error {
-	switch {
-	case p == "" || slash.IsAbs(p) || strings.Contains(p, `\`):
-		return errors.New("want a slash path below the workspace's root")
-	case slash.Clean(p) != p || p == ".." || strings.HasPrefix(p, "../"):
-		return errors.New("want a clean path, with no .. in it")
-	}
-	for _, part := range strings.Split(p, "/") {
-		if part == "**" {
-			continue
-		}
-		if _, err := slash.Match(part, ""); err != nil {
-			return err
-		}
-	}
-	return nil
+// PolicyMatchers gives step policies what agentpolicy needs of the host's
+// tools: for each tool whose rules take a specifier, how a specifier is
+// matched and how a call is split, as [agentpolicy.Build] takes them. A
+// rule with a specifier for a tool with no matcher is a load error.
+//
+// matchers is asked once for each working directory a workflow's model
+// steps run in: "" for the workspace's root, and a child's dir below it.
+// Rules are written below the root, so a child's matchers read its tools'
+// paths below its dir, as [InDir] does. opts go to every engine:
+// [agentpolicy.WithAliases], say.
+func PolicyMatchers(matchers func(dir string) map[string]agentpolicy.ToolMatcher, opts ...agentpolicy.Option) Option {
+	return func(f *flow) { f.matchers, f.policyOpts = matchers, opts }
 }
 
-// match says name matches the pattern: * is any part of one name, and
-// ** any number of names, none included.
-func match(pattern, name string) bool {
-	return matchParts(strings.Split(pattern, "/"), strings.Split(name, "/"))
+// InDir matches a rule's specifier against one string field of a call's
+// arguments, read as a clean path below dir, as [agentpolicy.GlobMatcher]
+// does: "edit(src/*)" matches a child at "src" that edits "a.go", and
+// "docs/../src/a.go" at the root. A path that leaves the root keeps its
+// "..", so only a rule written for it matches it.
+func InDir(dir, field string) agentpolicy.Matcher {
+	glob := agentpolicy.GlobMatcher(field)
+	return func(spec string, args json.RawMessage) bool {
+		var m map[string]any
+		if json.Unmarshal(args, &m) != nil {
+			return false
+		}
+		value, ok := m[field].(string)
+		if !ok {
+			return false
+		}
+		if !slash.IsAbs(value) {
+			value = slash.Join(dir, value)
+		}
+		m[field] = slash.Clean(value)
+		b, err := json.Marshal(m)
+		return err == nil && glob(spec, b)
+	}
 }
 
-func matchParts(pattern, name []string) bool {
-	for len(pattern) > 0 {
-		if pattern[0] == "**" {
-			for i := 0; i <= len(name); i++ {
-				if matchParts(pattern[1:], name[i:]) {
-					return true
-				}
+// engines are the agentpolicy engines of the policies a flow holds its
+// steps to, one for each, built for the flow's working directory.
+type engines struct {
+	mu    sync.Mutex
+	built map[*Policy]*agentpolicy.Engine
+}
+
+// dir is the working directory the flow's model steps run in.
+func (f *flow) dir() string {
+	if f.child != nil {
+		return f.child.Settings.Dir
+	}
+	return ""
+}
+
+// engine is p's engine, built the first time it is asked for.
+func (f *flow) engine(p *Policy) (*agentpolicy.Engine, error) {
+	if f.engines == nil {
+		f.engines = &engines{}
+	}
+	f.engines.mu.Lock()
+	defer f.engines.mu.Unlock()
+	if e := f.engines.built[p]; e != nil {
+		return e, nil
+	}
+	parsed, err := p.parsed()
+	if err != nil {
+		return nil, err
+	}
+	var matchers map[string]agentpolicy.ToolMatcher
+	if f.matchers != nil {
+		matchers = f.matchers(f.dir())
+	}
+	e, err := agentpolicy.Build(parsed, matchers, f.policyOpts...)
+	if err != nil {
+		return nil, err
+	}
+	if f.engines.built == nil {
+		f.engines.built = map[*Policy]*agentpolicy.Engine{}
+	}
+	f.engines.built[p] = e
+	return e, nil
+}
+
+// buildPolicies builds the engine of every policy the flow's steps may be
+// held to, so a rule agentpolicy cannot read is a load error: a
+// specifier for a tool the host gave no matcher, say.
+func (f *flow) buildPolicies() error {
+	// A copy of the flow, Drive's say, shares what was built.
+	f.engines = &engines{}
+	var errs []error
+	build := func(where string, p *Policy) {
+		if p.empty() {
+			return
+		}
+		if _, err := f.engine(p); err != nil {
+			errs = append(errs, fmt.Errorf("agentflow: %s: policy: %w", where, err))
+		}
+	}
+	if c := f.child; c != nil {
+		for _, r := range c.policies {
+			build(r.from, r.policy)
+		}
+	}
+	for _, x := range f.g.closure() {
+		for i := range x.Nodes {
+			n := &x.Nodes[i]
+			build(fmt.Sprintf("%s: node %q", x.Name, n.ID), n.Policy)
+			if n.Judge != nil {
+				build(fmt.Sprintf("%s: the judge of node %q", x.Name, n.ID), n.Judge.Policy)
 			}
-			return false
-		}
-		if len(name) == 0 {
-			return false
-		}
-		if ok, _ := slash.Match(pattern[0], name[0]); !ok {
-			return false
-		}
-		pattern, name = pattern[1:], name[1:]
-	}
-	return len(name) == 0
-}
-
-// matchAny is the first pattern of list that name matches.
-func matchAny(list []string, name string) (string, bool) {
-	for _, p := range list {
-		if match(p, name) {
-			return p, true
 		}
 	}
-	return "", false
-}
-
-// commandParts splits a shell command into the commands it runs, by
-// the operators that join them.
-func commandParts(cmd string) []string {
-	var parts []string
-	for _, line := range strings.Split(cmd, "\n") {
-		for _, a := range strings.Split(line, "&&") {
-			for _, b := range strings.Split(a, "||") {
-				for _, c := range strings.Split(b, ";") {
-					for _, d := range strings.Split(c, "|") {
-						for _, e := range strings.Split(d, "&") {
-							if strings.TrimSpace(e) != "" {
-								parts = append(parts, strings.TrimSpace(e))
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-	return parts
-}
-
-// leads says the command starts with the rule's words.
-func leads(rule, command string) bool {
-	r, c := strings.Fields(rule), strings.Fields(command)
-	return len(c) >= len(r) && slices.Equal(c[:len(r)], r)
+	return errors.Join(errs...)
 }
 
 // ruled is a policy with where it was set, for a refusal to name.
 type ruled struct {
 	from   string
 	policy *Policy
-}
-
-// decide holds one subject of a call to every policy in force, and
-// returns why it is refused, "" when it is not.
-func decide(policies []ruled, access Access, value string) string {
-	for _, r := range policies {
-		p := r.policy
-		switch access {
-		case Reads, Writes:
-			if rule, ok := matchAny(p.NoRead, value); ok {
-				return fmt.Sprintf("%s %q: no_read %q of %s", access, value, rule, r.from)
-			}
-			if access == Reads {
-				continue
-			}
-			if rule, ok := matchAny(p.NoWrite, value); ok {
-				return fmt.Sprintf("write %q: no_write %q of %s", value, rule, r.from)
-			}
-			if p.Write != nil {
-				if _, ok := matchAny(p.Write, value); !ok {
-					return fmt.Sprintf("write %q: not in write %s of %s", value, strings.Join(quoted(p.Write), ", "), r.from)
-				}
-			}
-		case Executes:
-			if p.Bash != nil && strings.ContainsAny(value, "`") || p.Bash != nil && (strings.Contains(value, "$(") || strings.Contains(value, "<(") || strings.Contains(value, ">(")) {
-				return fmt.Sprintf("run %q: a substitution cannot be held to bash of %s", value, r.from)
-			}
-			for _, part := range commandParts(value) {
-				for _, rule := range p.NoBash {
-					if leads(rule, part) {
-						return fmt.Sprintf("run %q: no_bash %q of %s", part, rule, r.from)
-					}
-				}
-				if p.Bash != nil && !slices.ContainsFunc(p.Bash, func(rule string) bool { return leads(rule, part) }) {
-					return fmt.Sprintf("run %q: not in bash %s of %s", part, strings.Join(quoted(p.Bash), ", "), r.from)
-				}
-			}
-		}
-	}
-	return ""
-}
-
-func quoted(list []string) []string {
-	out := make([]string, len(list))
-	for i, s := range list {
-		out[i] = fmt.Sprintf("%q", s)
-	}
-	return out
 }
 
 // policies are the policies in force at st's step: those of the calls
@@ -288,90 +250,25 @@ func (f *flow) chain(st State) []ruled {
 	return out
 }
 
-// inChild is a path the child's tools name, below its directory, as the
-// policy reads it: below the workspace's root.
-func (f *flow) inChild(value string) string {
-	if c := f.child; c != nil && c.Settings.Dir != "" && !slash.IsAbs(value) {
-		return slash.Join(c.Settings.Dir, value)
-	}
-	return value
-}
-
-// police holds a call of st's step to the policies in force, and returns
-// the refusal, "" when there is none.
+// police holds a call of st's step to every policy in force, and returns
+// the refusal, "" when there is none. Each policy is asked what it would
+// decide, which remembers nothing and tells no observer: a policy here
+// only refuses, so there is nothing to wait on and nothing to answer.
 func (f *flow) police(ctx context.Context, st State, info agentturn.ToolCallInfo) string {
-	policies := f.policies(st)
-	if len(policies) == 0 {
-		return ""
-	}
-	type part struct {
-		tool string
-		args json.RawMessage
-	}
-	calls := []part{{info.Call.Name, info.Args}}
-	if info.Tool != nil {
-		facts, claims, err := agenttool.FactsOf(ctx, info.Tool, info.Args)
+	for _, r := range f.policies(st) {
+		e, err := f.engine(r.policy)
+		if err != nil {
+			return fmt.Sprintf("the policy of %s cannot be read: %v", r.from, err)
+		}
+		v, err := e.Would(ctx, info)
 		switch {
 		case err != nil:
-			return fmt.Sprintf("%s cannot say what this call touches: %v", info.Call.Name, err)
-		case claims && facts.Calls != nil:
-			var claimed []part
-			for _, c := range facts.Calls {
-				claimed = append(claimed, part{c.Tool, c.Args})
-			}
-			if facts.Hint {
-				claimed = append(claimed, calls...)
-			}
-			if len(claimed) == 0 {
-				return fmt.Sprintf("%s says this call amounts to nothing it can state", info.Call.Name)
-			}
-			calls = claimed
-		case claims:
-			// The call is its own one fact.
-		}
-	}
-	for _, c := range calls {
-		subjects, known := f.subjects[c.tool]
-		if !known {
-			return fmt.Sprintf("the step's policy cannot see what %s touches: the host names nothing it reads, writes or runs", c.tool)
-		}
-		var args map[string]any
-		if len(c.args) > 0 && decode(c.args, &args) != nil {
-			return fmt.Sprintf("the arguments of %s are not an object the policy can read", c.tool)
-		}
-		for _, s := range subjects {
-			for _, value := range values(args[s.Arg]) {
-				v := value
-				if s.Access != Executes {
-					v = f.inChild(slash.Clean(value))
-					if slash.IsAbs(v) || v == ".." || strings.HasPrefix(v, "../") {
-						return fmt.Sprintf("%s %q: the policy holds paths below the workspace's root", s.Access, value)
-					}
-				}
-				if why := decide(policies, s.Access, v); why != "" {
-					return why
-				}
-			}
+			return fmt.Sprintf("the policy of %s cannot decide this call: %v", r.from, err)
+		case v.Action != agentturn.Allow:
+			return fmt.Sprintf("the policy of %s: %s", r.from, v.Reason)
 		}
 	}
 	return ""
-}
-
-// values are the strings an argument holds: itself, or an array's.
-func values(v any) []string {
-	switch x := v.(type) {
-	case string:
-		return []string{x}
-	case []any:
-		var out []string
-		for _, e := range x {
-			if s, ok := e.(string); ok {
-				out = append(out, s)
-			}
-		}
-		return out
-	}
-	return nil
 }
 
 // describe says what the policies in force allow, for the step's
@@ -380,26 +277,32 @@ func describe(policies []ruled) string {
 	if len(policies) == 0 {
 		return ""
 	}
+	cite := func(list []PolicyRule) string {
+		var out []string
+		for _, r := range list {
+			parsed, err := rules([]PolicyRule{r})
+			if err != nil {
+				continue
+			}
+			s := parsed[0].String()
+			if r.Note != "" {
+				s += " (" + r.Note + ")"
+			}
+			out = append(out, s)
+		}
+		return strings.Join(out, ", ")
+	}
 	var lines []string
 	for _, r := range policies {
 		p := r.policy
 		var said []string
-		if p.Write != nil {
-			said = append(said, "write only paths matching "+strings.Join(quoted(p.Write), ", "))
+		if p.Allow != nil {
+			said = append(said, "only calls matching "+cite(p.Allow))
 		}
-		if p.NoWrite != nil {
-			said = append(said, "not write "+strings.Join(quoted(p.NoWrite), ", "))
+		if p.Deny != nil {
+			said = append(said, "no calls matching "+cite(p.Deny))
 		}
-		if p.NoRead != nil {
-			said = append(said, "not read or write "+strings.Join(quoted(p.NoRead), ", "))
-		}
-		if p.Bash != nil {
-			said = append(said, "run only commands starting "+strings.Join(quoted(p.Bash), ", "))
-		}
-		if p.NoBash != nil {
-			said = append(said, "not run commands starting "+strings.Join(quoted(p.NoBash), ", "))
-		}
-		lines = append(lines, "- set by "+r.from+": you may "+strings.Join(said, "; "))
+		lines = append(lines, "- set by "+r.from+": "+strings.Join(said, "; "))
 	}
-	return "Your tools are limited. Paths are below the workspace's root, * is any part of a name and ** any number of names. A call outside these limits is refused, naming the rule:\n" + strings.Join(lines, "\n")
+	return "Your tools are limited. Rules name a tool and, in parentheses, what its call may touch; paths are below the workspace's root. A call outside these limits is refused, naming the rule:\n" + strings.Join(lines, "\n")
 }

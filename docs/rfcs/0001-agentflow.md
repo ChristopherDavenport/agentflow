@@ -197,11 +197,11 @@ and be none. Unknown keys are errors.
 | `with` | all | the step's inputs, by name |
 | `outputs` | all | schema of the step's data, by outcome |
 | `tools` | model | tools the model may call; none if absent |
-| `context` | model, call | `session` (default) or `fresh`, a child session; see [Context](#context-spiked) |
+| `context` | model, call | `session` or `fresh`, a child session; see [Context](#context-spiked). `session` is the default, except for a model step that asks for another model than its workflow's, which defaults to `fresh` (RFC 0003, section 14) |
 | `dir`, `instructions` | fresh model, fresh call | the child's working directory, and a file of the skill added to its instructions (RFC 0002, section 10) |
 | `model`, `thinking` | model; `model` also a fresh call | the model a step asks and how hard it reasons; the frontmatter's `model` and `thinking` are the workflow's defaults (RFC 0003, section 14) |
 | `timeout` | script, tool, model | a duration past which the step fails and asks to be retried (RFC 0003, section 13) |
-| `policy` | model, call | what the step's tools may write, read and run; on a call, for every model step it calls (RFC 0003, section 17) |
+| `policy` | model, call | `allow` and `deny` rules in agentpolicy's grammar, which can only narrow what the host permits; on a call, for every model step it calls (RFC 0003, section 17) |
 | `child` | fresh model | a child kept across the visits and steps that name it (RFC 0002, section 11) |
 | `outcomes` | all | ways the node can end; `[ok]` if absent |
 | `unattended` | person | outcome, and data, taken when nobody can be asked |

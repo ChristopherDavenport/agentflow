@@ -269,6 +269,12 @@ func TestAFailedChildRoutesOnFailed(t *testing.T) {
 	if !errors.Is(err, ErrStepFailed) || !strings.Contains(err.Error(), "fragile") {
 		t.Errorf("end = %s, %v", end.Reason, err)
 	}
+	// The failed child's steps count toward its caller's tree: the call,
+	// and the one step the child entered.
+	st, _ = g.Replay(a.State().Transcript)
+	if st.Entries != 2 {
+		t.Errorf("entries = %d, want the call and the child's step", st.Entries)
+	}
 }
 
 func TestAnInvocationAbandonsChildren(t *testing.T) {
@@ -302,7 +308,7 @@ func TestAnInvocationAbandonsChildren(t *testing.T) {
 
 func TestChildSettingsAreCheckedAtLoad(t *testing.T) {
 	for want, change := range map[string]func(g *Graph){
-		"dir is a setting of a child":   func(g *Graph) { g.node("draft").Context = "" },
+		"dir is a setting of a child":   func(g *Graph) { g.node("draft").Context = ContextSession },
 		`dir "../up"`:                   func(g *Graph) { g.node("draft").Dir = "../up" },
 		`dir "/abs"`:                    func(g *Graph) { g.node("draft").Dir = "/abs" },
 		"only a model step keeps":       func(g *Graph) { g.node("flip").Child, g.node("flip").Context = "w", ContextFresh },

@@ -43,11 +43,16 @@ func TestChildSettingsLoad(t *testing.T) {
 	if n := g.Nodes[0]; n.Dir != "services/api" || n.Model != "small" || n.Child != "helper" || n.Context != agentflow.ContextFresh {
 		t.Errorf("node = %+v", n)
 	}
+	// A step that asks for another model than its workflow's runs in a
+	// child unless it says otherwise.
+	if g, err := workflow.Parse("t", []byte(strings.Replace(good, "context: fresh\n", "", 1))); err != nil || g.Nodes[0].Context != "" {
+		t.Errorf("by model: %v", err)
+	}
 	for src, want := range map[string]string{
-		strings.Replace(good, "context: fresh\n", "", 1):          "dir is a setting of a child",
-		strings.Replace(good, "services/api", "../up", 1):         `dir "../up"`,
-		strings.Replace(good, "child: helper", "child: a b", 1):   `child "a b"`,
-		strings.Replace(good, "model: small", "models: small", 1): "models",
+		strings.Replace(good, "context: fresh\n", "context: session\n", 1): "dir is a setting of a child",
+		strings.Replace(good, "services/api", "../up", 1):                  `dir "../up"`,
+		strings.Replace(good, "child: helper", "child: a b", 1):            `child "a b"`,
+		strings.Replace(good, "model: small", "models: small", 1):          "models",
 	} {
 		if _, err := workflow.Parse("t", []byte(src)); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("err = %v, want %q", err, want)

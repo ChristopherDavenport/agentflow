@@ -137,15 +137,15 @@ type settings struct {
 	Instructions string `yaml:"instructions"`
 	Child        string `yaml:"child"`
 	// A step's own settings.
-	Thinking string            `yaml:"thinking"`
-	Timeout  string            `yaml:"timeout"`
-	Policy   *agentflow.Policy `yaml:"policy"`
+	Thinking string      `yaml:"thinking"`
+	Timeout  string      `yaml:"timeout"`
+	Policy   *policySpec `yaml:"policy"`
 	Judge    *struct {
-		Criteria string            `yaml:"criteria"`
-		Outcomes []string          `yaml:"outcomes"`
-		Tools    []string          `yaml:"tools"`
-		Returns  int               `yaml:"max_returns"`
-		Policy   *agentflow.Policy `yaml:"policy"`
+		Criteria string      `yaml:"criteria"`
+		Outcomes []string    `yaml:"outcomes"`
+		Tools    []string    `yaml:"tools"`
+		Returns  int         `yaml:"max_returns"`
+		Policy   *policySpec `yaml:"policy"`
 	} `yaml:"judge"`
 	Outcomes   []string  `yaml:"outcomes"`
 	Unattended yaml.Node `yaml:"unattended"`
@@ -423,7 +423,7 @@ func node(n *agentflow.Node, s section) error {
 	}
 	n.Context = set.Context
 	n.Dir, n.Model, n.InstructionsFile, n.Child = set.Dir, set.Model, set.Instructions, set.Child
-	n.Thinking, n.Policy = set.Thinking, set.Policy
+	n.Thinking, n.Policy = set.Thinking, set.Policy.policy()
 	if set.Timeout != "" {
 		d, err := time.ParseDuration(set.Timeout)
 		if err != nil || d <= 0 {
@@ -432,7 +432,7 @@ func node(n *agentflow.Node, s section) error {
 		n.Timeout = d
 	}
 	if j := set.Judge; j != nil {
-		n.Judge = &agentflow.Judge{Criteria: strings.TrimSpace(j.Criteria), Outcomes: j.Outcomes, Tools: j.Tools, Returns: j.Returns, Policy: j.Policy}
+		n.Judge = &agentflow.Judge{Criteria: strings.TrimSpace(j.Criteria), Outcomes: j.Outcomes, Tools: j.Tools, Returns: j.Returns, Policy: j.Policy.policy()}
 	}
 	if n.Kind != agentflow.Agent && n.Tools != nil {
 		return errors.New("only a model node has tools")
@@ -516,6 +516,54 @@ func readOutputs(g *agentflow.Graph, n *yaml.Node) error {
 		g.OutputsBy[outcome] = out
 		return nil
 	})
+}
+
+// policySpec is a policy as a section writes it: allow and deny, each a
+// list of rules in agentpolicy's grammar, a rule written alone or with
+// the note that says why it is there.
+type policySpec struct {
+	Allow []ruleSpec `yaml:"allow"`
+	Deny  []ruleSpec `yaml:"deny"`
+}
+
+// ruleSpec is "bash(go test:*)", or {rule: "bash(curl:*)", note: "use fetch"}.
+type ruleSpec agentflow.PolicyRule
+
+func (r *ruleSpec) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		r.Rule = n.Value
+		return nil
+	}
+	if n.Kind != yaml.MappingNode {
+		return fmt.Errorf("line %d: a rule is a string, or a mapping with rule and note", n.Line)
+	}
+	return pairs(n, func(key string, v *yaml.Node) error {
+		switch key {
+		case "rule":
+			return v.Decode(&r.Rule)
+		case "note":
+			return v.Decode(&r.Note)
+		}
+		return fmt.Errorf("line %d: a rule has no key %q", v.Line, key)
+	})
+}
+
+func (p *policySpec) policy() *agentflow.Policy {
+	if p == nil {
+		return nil
+	}
+	out := &agentflow.Policy{}
+	for _, r := range p.Allow {
+		out.Allow = append(out.Allow, agentflow.PolicyRule(r))
+	}
+	for _, r := range p.Deny {
+		out.Deny = append(out.Deny, agentflow.PolicyRule(r))
+	}
+	// An allow written empty is kept, so the load says it allows nothing.
+	if p.Allow != nil && out.Allow == nil {
+		out.Allow = []agentflow.PolicyRule{}
+	}
+	return out
 }
 
 // pairs visits a mapping in the order written. An absent node has none.

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ChristopherDavenport/agentpolicy"
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
@@ -132,7 +133,7 @@ func TestAnUnattendedModelStepHasATimeout(t *testing.T) {
 func TestStepsAskForTheirModelAndThinking(t *testing.T) {
 	g := &Graph{Name: "models", Model: "big", Thinking: "low", Nodes: []Node{
 		{ID: "plan", Kind: Agent, Prompt: "Plan.", Next: map[string]string{OK: "check"}},
-		{ID: "check", Kind: Agent, Prompt: "Check.", Model: "small", Thinking: "max"},
+		{ID: "check", Kind: Agent, Prompt: "Check.", Model: "small", Thinking: "max", Context: ContextSession},
 	}}
 	m := &fakeModel{outcomes: []string{OK, OK}}
 	a := nestedAgent(t, g, m, nil, Models("big", "small"))
@@ -171,6 +172,47 @@ func TestStepsAskForTheirModelAndThinking(t *testing.T) {
 	}
 }
 
+func TestAnotherModelRunsInAChild(t *testing.T) {
+	g := &Graph{Name: "models", Model: "big", Nodes: []Node{
+		{ID: "plan", Kind: Agent, Prompt: "Plan.", Model: "big", Next: map[string]string{OK: "check"}},
+		{ID: "check", Kind: Agent, Prompt: "Check.", Model: "small", Next: map[string]string{OK: "stay"}},
+		{ID: "stay", Kind: Agent, Prompt: "Stay.", Model: "small", Context: ContextSession},
+	}}
+	if err := g.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	// Decided by the definition: the workflow's own model stays, another
+	// goes to a child, and session keeps it here.
+	if g.node("plan").fresh() || !g.node("check").fresh() || g.node("stay").fresh() {
+		t.Fatalf("fresh: plan %v, check %v, stay %v", g.node("plan").fresh(), g.node("check").fresh(), g.node("stay").fresh())
+	}
+	// With no default, any model a step names is another.
+	none := &Graph{Name: "models", Nodes: []Node{{ID: "check", Kind: Agent, Prompt: "Check.", Model: "small"}}}
+	if err := none.Validate(); err != nil || !none.node("check").fresh() {
+		t.Fatalf("no default: %v, fresh %v", err, none.node("check").fresh())
+	}
+	m := &fakeModel{outcomes: []string{OK, OK, OK}}
+	kids := newKin(m, "fake")
+	cfg, err := Apply(g, agentturn.Config{Model: m, ModelName: "fake"}, kids.option())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := agentturn.New(cfg)
+	if end, _, err := Drive(t.Context(), g, a, start(t, a)); err != nil || end.Reason != agentturn.ReasonDone {
+		t.Fatalf("end = %+v, %v", end, err)
+	}
+	if len(kids.agents) != 1 {
+		t.Errorf("children = %d, want the one for check", len(kids.agents))
+	}
+	var models []string
+	for _, r := range m.requests {
+		models = append(models, r.Model)
+	}
+	if !slices.Equal(models, []string{"big", "small", "small"}) {
+		t.Errorf("models = %v", models)
+	}
+}
+
 // touching records what each tool was asked to touch.
 func touching(did *[]string) []agenttool.Tool {
 	tool := func(name string) agenttool.Tool {
@@ -182,13 +224,50 @@ func touching(did *[]string) []agenttool.Tool {
 	return []agenttool.Tool{tool("read"), tool("write"), tool("bash")}
 }
 
-var subjects = ToolSubjects(map[string][]Subject{
-	"read":  {{Arg: "path", Access: Reads}},
-	"write": {{Arg: "path", Access: Writes}},
-	"bash":  {{Arg: "command", Access: Executes}},
+// shell splits a command at the operators that join commands, and
+// refuses one holding a substitution, which no rule can see into: what a
+// host's splitter does, since agentpolicy holds no shell parser.
+func shell(_ context.Context, args json.RawMessage) ([]agentpolicy.Subject, error) {
+	var a struct{ Command string }
+	if err := json.Unmarshal(args, &a); err != nil {
+		return nil, err
+	}
+	if strings.Contains(a.Command, "$(") || strings.Contains(a.Command, "`") {
+		return nil, errors.New("a substitution cannot be read")
+	}
+	var out []agentpolicy.Subject
+	for _, part := range strings.FieldsFunc(a.Command, func(r rune) bool { return r == '&' || r == '|' || r == ';' || r == '\n' }) {
+		if part = strings.TrimSpace(part); part != "" {
+			b, _ := json.Marshal(map[string]string{"command": part})
+			out = append(out, agentpolicy.Subject{Args: b, Text: part})
+		}
+	}
+	return out, nil
+}
+
+// matchers are the host's: paths below each child's dir, and commands
+// split by shell.
+var matchers = PolicyMatchers(func(dir string) map[string]agentpolicy.ToolMatcher {
+	return map[string]agentpolicy.ToolMatcher{
+		"read":  {Match: InDir(dir, "path")},
+		"write": {Match: InDir(dir, "path")},
+		"bash":  {Match: agentpolicy.GlobMatcher("command"), Subjects: shell},
+	}
 })
 
-var limited = &Policy{Write: []string{"src/**"}, NoWrite: []string{"src/gen/**"}, NoRead: []string{".env"}, Bash: []string{"go test"}, NoBash: []string{"go test -exec"}}
+func ruleList(list ...string) []PolicyRule {
+	out := []PolicyRule{}
+	for _, r := range list {
+		out = append(out, PolicyRule{Rule: r})
+	}
+	return out
+}
+
+var limited = &Policy{
+	Allow: ruleList("read", "write(src/*)", "bash(go test:*)"),
+	Deny: append(ruleList("read(.env)", "write(.env)", "bash(go test -exec:*)"),
+		PolicyRule{Rule: "write(src/gen/*)", Note: "generated; run go generate"}),
+}
 
 // refusals are the outputs of the calls a step refused.
 func refusals(t agentturn.Transcript) []string {
@@ -217,7 +296,7 @@ func TestAPolicyLimitsAStepsTools(t *testing.T) {
 		{"bash", `{"command":"go test ./..."}`},
 		{finishTool, `{"step":"edit","outcome":"ok"}`},
 	}}
-	a := nestedAgent(t, g, m, touching(&did), subjects)
+	a := nestedAgent(t, g, m, touching(&did), matchers)
 	if end := start(t, a); end.Reason != agentturn.ReasonDone {
 		t.Fatalf("end = %s %v", end.Reason, end.Err)
 	}
@@ -225,23 +304,75 @@ func TestAPolicyLimitsAStepsTools(t *testing.T) {
 		t.Errorf("did %v, want %v", did, want)
 	}
 	got := refusals(a.State().Transcript)
-	for i, want := range []string{`no_write "src/gen/**" of step "edit"`, `no_read ".env"`, `run "git push": not in bash "go test"`,
-		`no_bash "go test -exec"`, "below the workspace's root", "substitution"} {
+	for i, want := range []string{
+		`the policy of step "edit" of edit: denied by write(src/gen/*): generated; run go generate`,
+		`denied by read(.env)`,
+		`no rule allows bash: denied by default`,
+		`denied by bash(go test -exec:*)`,
+		`no rule allows write: denied by default`,
+		`could not be evaluated: a substitution cannot be read`,
+	} {
 		if i >= len(got) || !strings.Contains(got[i], want) {
 			t.Errorf("refusal %d = %q, want %q", i, got[min(i, len(got)-1)], want)
 		}
 	}
-	// The model was told its limits before it tried.
-	if !strings.Contains(m.requests[0].Instructions, "Your tools are limited") || !strings.Contains(m.requests[0].Instructions, `not write "src/gen/**"`) {
-		t.Errorf("instructions = %s", m.requests[0].Instructions)
+	if len(got) != 6 {
+		t.Errorf("refusals = %q", got)
 	}
-	// A tool the policy cannot see is refused at load.
-	if _, err := Apply(g, agentturn.Config{Model: m, ModelName: "fake", Tools: touching(&did)}); err == nil || !strings.Contains(err.Error(), "cannot see what read touches") {
+	// The model was told its limits before it tried, notes and all.
+	if in := m.requests[0].Instructions; !strings.Contains(in, "Your tools are limited") ||
+		!strings.Contains(in, `only calls matching read, write(src/*), bash(go test:*)`) || !strings.Contains(in, "write(src/gen/*) (generated; run go generate)") {
+		t.Errorf("instructions = %s", in)
+	}
+
+	// What agentpolicy cannot read is a load error: a specifier for a tool
+	// the host gave no matcher, a rule for a tool the step does not offer,
+	// and a rule that is not one.
+	if _, err := Apply(g, agentturn.Config{Model: m, ModelName: "fake", Tools: touching(&did)}); err == nil || !strings.Contains(err.Error(), "no matcher") {
 		t.Errorf("err = %v", err)
 	}
-	g.Nodes[0].Policy = &Policy{NoRead: []string{"/etc/**"}}
-	if err := g.Validate(); err == nil || !strings.Contains(err.Error(), "below the workspace's root") {
-		t.Errorf("err = %v", err)
+	for policy, want := range map[*Policy]string{
+		{Deny: ruleList("fetch")}:      "the step offers no tool fetch",
+		{Deny: ruleList("bash(")}:      `rule "bash("`,
+		{Deny: ruleList("read write")}: "want one rule to an entry",
+		{Allow: []PolicyRule{}}:        "allows nothing",
+	} {
+		g.Nodes[0].Policy = policy
+		if err := g.Validate(); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%+v: err = %v, want %q", policy, err, want)
+		}
+	}
+}
+
+func TestAPolicyOnlyNarrowsTheHosts(t *testing.T) {
+	// The step allows any write below src; the host refuses one of them.
+	// The host's refusal stands: a workflow cannot allow what the host
+	// does not.
+	g := &Graph{Name: "edit", Nodes: []Node{
+		{ID: "edit", Kind: Agent, Prompt: "Edit.", Tools: []string{"write"}, Policy: &Policy{Allow: ruleList("write(src/*)")}},
+	}}
+	var did []string
+	m := &cast{script: []says{
+		{"write", `{"path":"src/locked.go"}`},
+		{"write", `{"path":"src/a.go"}`},
+		{finishTool, `{"step":"edit","outcome":"ok"}`},
+	}}
+	host := func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
+		if strings.Contains(string(info.Args), "locked") {
+			return &agentturn.ToolDecision{Action: agentturn.Block, Reason: "host: locked"}, nil
+		}
+		return nil, nil
+	}
+	cfg, err := Apply(g, agentturn.Config{Model: m, ModelName: "fake", Tools: touching(&did), BeforeToolCall: host}, matchers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := agentturn.New(cfg)
+	if end := start(t, a); end.Reason != agentturn.ReasonDone {
+		t.Fatalf("end = %s %v", end.Reason, end.Err)
+	}
+	if want := []string{`write {"path":"src/a.go"}`}; !slices.Equal(did, want) {
+		t.Errorf("did %v, want %v", did, want)
 	}
 }
 
@@ -249,19 +380,20 @@ func TestACallsPolicyHoldsWhatItCalls(t *testing.T) {
 	inner := &Graph{Name: "inner", Nodes: []Node{
 		{ID: "edit", Kind: Agent, Prompt: "Edit.", Tools: []string{"write"}},
 	}}
-	// In the current context, and in a child.
-	for _, where := range []string{"", ContextFresh} {
-		t.Run("context "+where, func(t *testing.T) {
+	// In the current context, in a child, and in a child at a dir, where
+	// the rule is still read below the workspace's root.
+	for _, c := range []struct{ where, dir, path string }{{"", "", "secret/key"}, {ContextFresh, "", "secret/key"}, {ContextFresh, "secret", "key"}} {
+		t.Run("context "+c.where+" dir "+c.dir, func(t *testing.T) {
 			g := linked(t, &Graph{Name: "outer", Nodes: []Node{
-				{ID: "call", Kind: Run, Flow: "inner", Context: where, Policy: &Policy{NoWrite: []string{"secret/**"}}},
+				{ID: "call", Kind: Run, Flow: "inner", Context: c.where, Dir: c.dir, Policy: &Policy{Deny: ruleList("write(secret/*)")}},
 			}}, inner)
 			var did []string
 			m := &cast{script: []says{
-				{"write", `{"path":"secret/key"}`},
+				{"write", `{"path":"` + c.path + `"}`},
 				{finishTool, `{"step":"edit","outcome":"ok"}`},
 			}}
 			kids := newKin(m, "fake", touching(&did)...)
-			cfg, err := Apply(g, agentturn.Config{Model: m, ModelName: "fake", Tools: touching(&did)}, subjects, kids.option())
+			cfg, err := Apply(g, agentturn.Config{Model: m, ModelName: "fake", Tools: touching(&did)}, matchers, kids.option())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -275,7 +407,7 @@ func TestACallsPolicyHoldsWhatItCalls(t *testing.T) {
 				refused = append(refused, refusals(child.State().Transcript)...)
 			}
 			refused = append(refused, refusals(a.State().Transcript)...)
-			if len(refused) != 1 || !strings.Contains(refused[0], `no_write "secret/**" of step "call" of outer`) {
+			if len(refused) != 1 || !strings.Contains(refused[0], `the policy of step "call" of outer: denied by write(secret/*)`) {
 				t.Errorf("refused = %v", refused)
 			}
 		})
@@ -402,6 +534,22 @@ func TestARepeatingScriptStopsItsLoop(t *testing.T) {
 	ran = 0
 	a = nestedAgent(t, g, &fakeModel{outcomes: slices.Repeat([]string{OK}, 10)}, []agenttool.Tool{constant(&ran)}, Unattended())
 	if end := run(a); !errors.Is(end.Err, ErrRepeat) || ran != 3 {
+		t.Fatalf("end = %+v, ran %d", end, ran)
+	}
+}
+
+func TestAResultWithNoDataDoesNotRepeat(t *testing.T) {
+	// A poll that says only "not yet" has nothing to compare: the visit
+	// bound holds its loop, and the repeat rule does not.
+	g := lintLoop()
+	g.Nodes[0].MaxVisits, g.Nodes[1].MaxVisits = 5, 5
+	var ran int
+	poll := agenttool.New("lint", "Poll.", func(context.Context, struct{}) (Result, error) {
+		ran++
+		return Result{Outcome: "fail"}, nil
+	})
+	a := nestedAgent(t, g, &fakeModel{outcomes: slices.Repeat([]string{OK}, 10)}, []agenttool.Tool{poll}, Unattended())
+	if end := run(a); !errors.Is(end.Err, ErrVisits) || errors.Is(end.Err, ErrRepeat) || ran != 5 {
 		t.Fatalf("end = %+v, ran %d", end, ran)
 	}
 }

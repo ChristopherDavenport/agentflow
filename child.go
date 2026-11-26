@@ -80,7 +80,7 @@ func (c Child) Apply(cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 	}
 	p := c.parent
 	f := &flow{g: c.g, maxDepth: p.maxDepth, maxSteps: p.maxSteps, unattended: p.unattended, reply: p.reply, delegations: p.delegations,
-		modes: p.modes, judgeName: p.judgeName, children: p.children, models: p.models, idle: p.idle, subjects: p.subjects}
+		modes: p.modes, judgeName: p.judgeName, children: p.children, models: p.models, idle: p.idle, matchers: p.matchers, policyOpts: p.policyOpts}
 	own := c
 	f.child = &own
 	for _, opt := range opts {
@@ -237,8 +237,10 @@ func (f *flow) settle(ctx context.Context, st State, p agentturn.PendingCall, a 
 		ans, err := letGo(st, p, a, *done, readErr)
 		return ans, nil, st, err
 	case c.Judge && errors.Is(err, ErrStalled):
-		// A judge that will not give a verdict has given none.
-		ans, err := letGo(st, p, a, State{}, err)
+		// A judge that will not give a verdict has given none, and its look
+		// still counts.
+		looked, _, _ := cf.read(cctx, child.State().Transcript)
+		ans, err := letGo(st, p, a, State{Entries: looked.Entries, Granted: looked.Granted}, err)
 		return ans, nil, st, err
 	case err != nil:
 		return nil, end, cst, err
@@ -292,10 +294,9 @@ func letGo(st State, p agentturn.PendingCall, a callArgs, done State, failed err
 			a.Result = &r
 		}
 	}
-	// What the child's runs spent counts toward the caller's tree.
-	if a.Result != nil {
-		a.Result.Entries, a.Result.Granted = done.Entries, done.Granted
-	}
+	// What the child's runs spent counts toward the caller's tree, however
+	// they came out: a failed child's steps and a judge's look included.
+	a.Entries, a.Granted = done.Entries, done.Granted
 	args, err := json.Marshal(a)
 	if err != nil {
 		return nil, err

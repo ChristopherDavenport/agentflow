@@ -182,7 +182,7 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 	set("model", n.Model != "", n.Model)
 	set("thinking", n.Thinking != "", n.Thinking)
 	set("timeout", n.Timeout != 0, n.Timeout.String())
-	set("policy", n.Policy != nil, n.Policy)
+	set("policy", n.Policy != nil, policyOut(n.Policy))
 	set("instructions", n.InstructionsFile != "", n.InstructionsFile)
 	set("child", n.Child != "", n.Child)
 	set("outcomes", n.Outcomes != nil, n.Outcomes)
@@ -209,7 +209,7 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 			judge["max_returns"] = j.Returns
 		}
 		if j.Policy != nil {
-			judge["policy"] = j.Policy
+			judge["policy"] = policyOut(j.Policy)
 		}
 		set("judge", true, judge)
 	}
@@ -267,4 +267,31 @@ func field(s *agenttool.Schema, required bool) *yaml.Node {
 		m.add("properties", fields(s))
 	}
 	return &m.Node
+}
+
+// policyOut is a policy as a section writes it: a rule alone where it
+// has no note.
+func policyOut(p *agentflow.Policy) map[string]any {
+	if p == nil {
+		return nil
+	}
+	list := func(rules []agentflow.PolicyRule) []any {
+		out := []any{}
+		for _, r := range rules {
+			if r.Note == "" {
+				out = append(out, r.Rule)
+			} else {
+				out = append(out, map[string]any{"rule": r.Rule, "note": r.Note})
+			}
+		}
+		return out
+	}
+	out := map[string]any{}
+	if p.Allow != nil {
+		out["allow"] = list(p.Allow)
+	}
+	if p.Deny != nil {
+		out["deny"] = list(p.Deny)
+	}
+	return out
 }

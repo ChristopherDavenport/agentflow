@@ -11,7 +11,7 @@ build:
 deps:
 	@deps=$$($(GO) list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./... \
 	  | grep -v '^go.yaml.in/yaml/v3$$' \
-	  | grep -Ev '^github.com/ChristopherDavenport/(agentflow|agentskill|agenttool|agentturn|agentworkspace|openresponses)(/|$$)' || true); \
+	  | grep -Ev '^github.com/ChristopherDavenport/(agentflow|agentpolicy|agentskill|agenttool|agentturn|agentworkspace|openresponses)(/|$$)' || true); \
 	  test -z "$$deps" || { echo "module depends on: $$deps"; exit 1; }
 
 test:

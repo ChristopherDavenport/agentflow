@@ -43,6 +43,30 @@ type callArgs struct {
 	Result  *Result  `json:"result,omitempty"`
 	Failure string   `json:"failure,omitempty"`
 	Verdict *Verdict `json:"verdict,omitempty"`
+	// Entries and Granted are what the child's runs spent of the tree's
+	// steps, and what a person granted there, whatever came of it.
+	Entries int `json:"entries,omitempty"`
+	Granted int `json:"granted,omitempty"`
+}
+
+// callFailure is the output of a child's call that failed: the failure,
+// and what the child spent, so its caller counts the steps a failed child
+// entered. It is no [Result], so the step has failed.
+type callFailure struct {
+	Failure string `json:"failure"`
+	Entries int    `json:"entries,omitempty"`
+	Granted int    `json:"granted,omitempty"`
+}
+
+// spent reads what the output of a child's call says the child spent:
+// its result, its failure and its verdict carry it alike.
+func spent(output string) (entries, granted int) {
+	var s struct {
+		Entries int `json:"entries"`
+		Granted int `json:"granted"`
+	}
+	_ = decode([]byte(output), &s)
+	return s.Entries, s.Granted
 }
 
 // skillOf is the skill a workflow's name says it is of.
@@ -221,26 +245,30 @@ func (f *flow) current(ctx context.Context) (State, error) {
 // record: its outcome and outputs, or the outcome failed where the step
 // routes on it. A failure it does not route on fails the step.
 func (f *flow) callTool() agenttool.Tool {
-	return agenttool.New(callTool, "Return what a workflow a step called came to.", func(ctx context.Context, a callArgs) (Result, error) {
+	return agenttool.New(callTool, "Return what a workflow a step called came to.", func(ctx context.Context, a callArgs) (any, error) {
 		if err := exact(ctx, &a); err != nil {
-			return Result{}, err
+			return nil, err
 		}
 		st, err := f.current(ctx)
 		if err != nil {
-			return Result{}, err
+			return nil, err
 		}
 		if a.Context == ContextFresh {
 			switch {
 			case a.Failure != "":
-				return Result{}, errors.New(a.Failure)
+				// The failure says what the child spent, which an error
+				// could not carry.
+				return callFailure{Failure: a.Failure, Entries: a.Entries, Granted: a.Granted}, nil
 			case a.Result == nil:
-				return Result{}, fmt.Errorf("agentflow: run %q has not ended", a.Run)
+				return nil, fmt.Errorf("agentflow: run %q has not ended", a.Run)
 			}
-			return *a.Result, nil
+			r := *a.Result
+			r.Entries, r.Granted = a.Entries, a.Granted
+			return r, nil
 		}
 		e := st.Returned
 		if st.Node == nil || st.Node.Flow == "" || e == nil || e.Instance != a.Run {
-			return Result{}, fmt.Errorf("agentflow: run %q has not ended", a.Run)
+			return nil, fmt.Errorf("agentflow: run %q has not ended", a.Run)
 		}
 		return returned(st.Node, a.Workflow, e)
 	}, agenttool.WithReplay(safeReplay))

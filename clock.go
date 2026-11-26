@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -143,36 +142,4 @@ func (f *flow) stuckTool() agenttool.Tool {
 		}
 		return Result{Outcome: Stuck, Data: map[string]any{"reason": a.Reason}, Reason: a.Reason}, nil
 	})
-}
-
-// policed holds a step under a policy to tools the policy can see: each
-// must have its subjects named with [ToolSubjects], or be a tool of cfg
-// that claims its facts.
-func (f *flow) policed(g *Graph, n *Node, tools []agenttool.Tool) error {
-	var names []string
-	switch {
-	case n.Kind == Agent && (!n.Policy.empty() || f.child != nil && len(f.child.policies) > 0):
-		names = n.Tools
-	case n.Judge != nil && (!n.Judge.Policy.empty() || f.child != nil && len(f.child.policies) > 0):
-		names = n.Judge.Tools
-	case n.Flow != "" && !n.Policy.empty() && g.Callees[n.Flow] != nil:
-		for _, x := range g.Callees[n.Flow].closure() {
-			for _, m := range x.Nodes {
-				names = append(names, m.Tools...)
-				if m.Judge != nil {
-					names = append(names, m.Judge.Tools...)
-				}
-			}
-		}
-	}
-	for _, name := range names {
-		if _, ok := f.subjects[name]; ok {
-			continue
-		}
-		if k := slices.IndexFunc(tools, func(t agenttool.Tool) bool { return t.Name() == name }); k >= 0 && agenttool.IsFactual(tools[k]) {
-			continue
-		}
-		return fmt.Errorf("agentflow: %s: step %q is under a policy that cannot see what %s touches: name its subjects with ToolSubjects", g.Name, n.ID, name)
-	}
-	return nil
 }

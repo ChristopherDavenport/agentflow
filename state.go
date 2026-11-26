@@ -643,6 +643,10 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 		if out.CallID != st.judgeID() || n.Kind != Person {
 			return
 		}
+		// The judge's look is steps of this tree.
+		entries, granted := spent(out.Output.String())
+		r.entries += entries
+		r.granted += granted
 		v, ok := verdictOf(n, out)
 		switch {
 		case st.Held != nil:
@@ -696,16 +700,21 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 			return
 		}
 		if n.fresh() {
-			// What the child's runs spent counts toward this tree, and a
-			// bound across the tree it failed on fails this run.
-			var spent Result
-			if decode([]byte(out.Output.String()), &spent) == nil {
-				r.entries += spent.Entries
-				r.granted += spent.Granted
-				if spent.Limit != "" {
-					f.failed, st.limit = &limitError{limits[spent.Limit], spent.Reason}, spent.Limit
-					return
-				}
+			// What the child's runs spent counts toward this tree, however
+			// it came out, and a bound across the tree it failed on fails
+			// this run.
+			entries, granted := spent(out.Output.String())
+			r.entries += entries
+			r.granted += granted
+			var said Result
+			if decode([]byte(out.Output.String()), &said) == nil && said.Limit != "" {
+				f.failed, st.limit = &limitError{limits[said.Limit], said.Reason}, said.Limit
+				return
+			}
+			var failed callFailure
+			if decode([]byte(out.Output.String()), &failed) == nil && failed.Failure != "" {
+				st.Failure = failed.Failure
+				return
 			}
 		}
 		if invalid != nil {
@@ -893,8 +902,10 @@ func (r *replay) finish(f *frame, i int, step Step) {
 		return
 	}
 	// A program step that keeps giving the same result is on a loop that
-	// is not getting anywhere, which is asked about before going on.
-	if n.Kind == Run && n.Flow == "" && repeated(st.Steps, n.ID) >= RepeatLimit+f.repeats[n.ID] {
+	// is not getting anywhere, which is asked about before going on. A
+	// result with no data says nothing to compare, a poll's "not yet" say,
+	// so only the visit bound holds such a loop.
+	if n.Kind == Run && n.Flow == "" && step.Result.Data != nil && repeated(st.Steps, n.ID) >= RepeatLimit+f.repeats[n.ID] {
 		f.repeating = n.ID
 	}
 	f.came = fmt.Sprintf("%q came back to it on %q", n.ID, step.Result.Outcome)

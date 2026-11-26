@@ -315,7 +315,19 @@ func (f *flow) judgeTool() agenttool.Tool {
 		if err != nil {
 			return agenttool.Result{}, err
 		}
-		b, err := json.Marshal(v)
+		var out any = v
+		if strings.HasPrefix(call.ID, reserved) {
+			// The program's call says what the judge's look spent of the
+			// tree's steps, which the caller counts.
+			var p callArgs
+			_ = decode(call.Args, &p)
+			out = struct {
+				Verdict
+				Entries int `json:"entries,omitempty"`
+				Granted int `json:"granted,omitempty"`
+			}{v, p.Entries, p.Granted}
+		}
+		b, err := json.Marshal(out)
 		if err != nil {
 			return agenttool.Result{}, err
 		}

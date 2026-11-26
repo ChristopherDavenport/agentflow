@@ -18,7 +18,7 @@ func (n *Node) checkChild() []error {
 	bad := func(format string, args ...any) {
 		errs = append(errs, fmt.Errorf("agentflow: node %q: "+format, append([]any{n.ID}, args...)...))
 	}
-	if n.Context != ContextFresh {
+	if !n.fresh() {
 		for _, s := range []struct {
 			key string
 			set bool
@@ -72,8 +72,14 @@ func (n *Node) checkSettings() []error {
 	case n.Policy != nil && n.Kind != Agent && !call:
 		bad("a policy is a model step's, or a call's for what it calls")
 	case n.Policy != nil:
-		if err := n.Policy.check(); err != nil {
+		// A call's policy covers steps whose tools are their own.
+		if err := n.Policy.check(n.Tools, !call); err != nil {
 			bad("policy: %v", err)
+		}
+	}
+	if j := n.Judge; j != nil && j.Policy != nil {
+		if err := j.Policy.check(j.Tools, true); err != nil {
+			bad("judge: policy: %v", err)
 		}
 	}
 	if slices.Contains(n.Outcomes, Stuck) || n.Data[Stuck] != nil {
@@ -107,8 +113,13 @@ func (g *Graph) checkKept() []error {
 	return errs
 }
 
-// fresh says the node's work runs in a child.
-func (n *Node) fresh() bool { return n.Context == ContextFresh }
+// fresh says the node's work runs in a child: it says context fresh, or
+// it is a model step that asks for another model than its workflow's and
+// does not say context session. The other model would otherwise read a
+// conversation another model wrote, without that model's reasoning.
+func (n *Node) fresh() bool {
+	return n.Context == ContextFresh || n.Context == "" && n.otherModel
+}
 
 // inputsOf is the inputs schema and the with of a workflow made from n,
 // which reads n's inputs as its own.
@@ -134,7 +145,9 @@ func (g *Graph) stepGraph(n *Node) *Graph {
 	step := Node{ID: n.ID, Kind: Agent, Prompt: n.Prompt, Tools: n.Tools, Outcomes: n.Outcomes, Data: n.Data, With: with,
 		Model: cmp.Or(n.Model, g.Model), Thinking: cmp.Or(n.Thinking, g.Thinking), Timeout: n.Timeout, Policy: n.Policy,
 		Ends: map[string]string{Stuck: Stuck}}
-	return &Graph{Name: g.Name + ":" + n.ID, Nodes: []Node{step}, Inputs: inputs, Sources: g.Sources}
+	// The step's model is its workflow's, so the step reads its own
+	// child's conversation rather than opening another.
+	return &Graph{Name: g.Name + ":" + n.ID, Nodes: []Node{step}, Inputs: inputs, Sources: g.Sources, Model: step.Model}
 }
 
 // judgeGraph is the workflow a judge of n runs in its child: a model step
