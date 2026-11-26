@@ -48,6 +48,11 @@ func Drive(ctx context.Context, g *Graph, a *agentturn.Agent, end *agentturn.Run
 			call = judgeTool
 		}
 		nudge := fmt.Sprintf("%s Text is not read. Do the step %q, then call %s.", nudgePrefix, st.Node.ID, call)
+		// A judge nobody is waiting on is not reminded: the person has
+		// answered, and the workflow goes on.
+		if st.Held != nil {
+			nudge = noVerdict
+		}
 		from := agentturn.ContextWithTrigger(ctx, agentturn.Trigger{Kind: TriggerKind, Ref: g.Name})
 		next, err := a.Prompt(from, openresponses.UserText(nudge))
 		if next == nil {

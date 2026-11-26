@@ -222,7 +222,7 @@ func TestOneTurnCannotFinishTheNextStep(t *testing.T) {
 		t.Errorf("model turns = %d, want 2", m.turns)
 	}
 	// Replay holds the rule without the gate, for a record made elsewhere.
-	begin, _ := json.Marshal(startPayload{Workflow: g.Name, Digest: g.Digest()})
+	begin, _ := json.Marshal(startPayload{Workflow: g.Name, Digest: g.Digest(), Format: RecordFormat})
 	forged := agentturn.Transcript{
 		&openresponses.FunctionCall{CallID: g.startID("i"), Name: startTool, Arguments: string(begin)},
 		&openresponses.FunctionCallOutput{CallID: g.startID("i"), Output: openresponses.FunctionCallOutputData{Text: `{"outcome":"ok"}`}},

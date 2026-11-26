@@ -280,6 +280,17 @@ func (g *Graph) Validate() error {
 	return errors.Join(errs...)
 }
 
+// version names one node's definition: its question, inputs, outcomes,
+// form, judge and edges.
+func (n *Node) version() string {
+	b, err := json.Marshal(n)
+	if err != nil {
+		panic(err) // As in [Graph.Digest].
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8])
+}
+
 // Digest names the definition. A transcript holds the digest its
 // instance started with, so a changed graph does not resume it.
 func (g *Graph) Digest() string {

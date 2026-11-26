@@ -35,15 +35,33 @@ const DefaultReturns = 2
 // Mode is how far a host lets a model answer for a person.
 type Mode int
 
+// The modes are in the order trust is likely to grow.
 const (
+	// Shadow has the model judge after the person has answered, so the
+	// answer owes it nothing: the person never sees the verdict first and
+	// no later step reads it. It is how agreement is measured honestly.
+	Shadow Mode = iota + 1
 	// Advise has the model answer first, for the person to see beside
 	// the question. The person decides, and the record holds both, so
 	// how often they agree can be counted before going further.
-	Advise Mode = iota + 1
+	Advise
 	// Decide has the model's answer stand, unless it hands the question
 	// back to the person.
 	Decide
 )
+
+// String is the mode as a question records it.
+func (m Mode) String() string {
+	switch m {
+	case Shadow:
+		return "shadow"
+	case Advise:
+		return "advise"
+	case Decide:
+		return "decide"
+	}
+	return ""
+}
 
 // HandBack is what a judge answers to leave a question to the person. No
 // judged node may declare it as an outcome.
@@ -91,7 +109,7 @@ type delegation struct {
 func (f *flow) delegate() error {
 	f.modes = map[string]Mode{}
 	for _, d := range f.delegations {
-		if d.mode != Advise && d.mode != Decide {
+		if d.mode < Shadow || d.mode > Decide {
 			return fmt.Errorf("agentflow: delegate: unknown mode %d", d.mode)
 		}
 		steps := d.steps
@@ -161,11 +179,22 @@ func (g *Graph) spent(st State, v Verdict) bool {
 	return g.returns(n, v.Outcome) && g.sentBack(st, n) >= limit
 }
 
+// wants says a judge's request should be opened for the current node: in
+// shadow only once a person's answer is held.
+func (f *flow) wants(st State) bool {
+	n := st.Node
+	if n == nil || n.Kind != Person || n.Judge == nil || st.Failure != "" || st.Advice != nil {
+		return false
+	}
+	// An answer already held was asked to be judged, whatever the host
+	// says now.
+	return st.Held != nil || f.modes[n.ID] == Advise || f.modes[n.ID] == Decide
+}
+
 // judging says a judge takes the next turn: its request has been opened
 // and has no verdict.
 func (f *flow) judging(st State) bool {
-	n := st.Node
-	return n != nil && n.Kind == Person && st.Failure == "" && f.modes[n.ID] != 0 && st.Begun && st.Advice == nil
+	return f.wants(st) && st.Begun
 }
 
 func (f *flow) judgeInstructions(st State) (string, error) {

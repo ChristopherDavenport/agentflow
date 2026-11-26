@@ -149,8 +149,8 @@ func checkRecord(t *testing.T, store *jsonl.Store, id string) {
 		hashes++
 	}
 	const p, f = "agentflow/pr", "fake"
-	// start, gather, review, triage | fix, gather, review, report, summary
-	want := []string{p, p, f, p, f, p, f, p, p}
+	// start, gather, review, triage | fix, gather, review, report, end, summary
+	want := []string{p, p, f, p, f, p, f, p, p, p}
 	if !slices.Equal(models, want) {
 		t.Errorf("models = %v, want %v", models, want)
 	}

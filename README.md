@@ -50,6 +50,18 @@ A person step that declares a `judge` can be handed to a model, as far as
 the host says:
 
 ```go
+// Why you chose is kept with your answer.
+answer, err := graph.Answer(pending, agentflow.Result{Outcome: "go", Reason: "smallest fix"})
+
+agentflow.Apply(graph, cfg, agentflow.Delegate(agentflow.Shadow))           // you decide; it judges afterwards, unseen
 agentflow.Apply(graph, cfg, agentflow.Delegate(agentflow.Advise))           // you decide, with its advice
 agentflow.Apply(graph, cfg, agentflow.Delegate(agentflow.Decide, "approve")) // it decides that step
+```
+
+A session says which runs it holds and how each ended, whatever the
+workflow has become since:
+
+```go
+runs, err := agentflow.Instances(transcript)
+state, err := runs[0].At(transcript, i) // where it stood after item i
 ```

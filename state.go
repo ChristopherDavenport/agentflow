@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -19,6 +20,7 @@ const (
 	askTool    = "flow_ask"
 	finishTool = "flow_finish"
 	judgeTool  = "flow_judge"
+	endTool    = "flow_end"
 
 	// The outcomes of the question a failed step raises.
 	retryOutcome = "retry"
@@ -26,6 +28,7 @@ const (
 
 	invocationPrefix = "agentflow: start "
 	nudgePrefix      = "agentflow: the step is not finished."
+	noVerdict        = "agentflow: no verdict is coming."
 	beginPrefix      = "agentflow: begin step "
 )
 
@@ -48,6 +51,9 @@ type Result struct {
 	Data    any    `json:"data,omitempty"`
 	// By says who chose, when it was not whoever the node names.
 	By string `json:"by,omitempty"`
+	// Reason is why, in the words of whoever chose. It is for whoever
+	// reads the record: no step reads it as data.
+	Reason string `json:"reason,omitempty"`
 }
 
 // Step is one finished node.
@@ -57,6 +63,9 @@ type Step struct {
 	Result Result
 	// Advice is what a judge said of this question, if one was asked.
 	Advice *Verdict
+	// Blind says whoever answered could not have seen Advice, which was
+	// asked for afterwards.
+	Blind bool
 }
 
 // State is where a workflow stands.
@@ -84,6 +93,21 @@ type State struct {
 	Begun bool
 	// Advice is the judge's verdict on the question now being asked.
 	Advice *Verdict
+	// Held is a person's answer waiting for a judge to give its verdict
+	// unseen, before the step finishes with it.
+	Held *Result
+	// Ended says flow_end has written down how this instance finished.
+	Ended bool
+	// abandoned is an earlier instance another was asked for over, with
+	// nothing yet written of its end.
+	abandoned *Ending
+	// refused counts a judge's refused verdicts while an answer is held,
+	// and talked says it replied in words.
+	refused int
+	talked  bool
+	// unseen are the stretches of the transcript, ends included, where a
+	// judge looked after a person had answered.
+	unseen [][2]int
 	// Steps are the finished nodes, oldest first.
 	Steps []Step
 }
@@ -93,6 +117,10 @@ type startPayload struct {
 	Workflow string `json:"workflow"`
 	Digest   string `json:"digest"`
 	Inputs   any    `json:"inputs,omitempty"`
+	Format   int    `json:"format"`
+	// Definition is the graph itself, so the transcript says what ran
+	// after the workflow has changed. The model is never shown it.
+	Definition any `json:"definition,omitempty"`
 }
 
 // Invocation is the item that asks for a new instance, carrying its
@@ -164,32 +192,98 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 		at     = map[string]int{}
 		since  = -1
 		digest = g.Digest()
+		// unseen outlives an instance: a later one's model reads the
+		// same transcript.
+		unseen [][2]int
 	)
+	// finish ends the current node with step, at item i.
+	finish := func(i int, step Step) {
+		n := st.Node
+		step.Node, step.Visit = n.ID, st.Visit
+		st.Steps = append(st.Steps, step)
+		since, st.Nudges, st.Begun, st.Advice, st.Held, st.refused, st.talked = i, 0, false, nil, nil, 0, false
+		next := n.Next[step.Result.Outcome]
+		if next == "" {
+			st.Node, st.Visit, st.Attempt, st.Done = nil, 0, 0, true
+			var err error
+			if st.Outputs, err = st.resolveAll(g.Outputs); err != nil {
+				failed = fmt.Errorf("agentflow: outputs: %w", err)
+			}
+			return
+		}
+		st.Node = g.node(next)
+		visits[next]++
+		st.Visit, st.Attempt = visits[next], 1
+		if bound := g.visits(st.Node); st.Visit > bound {
+			from := "its max_visits"
+			if st.Node.MaxVisits == 0 {
+				from = "the default for a step on a loop"
+			}
+			failed = fmt.Errorf("%w: step %q of workflow %q has run %d times, %s, and %q came back to it on %q; set max_visits for the step to change it",
+				ErrVisits, next, g.Name, bound, from, n.ID, step.Result.Outcome)
+		}
+	}
+	// release ends a held answer's step, with the verdict if one came.
+	release := func(i int, advice *Verdict) {
+		unseen = append(unseen, [2]int{since + 1, i})
+		finish(i, Step{Result: *st.Held, Advice: advice, Blind: true})
+	}
 	for i, item := range t {
 		switch it := item.(type) {
 		case *openresponses.Message:
 			if it.Role == openresponses.RoleDeveloper {
 				if inputs, ok := g.invoked(it.Text()); ok {
-					st, failed, visits = State{Inputs: inputs}, nil, map[string]int{}
+					if st.Held != nil {
+						unseen = append(unseen, [2]int{since + 1, i - 1})
+					}
+					left := st.abandoned
+					if st.Started && !st.Ended {
+						left = ending(st, failed)
+					}
+					st, failed, visits = State{Inputs: inputs, abandoned: left}, nil, map[string]int{}
 					continue
 				}
 			}
 			switch {
+			// A judge that replied in words is waited on no longer: the
+			// next thing said, the driver's or the person's, moves on.
+			case st.Held != nil && it.Role == openresponses.RoleUser && (st.talked || strings.HasPrefix(it.Text(), noVerdict)):
+				release(i, nil)
+			case st.Held != nil && st.Begun && it.Role == openresponses.RoleAssistant:
+				st.talked = true
 			case it.Role == openresponses.RoleUser && strings.HasPrefix(it.Text(), nudgePrefix):
 				st.Nudges++
 			case st.Node != nil && opens(it, st.Node):
 				st.Begun = true
-			case it.Role == openresponses.RoleAssistant && st.Done:
+			case it.Role == openresponses.RoleAssistant && st.Done && st.Ended:
 				st.Reported = true
 			}
 		case *openresponses.FunctionCall:
 			calls[it.CallID] = it
 			at[it.CallID] = i
 		case *openresponses.FunctionCallOutput:
+			c := calls[it.CallID]
+			// An ending counts however the call went: it is what was
+			// found, and asking again would not make it more so.
+			if c != nil && c.Name == endTool {
+				var e Ending
+				_ = decode([]byte(c.Arguments), &e)
+				switch {
+				case st.abandoned != nil && it.CallID == g.endID(st.abandoned.Instance):
+					st.abandoned = nil
+				case st.Started && it.CallID == g.endID(st.Instance):
+					st.Ended = true
+					// A step that failed with nobody to ask is over only
+					// by saying so.
+					if e.Status == Failed && failed == nil {
+						failed = fmt.Errorf("%w: %s", ErrStepFailed, e.Reason)
+					}
+				}
+				continue
+			}
 			if failed != nil || st.Done {
 				continue
 			}
-			c := calls[it.CallID]
 			if !st.Started {
 				var p startPayload
 				if c == nil || c.Name != startTool || decode([]byte(c.Arguments), &p) != nil || p.Workflow != g.Name {
@@ -199,11 +293,11 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 				switch {
 				case json.Unmarshal([]byte(it.Output.String()), &res) != nil || res.Outcome != OK:
 					failed = fmt.Errorf("%w: start: %s", ErrStepFailed, it.Output.String())
-				case p.Digest != digest:
+				case p.Digest != digest || p.Format != RecordFormat:
 					failed = ErrChanged
 				default:
 					instance := strings.TrimSuffix(strings.TrimPrefix(it.CallID, g.idPrefix()), "_start")
-					st = State{Started: true, Instance: instance, Inputs: p.Inputs, Node: &g.Nodes[0], Visit: 1, Attempt: 1}
+					st = State{Started: true, Instance: instance, Inputs: p.Inputs, Node: &g.Nodes[0], Visit: 1, Attempt: 1, abandoned: st.abandoned}
 					visits[st.Node.ID], since = 1, i
 				}
 				continue
@@ -223,12 +317,22 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 					failed = fmt.Errorf("%w: %s: %s", ErrStepFailed, n.ID, st.Failure)
 				}
 				continue
+			case st.Held != nil:
+				// Nothing but a verdict, or two failures to give one,
+				// moves a held answer on.
+				if c == nil || c.Name != judgeTool || at[it.CallID] <= since {
+					continue
+				}
+				if v, ok := verdictOf(n, c, it); ok && st.Begun {
+					release(i, &v)
+				} else if st.refused++; st.refused >= 2 {
+					release(i, nil)
+				}
+				continue
 			case n.Kind == Person && c != nil && c.Name == judgeTool:
 				// A verdict advises; the question's own answer finishes
 				// the step. The first one given for this visit counts.
-				var v Verdict
-				if st.Advice == nil && st.Begun && at[it.CallID] > since && finishStep(c.Arguments) == n.ID &&
-					decode([]byte(it.Output.String()), &v) == nil && (v.Outcome == HandBack || n.Judge != nil && n.judged(v) == nil) {
+				if v, ok := verdictOf(n, c, it); ok && st.Advice == nil && st.Begun && at[it.CallID] > since {
 					st.Advice = &v
 				}
 				continue
@@ -250,30 +354,54 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 					continue
 				}
 			}
-			st.Steps = append(st.Steps, Step{Node: n.ID, Visit: st.Visit, Result: res, Advice: st.Advice})
-			since, st.Nudges, st.Begun, st.Advice = i, 0, false, nil
-			next := n.Next[res.Outcome]
-			if next == "" {
-				st.Node, st.Visit, st.Attempt, st.Done = nil, 0, 0, true
-				if st.Outputs, invalid = st.resolveAll(g.Outputs); invalid != nil {
-					failed = fmt.Errorf("agentflow: outputs: %w", invalid)
-				}
+			// A person's answer to a question judged unseen waits for
+			// the judge. An answer from anything else does not.
+			if n.Kind == Person && res.By == "" && askedUnseen(c) {
+				since, st.Nudges, st.Begun, st.Held = i, 0, false, &res
 				continue
 			}
-			st.Node = g.node(next)
-			visits[next]++
-			st.Visit, st.Attempt = visits[next], 1
-			if bound := g.visits(st.Node); st.Visit > bound {
-				from := "its max_visits"
-				if st.Node.MaxVisits == 0 {
-					from = "the default for a step on a loop"
-				}
-				failed = fmt.Errorf("%w: step %q of workflow %q has run %d times, %s, and %q came back to it on %q; set max_visits for the step to change it",
-					ErrVisits, next, g.Name, bound, from, n.ID, res.Outcome)
-			}
+			finish(i, Step{Result: res, Advice: st.Advice})
 		}
 	}
+	st.unseen = unseen
 	return st, failed
+}
+
+// verdictOf reads the verdict a flow_judge call on n produced.
+func verdictOf(n *Node, c *openresponses.FunctionCall, out *openresponses.FunctionCallOutput) (v Verdict, ok bool) {
+	ok = finishStep(c.Arguments) == n.ID && decode([]byte(out.Output.String()), &v) == nil &&
+		(v.Outcome == HandBack || n.Judge != nil && n.judged(v) == nil)
+	return v, ok
+}
+
+// askedUnseen says the question was put with its judge held back.
+func askedUnseen(c *openresponses.FunctionCall) bool {
+	var q Question
+	return c != nil && c.Name == askTool && decode([]byte(c.Arguments), &q) == nil && q.Mode == Shadow.String()
+}
+
+// without drops the stretches of t a judge spent after a person had
+// answered, so what it said reaches no later step.
+func without(t openresponses.Items, unseen [][2]int) openresponses.Items {
+	if len(unseen) == 0 {
+		return t
+	}
+	out := make(openresponses.Items, 0, len(t))
+	dropped := map[string]bool{}
+	for i, item := range t {
+		in := slices.ContainsFunc(unseen, func(s [2]int) bool { return i >= s[0] && i <= s[1] })
+		switch it := item.(type) {
+		case *openresponses.FunctionCall:
+			dropped[it.CallID] = in
+		case *openresponses.FunctionCallOutput:
+			// A call's output goes with it, wherever it landed.
+			in = in || dropped[it.CallID]
+		}
+		if !in {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // beginning starts the message that opens a visit of an Agent node.

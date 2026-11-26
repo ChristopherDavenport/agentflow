@@ -277,6 +277,13 @@ func verdict(step, outcome string) turn {
 
 // The same run, nobody there, as the host trusts a judge further.
 func TestTakeIssueFromAPersonToAModel(t *testing.T) {
+	// Shadow with nobody there asks no judge: there is nothing to compare.
+	shadowed := newRepository(t).run(t, &scripted{t: t, turns: []turn{finish("draft", "ok", plan("greeting.txt"))}}, nil,
+		agentflow.Unattended(), agentflow.Delegate(agentflow.Shadow))
+	if got := visited(shadowed); got[len(got)-1] != "park:ok" {
+		t.Errorf("shadow: path = %v", got)
+	}
+
 	// Advising: the judge is heard and the default still holds.
 	r := newRepository(t)
 	st := r.run(t, &scripted{t: t, turns: []turn{
@@ -313,5 +320,27 @@ func TestTakeIssueFromAPersonToAModel(t *testing.T) {
 	}
 	if want := []string{"focus unattended default", "approve ai", "ship ai"}; !slices.Equal(by, want) {
 		t.Errorf("by = %v, want %v", by, want)
+	}
+}
+
+// A real skill's definition, scripts' digest and all, reads back.
+func TestRealDefinitionsReadBack(t *testing.T) {
+	for _, dir := range []string{"skills/take-issue", "skills/pr-review", "../workflow/testdata/release"} {
+		g := loadFrom(t, dir).Graph
+		b, err := json.Marshal(g)
+		if err != nil {
+			t.Fatal(err)
+		}
+		args, err := json.Marshal(map[string]any{"workflow": g.Name, "digest": g.Digest(), "format": agentflow.RecordFormat, "definition": json.RawMessage(b)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		all, err := agentflow.Instances(agentturn.Transcript{
+			&openresponses.FunctionCall{CallID: "flow_x_start", Name: "flow_start", Arguments: string(args)},
+			&openresponses.FunctionCallOutput{CallID: "flow_x_start", Output: openresponses.FunctionCallOutputData{Text: `{"outcome":"ok"}`}},
+		})
+		if err != nil || len(all) != 1 || all[0].Problem != "" || all[0].Graph == nil {
+			t.Errorf("%s: %+v, %v", dir, all, err)
+		}
 	}
 }

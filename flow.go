@@ -27,6 +27,13 @@ type Question struct {
 	Form map[string]any `json:"form,omitempty"`
 	// Advice is what a judge said, to show beside the question.
 	Advice *Verdict `json:"advice,omitempty"`
+	// Mode is how far the host let a judge answer this, empty for not at
+	// all: "shadow", "advise" or "decide". Under shadow there is no
+	// verdict yet and none to show.
+	Mode string `json:"mode,omitempty"`
+	// Version names the step's definition, so that answers to the same
+	// question can be told from answers to a reworded one.
+	Version string `json:"version,omitempty"`
 	// SentBack is how many times running a judge has sent the work back
 	// here.
 	SentBack int `json:"sent_back,omitempty"`
@@ -100,7 +107,7 @@ func Apply(g *Graph, cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 		return cfg, errors.New("agentflow: the judge needs a model")
 	}
 
-	own := []agenttool.Tool{f.startTool(), f.askTool(), f.finishTool(), f.judgeTool()}
+	own := []agenttool.Tool{f.startTool(), f.askTool(), f.finishTool(), f.judgeTool(), f.endTool()}
 	if p := cfg.ToolProvider; p != nil {
 		cfg.ToolProvider = func(ctx context.Context) []agenttool.Tool {
 			return append(slices.Clone(p(ctx)), own...)
@@ -159,7 +166,7 @@ func (f *flow) samePosition(before, after agentturn.Transcript) error {
 		return err
 	}
 	if a.Instance != b.Instance || a.Node != b.Node || a.Visit != b.Visit || a.Attempt != b.Attempt ||
-		a.Done != b.Done || a.Reported != b.Reported || len(a.Steps) != len(b.Steps) || (a.Advice == nil) != (b.Advice == nil) {
+		a.Done != b.Done || a.Ended != b.Ended || a.Reported != b.Reported || len(a.Steps) != len(b.Steps) || (a.Advice == nil) != (b.Advice == nil) || (a.Held == nil) != (b.Held == nil) {
 		return ErrPositionLost
 	}
 	return nil
@@ -178,7 +185,7 @@ func (f *flow) begin(_ context.Context, info agentturn.TurnStartInfo) (openrespo
 		return nil, nil
 	}
 	switch {
-	case st.Node.Kind == Person && f.modes[st.Node.ID] != 0 && st.Advice == nil:
+	case f.wants(st):
 		return openresponses.Items{openresponses.UserText(beginning(st.Node.ID) + " Judge it now.")}, nil
 	case st.Node.Kind != Agent:
 		return nil, nil
@@ -201,6 +208,23 @@ func since(input openresponses.Items, n *Node) (openresponses.Items, error) {
 	return nil, fmt.Errorf("%w: the start of step %q", ErrPositionLost, n.ID)
 }
 
+// overdue is the ending that has yet to be written, nil when none has.
+func (f *flow) overdue(st State, failed error) *Ending {
+	switch {
+	case st.abandoned != nil && !st.Started:
+		return st.abandoned
+	case !st.Started || st.Ended || errors.Is(failed, ErrChanged):
+		return nil
+	case failed != nil || st.Done:
+		return ending(st, failed)
+	case st.Failure != "" && f.unattended && f.reply == nil:
+		e := ending(st, nil)
+		e.Status, e.Reason = Failed, st.Node.ID+": "+st.Failure
+		return e
+	}
+	return nil
+}
+
 // modelTurn says the model takes the next turn.
 func modelTurn(st State) bool {
 	return st.Done && st.Reported || st.Node != nil && st.Node.Kind == Agent && st.Failure == ""
@@ -210,6 +234,10 @@ func modelTurn(st State) bool {
 // before the turn is recorded, so the record holds what was sent.
 func (f *flow) prepare(req *openresponses.Request) error {
 	st, err := f.g.Replay(req.Input)
+	if f.overdue(st, err) != nil {
+		req.Model = programPrefix + f.g.Name
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -221,6 +249,7 @@ func (f *flow) prepare(req *openresponses.Request) error {
 		return nil
 	}
 	req.Model = f.modelName
+	req.Input = withoutStarts(without(req.Input, st.unseen))
 	keep := func(name string) bool { return !strings.HasPrefix(name, reserved) && name != ScriptTool }
 	if n := st.Node; n != nil {
 		if n.Context == ContextFresh {
@@ -355,9 +384,10 @@ func (f *flow) call(st State) (name string, args any, err error) {
 	}
 	switch {
 	case n.Kind == Person:
-		q := Question{Step: n.ID, Question: n.Prompt, Outcomes: n.outcomes(), With: with, Advice: st.Advice}
+		q := Question{Step: n.ID, Question: n.Prompt, Outcomes: n.outcomes(), With: with, Advice: st.Advice, Version: n.version()}
 		if f.modes[n.ID] != 0 {
 			q.SentBack = f.g.sentBack(st, n)
+			q.Mode = f.modes[n.ID].String()
 		}
 		for outcome, s := range n.Data {
 			if q.Form == nil {
@@ -391,13 +421,16 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 		return f.model.CreateStream(ctx, req, sink)
 	}
 	st, err := f.g.Replay(req.Input)
-	if err != nil {
+	over := f.overdue(st, err)
+	if err != nil && over == nil {
 		return err
 	}
 	e := openresponses.NewEmitter(sink, &openresponses.Response{Model: req.Model})
 	var id, name string
 	var args any
 	switch {
+	case over != nil:
+		id, name, args = f.g.endID(over.Instance), endTool, over
 	case st.Done:
 		if err := f.report(e, st); err != nil {
 			return err
@@ -408,11 +441,13 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 		if _, err := rand.Read(b[:]); err != nil {
 			return err
 		}
-		id, name, args = f.g.startID(hex.EncodeToString(b[:])), startTool, startPayload{Workflow: f.g.Name, Digest: f.g.Digest(), Inputs: st.Inputs}
-	case st.Failure != "":
-		if f.unattended && f.reply == nil {
-			return fmt.Errorf("%w: %s: %s", ErrStepFailed, st.Node.ID, st.Failure)
+		definition, err := json.Marshal(f.g)
+		if err != nil {
+			return err
 		}
+		id, name, args = f.g.startID(hex.EncodeToString(b[:])), startTool, startPayload{Workflow: f.g.Name, Digest: f.g.Digest(), Inputs: st.Inputs,
+			Format: RecordFormat, Definition: json.RawMessage(definition)}
+	case st.Failure != "":
 		id, name = f.g.retryID(st), askTool
 		args = Question{Step: st.Node.ID, Retry: true, Outcomes: []string{retryOutcome, stopOutcome},
 			Question: fmt.Sprintf("Step %q failed: %s\nRun it again?", st.Node.ID, st.Failure)}
@@ -482,10 +517,17 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 		return nil, errors.New("agentflow: no transcript on the context")
 	}
 	st, err := f.g.Replay(t)
+	name, id := info.Call.Name, info.Call.CallID
+	if name == endTool {
+		if over := f.overdue(st, err); over == nil || id != f.g.endID(over.Instance) {
+			return block("only the workflow ends a run")
+		}
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	n, name, id := st.Node, info.Call.Name, info.Call.CallID
+	n := st.Node
 	switch {
 	case st.Done && st.Reported:
 		if strings.HasPrefix(name, reserved) || name == ScriptTool {
@@ -570,7 +612,7 @@ func (f *flow) ask(ctx context.Context, info agentturn.ToolCallInfo, st State) (
 		if f.g.spent(st, *v) {
 			why = fmt.Sprintf("the judge has sent this back %d times: %s", f.g.sentBack(st, n), q.Question)
 		} else {
-			return answer(q, Result{Outcome: v.Outcome, Data: v.Data, By: ByJudge}, "decided by the judge")
+			return answer(q, Result{Outcome: v.Outcome, Data: v.Data, By: ByJudge, Reason: v.Reason}, "decided by the judge")
 		}
 	}
 	// With nobody there, the tool takes the node's default, and refuses
@@ -593,6 +635,38 @@ func (f *flow) startTool() agenttool.Tool {
 		}
 		return Result{Outcome: OK}, nil
 	}, agenttool.WithReplay(safeReplay))
+}
+
+// endTool writes down that a run is over. Its arguments are the record.
+func (f *flow) endTool() agenttool.Tool {
+	return agenttool.New(endTool, "End a workflow run.", func(context.Context, Ending) (Result, error) {
+		return Result{Outcome: OK}, nil
+	}, agenttool.WithReplay(safeReplay))
+}
+
+// withoutStarts keeps flow_start from the model: it holds the whole
+// definition, a judge's criteria among it.
+func withoutStarts(t openresponses.Items) openresponses.Items {
+	dropped := map[string]bool{}
+	var out openresponses.Items
+	for _, item := range t {
+		switch it := item.(type) {
+		case *openresponses.FunctionCall:
+			if it.Name == startTool && strings.HasPrefix(it.CallID, reserved) {
+				dropped[it.CallID] = true
+				continue
+			}
+		case *openresponses.FunctionCallOutput:
+			if dropped[it.CallID] {
+				continue
+			}
+		}
+		out = append(out, item)
+	}
+	if len(dropped) == 0 {
+		return t
+	}
+	return out
 }
 
 // askTool returns the answer an approval or a rule carried, or the

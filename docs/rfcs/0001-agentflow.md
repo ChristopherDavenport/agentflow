@@ -326,7 +326,8 @@ shows which turns the program took, and request hashes reproduce.
 ### An instance
 
 The first call of an instance is `flow_start`, which carries the
-workflow's name and the digest of its definition. Replay begins there,
+workflow's name, its inputs, the digest of its definition, the
+definition itself and the record's format version. Replay begins there,
 so whatever the transcript held before is ignored. Resuming with a
 definition whose digest differs is refused.
 
@@ -337,13 +338,48 @@ unfinished instance. After an instance has finished and said so, a plain
 prompt is a conversation with the model, with its tools. An instance
 that failed stays failed until an invocation.
 
+### Leaving, and reading it back (spiked)
+
+An instance's end is written, not inferred. The program calls `flow_end`
+with the instance, a status, a reason, the path taken and the outputs:
+
+| Status | When |
+|---|---|
+| `done` | the last step finished; the report follows |
+| `failed` | a step failed with nobody to retry it, a person chose `stop`, a visit bound was reached, or the outputs could not be made. The run then ends in the same error as before |
+| `abandoned` | another instance was asked for over an unfinished one; written before the new `flow_start` |
+
+An instance with no `flow_end` is `running`: waiting, stalled,
+interrupted, or left by a host that never prompted again. A run stopped
+by a model error or a turn limit has not left the workflow. Only the
+program may call `flow_end`.
+
+`Instances(transcript)` lists the runs of a transcript with where each
+starts and ends, its status, the definition it ran and its state, and
+`Instance.At` gives the state after any item. It needs neither the
+current workflow nor a graph: it reads the recorded definition, checks it
+against the digest, and replays. A replay that disagrees with the
+recorded ending, an unknown format, or a definition that does not match
+is reported in `Problem`, not guessed past. Replay's meaning is part of
+the format: a change to it changes `RecordFormat`.
+
+The definition holds what the working model should not read, a judge's
+criteria among it, so `flow_start` is left out of every request to it, as
+an omission that keeps the request hash. Its inputs go with it: a step
+gets what its `with` names. The record itself holds all of it, and an
+agent that continues the session without agentflow would be sent it.
+
 ### Results
 
 Every step ends in one result:
 
 ```json
-{"outcome": "findings", "data": {}, "by": ""}
+{"outcome": "findings", "data": {}, "by": "", "reason": ""}
 ```
+
+`reason` is why, in the words of whoever chose: a person may give one
+with any answer (`Result.Reason`), and a judge that decides must. It is
+for whoever reads the record; `with` cannot refer to it.
 
 A transcript carries no failure flag, so success has to be said. A
 program or person step whose output is anything else, an error, a
@@ -429,13 +465,31 @@ judge:
 | Host | Who answers | What the record holds |
 |---|---|---|
 | nothing | the person | their answer |
+| `Delegate(Shadow, ...)` | the person; the judge looks afterwards | both, the verdict unseen |
 | `Delegate(Advise, ...)` | the person, shown the judge's verdict | both |
 | `Delegate(Decide, ...)` | the judge, or the person if it hands back | the verdict, `by: ai` |
 
-The path is to write the criteria, run on `Advise`, count how often
-`Step.Advice` and the person's `Step.Result` agree, and move to `Decide`
-the steps where they do. `State.Steps` holds both for the latest instance;
-counting across sessions is the host's.
+The path is to write the criteria, measure on `Shadow`, count how often
+the judge would have approved what the person did not, and move a step to
+`Advise` and then `Decide` as that allows. Agreement under `Advise` is not
+that measure: the person saw the verdict first. `State.Steps` holds
+`Result`, `Advice` and `Blind` for the latest instance; reading them
+across sessions is the host's.
+
+**Shadow judges after the answer** (spiked), so there is no verdict for
+anyone to see while answering. The question is put in mode `shadow`; the
+answer is held; the judge runs as above, never shown it; then the step
+finishes with the person's answer, whatever the verdict. What the judge
+said and looked at is left out of every later request of the working
+model, as omissions that keep the request hashes. It never blocks: two
+refused verdicts, or a reply in words followed by anything said (`Drive`
+says it at once), finishes the step with no verdict. Answers from rules or
+an unattended default are not judged. Limits: a later visit's person can
+read an earlier verdict in the transcript, so only a step's first answer
+in an instance is surely blind; a front that shows the transcript shows
+the judge's turn as it happens; the run waits for the judge before going
+on; and if the judge's request fails, the next prompt retries it and the
+judge reads that prompt.
 
 A judge is a request of its own: the node's question, `with` values,
 criteria and tools, from the node's opening message on, with none of the
@@ -525,6 +579,51 @@ ones, and `take-issue`'s criteria now name secrets, the network and the
 checks, which is what the attempts asked for. It shows the judge follows
 the wording without refusing good plans, not that it would catch
 something new. The send-back limit has not been reached with a model.
+
+## Reading decisions back (planned, not built)
+
+No extractor is built until there are decisions to read. Sessions are
+what it will read: `Instances` gives the runs and their paths whatever
+the workflow has since become, and the decisions are in the entries
+between. What a later reading needs is held in the record now, and tests
+keep it there.
+
+One row for each `flow_ask` that is not a retry:
+
+| Column | Where in the session |
+|---|---|
+| workflow, definition | `flow_start` of the instance: `workflow`, `digest` |
+| instance, step, visit | the call ID |
+| step's version | the question: `version` (this node's definition alone) |
+| mode | the question: `mode`, absent for no judge |
+| question, inputs shown | the question: `question`, `with` |
+| answer, reason, who | the output: `outcome`, `data`, `reason`, `by` (absent for a person) |
+| asked, answered | timestamps of the `hold` and `proceed` decisions |
+| verdict, its reason | the `flow_judge` call; under `advise`, also the question's `advice` |
+| judge's model, criteria, looks, cost | the judge's config, response and item entries |
+| blind | mode `shadow` |
+| unanswered | a question with no output: kept, not dropped |
+
+**Which rows can be compared.** Only `shadow` rows with a person's answer
+and a verdict measure a judge. Under `advise` the person saw it; under
+`decide` a person sees only what was handed back, which is the hard part
+and not a sample. Group by step, step version and judge model; a change
+to either starts the count again. The number that matters is how often
+the judge approved what the person did not: with none in about 60 such
+cases the rate is under 5% at 95% confidence, and 300 for under 1%.
+
+**Not in the record, and for the workflow or host to supply.**
+
+- *The repository's state*, which judging the same case again needs. A
+  step must put the commit, and any diff, in what it records.
+  `take-issue` records both.
+- *What happened next*: merged, reverted, reopened. A workflow records
+  what to join on, such as the pull request's URL.
+- *Which person answered*: the record says `human`.
+- *The skill's files.* `flow_start` holds the definition, criteria
+  among it, and a digest of the scripts, not the scripts themselves.
+- *Sessions are only as durable as the host's store*, and hold whatever
+  the inputs held, so sharing them needs redaction.
 
 ## Context (spiked)
 
@@ -702,8 +801,9 @@ transform.
 4. **A failed instance** answers every later prompt with its error until
    an invocation, since the transcript does not say the error was seen.
 5. **Policy and the flow tools.** The config's `BeforeToolCall` sees
-   `flow_start`, `flow_ask` and `flow_finish`, so a policy that asks by
-   default asks about them. A host must allow them.
+   `flow_start`, `flow_ask`, `flow_finish`, `flow_judge` and `flow_end`,
+   so a policy that asks by default asks about them. A host must allow
+   them.
 6. **Cost and eval tools** see `agentflow/` responses with no usage.
    They should skip them, not report an unpriced model.
 7. **Run directories** show in a repository's status while a script runs.
