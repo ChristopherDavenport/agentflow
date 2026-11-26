@@ -169,6 +169,59 @@ func TestADirOutsideTheWorkspaceFailsTheStep(t *testing.T) {
 	}
 }
 
+func TestAMissingDirAsksToRetry(t *testing.T) {
+	ctx := context.Background()
+	ws := workspace(t, worktreeScripts)
+	m := &worker{}
+	var opened []agentflow.Child
+	g := &agentflow.Graph{Name: "late", Nodes: []agentflow.Node{
+		{ID: "build", Kind: agentflow.Agent, Prompt: "Build it.", Context: agentflow.ContextFresh, Tools: []string{"here"},
+			Dir: agentflow.Literal("trees/late"), Next: map[string]string{"ok": "check"}},
+		{ID: "check", Kind: agentflow.Run, Script: "where.sh", Dir: agentflow.Literal("trees/late")},
+	}}
+	cfg, err := agentflow.Apply(g, agentturn.Config{Model: m, ModelName: "fake", Tools: []agenttool.Tool{script.New(ws, time.Minute)}},
+		opener(t, ws, m, &opened))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := agentturn.New(cfg)
+	// The directory is not there: the opener refuses the child, and the
+	// step asks whether to run again, with what the opener said.
+	end, _, err := agentflow.Drive(ctx, g, a, invoke(t, g, a, nil))
+	if err != nil || end.Reason != agentturn.ReasonInputRequired || len(end.Pending) != 1 {
+		t.Fatalf("end = %+v, %v", end, err)
+	}
+	var q agentflow.Question
+	if err := json.Unmarshal([]byte(end.Pending[0].Call.Arguments), &q); err != nil {
+		t.Fatal(err)
+	}
+	if !q.Retry || q.Step != "build" || !strings.Contains(q.Question, `dir "trees/late"`) {
+		t.Fatalf("question = %+v", q)
+	}
+	// Once it is made, the retry works there.
+	if err := os.MkdirAll(filepath.Join(ws.Root(), "trees", "late"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ans, err := g.Answer(end.Pending[0], agentflow.Result{Outcome: "retry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	end, st, err := agentflow.Resume(ctx, g, a, []agentturn.Answer{ans})
+	if err != nil || end.Reason != agentturn.ReasonDone || !st.Done {
+		t.Fatalf("end = %+v, %v", end, err)
+	}
+	var check struct{ PWD, Made string }
+	if err := json.Unmarshal(mustJSON(t, st.Steps[len(st.Steps)-1].Result.Data), &check); err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(ws.Root(), "trees", "late"); check.PWD != want || check.Made != "made" {
+		t.Errorf("check ran in %s and read %q, want %s", check.PWD, check.Made, want)
+	}
+	if len(opened) != 2 {
+		t.Errorf("opened %d times, want the refusal and the retry", len(opened))
+	}
+}
+
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	b, err := json.Marshal(v)
