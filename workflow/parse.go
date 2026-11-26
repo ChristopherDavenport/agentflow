@@ -157,11 +157,11 @@ type settings struct {
 	Tools       []string       `yaml:"tools"`
 	Skills      []string       `yaml:"skills"`
 	Context     string         `yaml:"context"`
-	// A child's own settings, with context: fresh.
-	Dir          string `yaml:"dir"`
-	Model        string `yaml:"model"`
-	Instructions string `yaml:"instructions"`
-	Child        string `yaml:"child"`
+	// A child's own settings, with context: fresh. A script takes dir.
+	Dir          yaml.Node `yaml:"dir"`
+	Model        string    `yaml:"model"`
+	Instructions string    `yaml:"instructions"`
+	Child        string    `yaml:"child"`
 	// A step's own settings.
 	Thinking string      `yaml:"thinking"`
 	Timeout  string      `yaml:"timeout"`
@@ -482,7 +482,14 @@ func node(n *agentflow.Node, s section) error {
 		return errors.New("only a program node has run, tool, args or flow")
 	}
 	n.Context = set.Context
-	n.Dir, n.Model, n.InstructionsFile, n.Child = set.Dir, set.Model, set.Instructions, set.Child
+	n.Model, n.InstructionsFile, n.Child = set.Model, set.Instructions, set.Child
+	if !set.Dir.IsZero() && set.Dir.Tag != "!!null" {
+		d, err := pathValue(&set.Dir, "dir is a path or a reference to one")
+		if err != nil {
+			return fmt.Errorf("dir: %w", err)
+		}
+		n.Dir = d
+	}
 	n.Thinking, n.Policy = set.Thinking, set.Policy.policy()
 	files, err := fileValues(&set.Files)
 	if err != nil {
@@ -890,22 +897,34 @@ func fileValues(n *yaml.Node) ([]agentflow.Value, error) {
 	}
 	var out []agentflow.Value
 	for _, item := range n.Content {
-		var s string
-		if item.Kind != yaml.ScalarNode || item.Decode(&s) != nil || s == "" {
-			return nil, fmt.Errorf("line %d: a file is a path or a reference to one", item.Line)
-		}
-		v := agentflow.Literal(s)
-		if m := reference.FindStringSubmatch(s); m != nil {
-			v = agentflow.From(m[1])
-		} else if m := function.FindStringSubmatch(s); m != nil {
-			var err error
-			if v, err = call(m[1], m[2]); err != nil {
-				return nil, fmt.Errorf("line %d: %w", item.Line, err)
-			}
-		} else if hasReference(s) {
-			return nil, fmt.Errorf("line %d: a reference is the whole value, ${{ ... }}", item.Line)
+		v, err := pathValue(item, "a file is a path or a reference to one")
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, v)
 	}
 	return out, nil
+}
+
+// pathValue reads one path: a literal, or a reference that is the whole
+// value. what says what it must be, for the error.
+func pathValue(item *yaml.Node, what string) (agentflow.Value, error) {
+	var s string
+	if item.Kind != yaml.ScalarNode || item.Decode(&s) != nil || s == "" {
+		return agentflow.Value{}, fmt.Errorf("line %d: %s", item.Line, what)
+	}
+	if m := reference.FindStringSubmatch(s); m != nil {
+		return agentflow.From(m[1]), nil
+	}
+	if m := function.FindStringSubmatch(s); m != nil {
+		v, err := call(m[1], m[2])
+		if err != nil {
+			return agentflow.Value{}, fmt.Errorf("line %d: %w", item.Line, err)
+		}
+		return v, nil
+	}
+	if hasReference(s) {
+		return agentflow.Value{}, fmt.Errorf("line %d: a reference is the whole value, ${{ ... }}", item.Line)
+	}
+	return agentflow.Literal(s), nil
 }

@@ -72,7 +72,7 @@ pr-review/
   files. The graph's digest covers all of them, and scripts run from the
   snapshot, written to a new directory of the workspace for each run and
   removed after it. `$AGENTFLOW_SKILL_DIR` names it; the script starts at
-  the workspace's root.
+  the workspace's root, or in its step's `dir`.
 
 An aware host offers two ways in. **Explicit**: a command such as
 `/pr-review`, or a call from code. **Dynamic**: the model asks for a
@@ -203,7 +203,8 @@ and be none. Unknown keys are errors.
 | `tools` | model | tools the model may call; none if absent |
 | `skills` | model | skills whose instructions are added to the step's, read and pinned at load; they grant no tools (RFC 0005, section 16) |
 | `context` | model, call | `session` or `fresh`, a child session; see [Context](#context-spiked). `session` is the default, except for a model step that asks for another model than its workflow's, which defaults to `fresh` (RFC 0003, section 14) |
-| `dir`, `instructions` | fresh model, fresh call | the child's working directory, and a file of the skill added to its instructions (RFC 0002, section 10) |
+| `dir` | fresh model, fresh call, script | the directory below the workspace's root the step works in: a path, or a reference to one, resolved when the call is made and recorded in it (RFC 0002, section 10) |
+| `instructions` | fresh model, fresh call | a file of the skill added to the child's instructions (RFC 0002, section 10) |
 | `model`, `thinking` | model; `model` also a fresh call | the model a step asks and how hard it reasons; the frontmatter's `model` and `thinking` are the workflow's defaults (RFC 0003, section 14) |
 | `timeout` | script, tool, model, person | a duration past which the step fails and asks to be retried (RFC 0003, section 13); on a person step, past which the question takes `on_timeout` (RFC 0004, section 26) |
 | `on_timeout` | person | the outcome, and data, a question takes when its timeout passes unanswered (RFC 0004, section 26) |

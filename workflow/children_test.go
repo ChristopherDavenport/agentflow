@@ -40,7 +40,7 @@ func TestChildSettingsLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := g.Nodes[0]; n.Dir != "services/api" || n.Model != "small" || n.Child != "helper" || n.Context != agentflow.ContextFresh {
+	if n := g.Nodes[0]; n.Dir.Literal != "services/api" || n.Model != "small" || n.Child != "helper" || n.Context != agentflow.ContextFresh {
 		t.Errorf("node = %+v", n)
 	}
 	// A step that asks for another model than its workflow's runs in a

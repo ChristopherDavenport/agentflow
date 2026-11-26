@@ -172,10 +172,10 @@ func flip(calls *int) agenttool.Tool {
 
 func keeper() *Graph {
 	return &Graph{Name: "keeper", Nodes: []Node{
-		{ID: "draft", Kind: Agent, Prompt: "Draft it.", Context: ContextFresh, Child: "writer", Dir: "docs", Model: "small",
+		{ID: "draft", Kind: Agent, Prompt: "Draft it.", Context: ContextFresh, Child: "writer", Dir: Literal("docs"), Model: "small",
 			Instructions: "Write plainly.", Next: map[string]string{OK: "flip"}},
 		{ID: "flip", Kind: Run, Tool: "flip", Outcomes: []string{"again", "done"}, Next: map[string]string{"again": "draft", "done": "polish"}},
-		{ID: "polish", Kind: Agent, Prompt: "Polish it.", Context: ContextFresh, Child: "writer", Dir: "docs", Model: "small",
+		{ID: "polish", Kind: Agent, Prompt: "Polish it.", Context: ContextFresh, Child: "writer", Dir: Literal("docs"), Model: "small",
 			Instructions: "Write plainly."},
 	}}
 }
@@ -309,10 +309,10 @@ func TestAnInvocationAbandonsChildren(t *testing.T) {
 func TestChildSettingsAreCheckedAtLoad(t *testing.T) {
 	for want, change := range map[string]func(g *Graph){
 		"dir is a setting of a child":   func(g *Graph) { g.node("draft").Context = ContextSession },
-		`dir "../up"`:                   func(g *Graph) { g.node("draft").Dir = "../up" },
-		`dir "/abs"`:                    func(g *Graph) { g.node("draft").Dir = "/abs" },
+		`dir "../up"`:                   func(g *Graph) { g.node("draft").Dir = Literal("../up") },
+		`dir "/abs"`:                    func(g *Graph) { g.node("draft").Dir = Literal("/abs") },
 		"only a model step keeps":       func(g *Graph) { g.node("flip").Child, g.node("flip").Context = "w", ContextFresh },
-		"differ in its dir":             func(g *Graph) { g.node("polish").Dir = "other" },
+		"differ in its dir":             func(g *Graph) { g.node("polish").Dir = Literal("other") },
 		`child "no good"`:               func(g *Graph) { g.node("draft").Child, g.node("polish").Child = "no good", "no good" },
 		"only a model node or a call":   func(g *Graph) { g.node("flip").Context = ContextFresh },
 		"only a model step gives a ver": func(g *Graph) { g.node("flip").Verdict = true },

@@ -316,6 +316,9 @@ func (g *Graph) checkRefs() []error {
 				use("node "+n.ID+": files", v, at)
 			}
 		}
+		if plain(n.Dir) {
+			use("node "+n.ID+": dir", n.Dir, at)
+		}
 		for _, outcome := range n.outcomes() {
 			if n.Next[outcome] != "" || g.cleans(n.ID) {
 				continue
@@ -376,6 +379,11 @@ func (g *Graph) checkAlternatives() []error {
 		}
 		for _, v := range n.Files {
 			check("node "+n.ID+": files", v, func(refs []ref) bool {
+				return !g.reached(refs)[n.ID][0]
+			})
+		}
+		if n.Dir.From != "" && !n.Dir.Optional {
+			check("node "+n.ID+": dir", n.Dir, func(refs []ref) bool {
 				return !g.reached(refs)[n.ID][0]
 			})
 		}

@@ -385,7 +385,7 @@ func TestACallsPolicyHoldsWhatItCalls(t *testing.T) {
 	for _, c := range []struct{ where, dir, path string }{{"", "", "secret/key"}, {ContextFresh, "", "secret/key"}, {ContextFresh, "secret", "key"}} {
 		t.Run("context "+c.where+" dir "+c.dir, func(t *testing.T) {
 			g := linked(t, &Graph{Name: "outer", Nodes: []Node{
-				{ID: "call", Kind: Run, Flow: "inner", Context: c.where, Dir: c.dir, Policy: &Policy{Deny: ruleList("write(secret/*)")}},
+				{ID: "call", Kind: Run, Flow: "inner", Context: c.where, Dir: literalDir(c.dir), Policy: &Policy{Deny: ruleList("write(secret/*)")}},
 			}}, inner)
 			var did []string
 			m := &cast{script: []says{
@@ -615,4 +615,12 @@ func TestAChildHitsTheTreesBound(t *testing.T) {
 	if err != nil || len(runs) != 1 || runs[0].Status != Failed || !strings.Contains(runs[0].Reason, "step limit") {
 		t.Fatalf("runs = %+v, %v", runs, err)
 	}
+}
+
+// literalDir is a dir setting of p, none for "".
+func literalDir(p string) Value {
+	if p == "" {
+		return Value{}
+	}
+	return Literal(p)
 }
