@@ -1319,8 +1319,11 @@ func (r *replay) bounds(f *frame) {
 		switch {
 		case n.PersonPaced:
 			from = fmt.Sprintf("the default for a step on a loop, for visits no person paced (%d more were)", f.paced[n.ID])
-		case n.MaxVisits == 0:
+		case n.MaxVisits == 0 && g.onLoop(n.ID):
 			from = "the default for a step on a loop"
+		case n.MaxVisits == 0:
+			// Only a jump comes back to a step no loop reaches.
+			from = "the default for a step on no loop"
 		}
 		if f.extra[n.ID] > 0 {
 			from += fmt.Sprintf(" and %d granted", f.extra[n.ID])

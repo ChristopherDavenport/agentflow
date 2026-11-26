@@ -52,6 +52,18 @@ policy:
   its call's record made them, so the child's own record says what it was
   held to. A judge's rules are fixed: one that takes a value from the
   record is a load error.
+- `flow_limits` is the program's call, under the step's key
+  (`…_v<n>-limits`), with the run, the step and the reason; its result is
+  the error, and the step's retry question follows it. It holds no
+  definition, so it is not left out of what a model reads: a model that
+  works later in the same context sees that the program could not hold
+  the step to its policy, as it sees any program call.
+
+Tried, with scripted models: a value that is a number, an unclean path
+and a path out of the root each record exactly one `flow_limits` and the
+retry question after it, with no model request; a jump back to the plan
+resolves the policy and the step goes on; and a run killed with the
+failure pending resumes from a jsonl store with it still pending.
 
 ### 1b. A question whose text is computed (spiked)
 
@@ -174,6 +186,13 @@ same: the workflow made for the step carries its workflow's default.
   out, but what happened is the call and its result, so a resume from the
   store reads the deadline and the timeout from the record. A run resumed
   after its call's deadline has passed is timed out on its first turn.
+
+Tried, with scripted models: a model step with no timeout of its own, and
+one with a longer one, is cut off at the call's recorded deadline, in the
+current context and in a fresh child; its run is abandoned after its
+cleanup, and the call routes on `failed` or asks to be retried. A process
+killed while that model worked, resumed past the deadline, reads the
+clock once only, from the record, and asks the model nothing.
 
 ## 4. What a callee says of itself (spiked)
 
