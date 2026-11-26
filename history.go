@@ -271,7 +271,7 @@ func notice(m *openresponses.Message) bool {
 	prefixes := []string{beginPrefix, nudgePrefix}
 	switch m.Role {
 	case openresponses.RoleDeveloper:
-		prefixes = []string{invocationPrefix, abandonText}
+		prefixes = []string{invocationPrefix, abandonText, overridePrefix}
 	case openresponses.RoleUser:
 	default:
 		return false

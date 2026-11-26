@@ -58,6 +58,9 @@ type Question struct {
 	// answered, as the program's clock recorded it; nil for never.
 	Deadline  *time.Time `json:"deadline,omitempty"`
 	OnTimeout string     `json:"on_timeout,omitempty"`
+	// Note is what an operator said with the override that brought the
+	// run here.
+	Note string `json:"note,omitempty"`
 	// Answer is empty as asked. [Answer] fills it in.
 	Answer *Result `json:"answer,omitempty"`
 
@@ -222,7 +225,7 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 	if (needs || len(f.modes) > 0) && f.children == nil {
 		return cfg, errors.New("agentflow: the graph runs work in children, a fresh step or call or a judge, and the host gave no Children to open them")
 	}
-	own := append([]agenttool.Tool{f.startTool(), f.askTool(), f.finishTool(), f.judgeTool(), f.endTool(), f.callTool(), f.clockTool(), f.stuckTool()}, f.docTools()...)
+	own := append([]agenttool.Tool{f.startTool(), f.askTool(), f.finishTool(), f.judgeTool(), f.endTool(), f.callTool(), f.clockTool(), f.stuckTool(), f.overrideTool()}, f.docTools()...)
 	if p := cfg.ToolProvider; p != nil {
 		cfg.ToolProvider = func(ctx context.Context) []agenttool.Tool {
 			return append(f.timed(p(ctx)), own...)
@@ -349,6 +352,7 @@ func (f *flow) begin(ctx context.Context, info agentturn.TurnStartInfo) (openres
 	if st.Node.Verdict {
 		return openresponses.Items{openresponses.UserText(text + " Judge it now." + visitTag(st))}, nil
 	}
+	text += noteText(st)
 	if len(st.Steps) > 0 {
 		text += " The steps before it are finished and their results accepted, the " + finishTool + " calls included."
 	}
@@ -420,7 +424,7 @@ func (f *flow) prepare(ctx context.Context, req *openresponses.Request) error {
 	if err != nil {
 		return err
 	}
-	if !modelTurn(st) || f.clockDue(st) || f.expired(st) {
+	if !modelTurn(st) || f.clockDue(st) || f.expired(st) || st.request != nil {
 		req.Model = programPrefix + f.g.Name
 		return nil
 	}
@@ -627,7 +631,7 @@ func (f *flow) call(st State) (name string, args any, err error) {
 	}
 	switch {
 	case n.Kind == Person:
-		q := Question{Step: n.ID, Question: n.Prompt, Outcomes: n.outcomes(), With: with, Advice: st.Advice, Version: n.version()}
+		q := Question{Step: n.ID, Question: n.Prompt, Outcomes: n.outcomes(), With: with, Advice: st.Advice, Version: n.version(), Note: st.Note}
 		q.where(st)
 		if mode := f.mode(st); mode != 0 {
 			q.SentBack = st.g.sentBack(st, n)
@@ -739,6 +743,8 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 	switch {
 	case over != nil:
 		id, name, args = over.id, endTool, over
+	case st.request != nil:
+		id, name, args = st.requestID, overrideTool, *st.request
 	case st.Done:
 		if err := f.report(e, st); err != nil {
 			return err
@@ -749,7 +755,7 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 		if err != nil {
 			return err
 		}
-		if err := msg.Text("The workflow's runs here were abandoned with the run that called them."); err != nil {
+		if err := msg.Text("The workflow's runs here were abandoned, and none starts until it is invoked again."); err != nil {
 			return err
 		}
 		if err := msg.Close(); err != nil {
@@ -872,6 +878,12 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 	}
 	if err != nil {
 		return nil, err
+	}
+	if name == overrideTool {
+		if st.request == nil || id != st.requestID {
+			return block("only the workflow applies an operator's override, when one asks")
+		}
+		return nil, nil
 	}
 	n := st.Node
 	switch {

@@ -157,6 +157,9 @@ func (f *flow) childFor(st State, call *openresponses.FunctionCall, a callArgs) 
 	case n.Kind == Agent:
 		c.Step = n.ID
 		c.Settings = ChildSettings{Dir: n.Dir, Model: n.Model, Thinking: cmp.Or(n.Thinking, st.g.Thinking), Instructions: n.Instructions, Tools: n.Tools}
+		if st.Note != "" {
+			c.Settings.Instructions = strings.TrimSpace(c.Settings.Instructions + "\n\nNote from the operator: " + st.Note)
+		}
 		// The step's own policy is its node's in the child.
 		c.policies = f.chain(st)
 	default:
@@ -385,6 +388,12 @@ func Invoke(ctx context.Context, g *Graph, a *agentturn.Agent, inputs any, opts 
 // abandon abandons the children a's pending calls wait on, and returns
 // outputs refusing every pending call, to open the next prompt with.
 func (f *flow) abandon(ctx context.Context, a *agentturn.Agent) (openresponses.Items, error) {
+	return f.setAside(ctx, a, "agentflow: abandoned")
+}
+
+// setAside abandons the children a's pending calls wait on, and returns
+// outputs, of text, for every pending call, to open the next prompt with.
+func (f *flow) setAside(ctx context.Context, a *agentturn.Agent, text string) (openresponses.Items, error) {
 	pending := a.State().Pending
 	if len(pending) == 0 {
 		return nil, nil
@@ -432,7 +441,7 @@ func (f *flow) abandon(ctx context.Context, a *agentturn.Agent) (openresponses.I
 				}
 			}
 		}
-		outs = append(outs, openresponses.NewFunctionCallOutput(p.Call.CallID, "agentflow: abandoned"))
+		outs = append(outs, openresponses.NewFunctionCallOutput(p.Call.CallID, text))
 	}
 	return outs, nil
 }

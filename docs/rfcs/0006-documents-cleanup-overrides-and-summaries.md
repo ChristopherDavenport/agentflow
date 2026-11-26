@@ -174,3 +174,66 @@ model step, a call or a judged question; and the cleanup has no loop.
 **Record.** The cleanup's calls are under the abandoned run's key, after
 the invocation, so `Runs` reads a run's span as reaching past an
 invocation to its end; the next run's span starts at its own start.
+
+## 31. Operator overrides
+
+An operator can change where a run stands in three ways:
+
+| Action | What it does |
+|---|---|
+| `retry` | runs the current step of the run again, as a new attempt |
+| `jump` | goes to the step it names, as a new visit, with a note |
+| `abandon` | abandons the run and every run it called, innermost first, each with its cleanup ([section 30](#30-cleanup-on-abort)) |
+
+```go
+end, st, err := agentflow.OverrideRun(ctx, g, agent, agentflow.Override{
+	Run: "3fa9c2d1e0", Action: agentflow.OverrideJump, Step: "fix",
+	Note: "Fix only the null check; the rest is fine.",
+})
+```
+
+**The mechanism: a request, then the program's call.** The host's
+request reaches the program as a developer message,
+`agentflow: override {...}` (`OverrideRequest`), as an invocation does,
+since no model can write one. The program's next turn is a call,
+`flow_override`, under the key of the run under way, with the request as
+its arguments; its result says it was applied, or why not. Replay applies
+an override only from that result. So the request, the decision and its
+reason are all on the record, a model cannot ask for an override, and the
+gate refuses a `flow_override` no request is waiting on. A request alone
+changes nothing: position is still read from recorded results.
+
+**Which run.** An override names a run by its key.
+
+- `retry` and `jump` change the innermost run under way, the only one at
+  a step of its own; on a run that waits on one it called they are
+  refused, naming that one.
+- `abandon` may name any run under way. Its caller, if any, is not
+  abandoned: the call ends `abandoned`, which fails the calling step, and
+  the caller asks whether to retry it, or routes on `failed`.
+  Abandoning the run nobody called leaves nothing to start until the
+  workflow is invoked again.
+- A run in a child session is reached through the call that waits on it:
+  `OverrideRun` opens the child and asks there, at any depth.
+
+**Setting the run still.** Calls pending when the override is asked for
+are set aside, the children they wait on abandoned as for an invocation.
+A question set aside so is not answered: if the override is refused it is
+put again under a new ID; if applied, the override decides what comes
+next.
+
+**Counts and bounds.** A retry is a new attempt and a jump a new visit;
+both count as step entries of the tree, and both are held to every bound.
+A jump into a step at its visit bound asks for more, as item 21's bounds
+do. A jump goes only where the step's inputs are on the record: to a step
+whose `with` cannot be resolved there, it is refused with the reference
+that is missing. A jump never goes to a cleanup step.
+
+**The note** reaches the step the override brought the run to, until it
+finishes: a model step reads it in its opening message, before the tag
+that names the visit; a fresh step's child in its instructions; a person
+in the question's `note`. A program step records it and is not told.
+
+Refusals are results, recorded with the reason: no such run under way, a
+run that waits on another, no such step (with the name that was meant), a
+step that cannot run from here, or runs already being abandoned.

@@ -198,6 +198,14 @@ type State struct {
 	// over: done, or why it stopped.
 	Aborting, Cleaning bool
 	Cleanup            string
+	// Note is what an operator said with the override that brought the
+	// run to its step, or ran it again, until the step finishes.
+	Note string
+	// request is an operator's override for the program to apply, the ID
+	// of its call, and why it cannot be, if it cannot.
+	request    *Override
+	requestID  string
+	requestErr error
 	// endNow says the run's end is due: it was abandoned, and has no
 	// cleanup to run, or its cleanup is over.
 	endNow bool
@@ -212,6 +220,11 @@ type State struct {
 	// asked counts the bounds asked about in it.
 	clocked bool
 	asked   int
+	// reasked counts the retry questions put again after an override
+	// that was refused, and reask says a question waits to be put again
+	// should the override waiting on it be refused.
+	reasked int
+	reask   bool
 
 	g        *Graph
 	prefix   string
@@ -340,7 +353,12 @@ func (st State) callID() string {
 }
 
 // retryID is the ID of the question a failed attempt raises.
-func (st State) retryID() string { return st.callID() + "-retry" }
+func (st State) retryID() string {
+	if st.reasked > 0 {
+		return st.callID() + "-retry" + strconv.Itoa(st.reasked+1)
+	}
+	return st.callID() + "-retry"
+}
 
 func (st State) endID() string { return st.prefix + "end" }
 
@@ -418,6 +436,10 @@ type replay struct {
 	stack   []*frame
 	frames  []*frame
 	entries int
+	// request is an operator's override waiting to be applied, and
+	// overrides counts the flow_override calls made, for the next one's ID.
+	request   *Override
+	overrides int
 	// abort is an abandon under way: the runs it reaches end, innermost
 	// first, each after its cleanup, before the run asked for starts.
 	abort *abortPlan
@@ -484,6 +506,11 @@ func (r *replay) state(f *frame) State {
 	st.Documents = maps.Clone(f.st.Documents)
 	st.Aborting, st.Cleaning, st.Cleanup = f.aborting, f.cleaning && f.cleaned == "", f.cleaned
 	st.endNow = f.aborting && f.ending == nil && f.st.Started && (f.cleaned != "" || !f.cleaning)
+	if o := r.request; o != nil {
+		own := *o
+		st.request, st.requestID = &own, r.overrideID()
+		_, st.requestErr = r.target(own)
+	}
 	st.Entries, st.Granted, st.maxSteps = r.entries, r.granted, r.maxSteps
 	st.Path = slices.Clone(r.root.path)
 	st.callers = nil
@@ -526,6 +553,14 @@ func (r *replay) message(i int, m *openresponses.Message) {
 	if m.Role == openresponses.RoleDeveloper {
 		if inputs, ok := r.g.invoked(m.Text()); ok {
 			r.invoke(i, inputs, false)
+			return
+		}
+		if o, ok := requested(m.Text()); ok {
+			// An override waits for the program, which applies it or says
+			// why not; with no run under way it asks nothing.
+			if len(r.stack) > 0 {
+				r.request = &o
+			}
 			return
 		}
 		if m.Text() == abandonText {
@@ -679,6 +714,10 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 		r.ended(i, c, out)
 		return
 	}
+	if c != nil && c.Name == overrideTool && strings.HasPrefix(c.CallID, reserved) {
+		r.overridden(i, c, out)
+		return
+	}
 	f := r.top()
 	if c != nil && c.Name == startTool && strings.HasPrefix(c.CallID, reserved) {
 		r.started(i, f, c, out)
@@ -700,6 +739,13 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 		}
 	}
 	n := st.Node
+	// A question the host set aside to ask for an override is not
+	// answered: it is put again should the override be refused.
+	if out.Output.String() == overriddenText && c.Name == askTool && strings.HasPrefix(c.CallID, st.prefix) &&
+		(out.CallID == st.retryID() || out.CallID == st.limitID() || n.Kind == Person && out.CallID == st.callID()) {
+		st.reask = true
+		return
+	}
 	res, invalid := parseResult(n, out.Output.String())
 	if invalid == nil && n.Kind == Person && c.Name == askTool && out.CallID == st.callID() {
 		// An answer is held to what its question offered as it was asked,
@@ -725,7 +771,7 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 		if answer.Outcome == retryOutcome {
 			st.Attempt, st.Failure = st.Attempt+1, ""
 			st.Callee, st.Returned, st.calleeInputs = "", nil, nil
-			st.clocked, st.Deadline, st.asked = false, time.Time{}, 0
+			st.clocked, st.Deadline, st.asked, st.reasked, st.reask = false, time.Time{}, 0, 0, false
 			if n.Kind == Agent {
 				// The step opens again, and what came before is not about
 				// this attempt.
@@ -1021,7 +1067,7 @@ func (r *replay) finish(f *frame, i int, step Step) {
 	step.Node, step.Visit = n.ID, st.Visit
 	st.Steps = append(st.Steps, step)
 	f.since, st.Nudges, st.Begun, st.Advice, st.Held, st.refused = i, 0, false, nil, nil, 0
-	st.Callee, st.Returned, st.calleeInputs = "", nil, nil
+	st.Callee, st.Returned, st.calleeInputs, st.Note = "", nil, nil, ""
 	next := n.Next[step.Result.Outcome]
 	if next == "" && f.cleaning {
 		// The cleanup is over; the run's end is written next.
@@ -1162,7 +1208,7 @@ func (r *replay) enter(f *frame, i int, n *Node) {
 	f.visits[n.ID]++
 	st.Visit, st.Attempt = f.visits[n.ID], 1
 	f.since = i
-	st.clocked, st.Deadline, st.asked = false, time.Time{}, 0
+	st.clocked, st.Deadline, st.asked, st.reasked, st.reask = false, time.Time{}, 0, 0, false
 	r.entries++
 	r.bounds(f)
 }
