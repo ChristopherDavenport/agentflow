@@ -32,6 +32,12 @@ func knownKeys(n *yaml.Node, t reflect.Type) error {
 				return err
 			}
 		}
+	case t.Kind() == reflect.Map && n.Kind == yaml.MappingNode:
+		for i := 1; i < len(n.Content); i += 2 {
+			if err := knownKeys(n.Content[i], t.Elem()); err != nil {
+				return err
+			}
+		}
 	case t.Kind() == reflect.Slice && n.Kind == yaml.SequenceNode:
 		for _, c := range n.Content {
 			if err := knownKeys(c, t.Elem()); err != nil {

@@ -52,7 +52,10 @@ type Child struct {
 	// nested in, which hold its tools too.
 	maxSteps int
 	policies []ruled
-	made     **flow
+	// documents are the texts the call passed in of the documents its step
+	// reads.
+	documents map[string]string
+	made      **flow
 }
 
 // ChildSettings are what a step says of the child it runs in.
@@ -142,7 +145,7 @@ func (f *flow) childFor(st State, call *openresponses.FunctionCall, a callArgs) 
 		return Child{}, err
 	}
 	c := Child{Run: a.Run, Spawn: a.Spawn, Caller: call.CallID, Parent: st.Instance, Workflow: g.Name, Kept: a.Child,
-		Depth: st.Depth + 1, Path: slices.Clone(st.Path), parent: f, g: g, maxDepth: st.maxDepth, maxSteps: a.MaxSteps}
+		Depth: st.Depth + 1, Path: slices.Clone(st.Path), parent: f, g: g, maxDepth: st.maxDepth, maxSteps: a.MaxSteps, documents: a.Documents}
 	switch {
 	case call.Name == judgeTool:
 		c.Step, c.Judge = n.ID, true
@@ -284,6 +287,7 @@ func letGo(st State, p agentturn.PendingCall, a callArgs, done State, failed err
 			a.Failure = "agentflow: the model reported it is stuck: " + done.Steps[last].Result.Reason
 		default:
 			r := done.Steps[last].Result
+			r.Documents = editedDocuments(n, done.Documents)
 			a.Result = &r
 		}
 	default:

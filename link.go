@@ -184,7 +184,10 @@ func (g *Graph) refSchema(path string) *agenttool.Schema {
 	if err != nil {
 		return nil
 	}
-	if r.step == "" {
+	switch {
+	case r.doc != "":
+		return &agenttool.Schema{Type: "string"}
+	case r.step == "":
 		return member(g.Inputs, r.path)
 	}
 	n := g.node(r.step)

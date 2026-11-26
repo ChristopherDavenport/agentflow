@@ -231,6 +231,17 @@ func scriptsIn(g *agentflow.Graph, skill string, files map[string][]byte) error 
 			n.Instructions = strings.TrimSpace(string(text))
 		}
 	}
+	for name, d := range g.Documents {
+		if d.From == "" {
+			continue
+		}
+		text, ok := files[d.From]
+		if !ok {
+			return fmt.Errorf("workflow: skill %q: document %q starts from %q, which is not in it", skill, name, d.From)
+		}
+		d.Text = string(text)
+		g.Documents[name] = d
+	}
 	return g.Validate()
 }
 

@@ -156,10 +156,20 @@ func (g *Graph) stepGraph(n *Node) *Graph {
 	// decides what that means.
 	step := Node{ID: n.ID, Kind: Agent, Description: n.Description, Prompt: n.Prompt, Tools: n.Tools, Outcomes: n.Outcomes, Data: n.Data, With: with,
 		Model: cmp.Or(n.Model, g.Model), Thinking: cmp.Or(n.Thinking, g.Thinking), Timeout: n.Timeout, Policy: n.Policy, Skills: n.Skills,
-		Ends: map[string]string{Stuck: Stuck}}
+		Ends: map[string]string{Stuck: Stuck}, Reads: n.Reads, Edits: n.Edits}
+	// The documents it reads are the child's, as its call passes them in.
+	var docs map[string]Document
+	for name := range g.Documents {
+		if n.reads(name) {
+			if docs == nil {
+				docs = map[string]Document{}
+			}
+			docs[name] = Document{}
+		}
+	}
 	// The step's model is its workflow's, so the step reads its own
 	// child's conversation rather than opening another.
-	return &Graph{Name: g.Name + ":" + n.ID, Description: g.Description, Nodes: []Node{step}, Inputs: inputs, Sources: g.Sources, Model: step.Model}
+	return &Graph{Name: g.Name + ":" + n.ID, Description: g.Description, Nodes: []Node{step}, Inputs: inputs, Sources: g.Sources, Model: step.Model, Documents: docs}
 }
 
 // judgeGraph is the workflow a judge of n runs in its child: a model step

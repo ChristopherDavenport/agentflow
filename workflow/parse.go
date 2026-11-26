@@ -123,6 +123,24 @@ type frontmatter struct {
 	MaxSteps    int       `yaml:"max_steps"`
 	Model       string    `yaml:"model"`
 	Thinking    string    `yaml:"thinking"`
+	// Documents are the workflow's named markdown documents.
+	Documents map[string]*documentSpec `yaml:"documents"`
+}
+
+// documentSpec is how a document starts: from a file of the skill, or as
+// an input; empty with neither.
+type documentSpec struct {
+	From  string `yaml:"from"`
+	Input string `yaml:"input"`
+}
+
+// stepDocuments are the documents a step works with: those a model step
+// reads and edits, and those a script or tool step writes from members of
+// its result.
+type stepDocuments struct {
+	Read  []string          `yaml:"read"`
+	Edit  []string          `yaml:"edit"`
+	Write map[string]string `yaml:"write"`
 }
 
 type settings struct {
@@ -156,6 +174,8 @@ type settings struct {
 	Outcomes   []string  `yaml:"outcomes"`
 	Unattended yaml.Node `yaml:"unattended"`
 	MaxVisits  int       `yaml:"max_visits"`
+	// The documents the step works with.
+	Documents *stepDocuments `yaml:"documents"`
 	// A question's own settings.
 	Choices   yaml.Node `yaml:"choices"`
 	Text      yaml.Node `yaml:"text"`
@@ -201,6 +221,15 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 		}
 		outputs, g.MaxDepth, g.MaxSteps, g.Model, g.Thinking = fm.Outputs, fm.MaxDepth, fm.MaxSteps, fm.Model, fm.Thinking
 		g.Description = strings.TrimSpace(fm.Description)
+		for name, d := range fm.Documents {
+			if g.Documents == nil {
+				g.Documents = map[string]agentflow.Document{}
+			}
+			if d == nil {
+				d = &documentSpec{}
+			}
+			g.Documents[name] = agentflow.Document{From: d.From, Input: d.Input}
+		}
 		offset = end + 2
 		lines = lines[offset:]
 	}
@@ -443,6 +472,9 @@ func node(n *agentflow.Node, s section) error {
 	n.Context = set.Context
 	n.Dir, n.Model, n.InstructionsFile, n.Child = set.Dir, set.Model, set.Instructions, set.Child
 	n.Thinking, n.Policy = set.Thinking, set.Policy.policy()
+	if d := set.Documents; d != nil {
+		n.Reads, n.Edits, n.Writes = d.Read, d.Edit, d.Write
+	}
 	if set.Timeout != "" {
 		d, err := time.ParseDuration(set.Timeout)
 		if err != nil || d <= 0 {

@@ -208,6 +208,7 @@ and be none. Unknown keys are errors.
 | `text` | person | the outcome an answer in the person's own words takes, the words in its data (RFC 0004, section 25) |
 | `policy` | model, call | `allow` and `deny` rules in agentpolicy's grammar, which can only narrow what the host permits; on a call, for every model step it calls (RFC 0003, section 17) |
 | `child` | fresh model | a child kept across the visits and steps that name it (RFC 0002, section 11) |
+| `documents` | model; script, tool | on a model step, the documents it may `read` and `edit`; on a script or tool step, those it `write`s from members of its result. The frontmatter's `documents` declares them (RFC 0006, section 29) |
 | `outcomes` | all | ways the node can end; `[ok]` if absent |
 | `unattended` | person | outcome, and data, taken when nobody can be asked |
 | `judge` | person | that a model may answer: `criteria`, `outcomes` it may choose, `tools`, `max_returns`, `policy` |
@@ -239,7 +240,8 @@ with:
 
 A value is a literal or exactly one `${{ }}` expression: a reference, to
 `inputs.<name>` or `steps.<id>.outputs`, optionally followed by member
-names, or one of two forms over references. There are no operators, no
+names, or to `documents.<name>` (RFC 0006, section 29), or one of two
+forms over references. There are no operators, no
 interpolation, no other functions and no `if:`: a decision is a step with
 a named outcome, so every branch is in the diagram. In Go these are
 `From`, `Latest` and `Optional`.

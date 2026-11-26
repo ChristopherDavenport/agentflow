@@ -46,6 +46,23 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 		}
 		front.add("outputs", &out.Node)
 	}
+	if g.Documents != nil {
+		docs := mapping()
+		for _, name := range slices.Sorted(maps.Keys(g.Documents)) {
+			d := g.Documents[name]
+			spec := map[string]string{}
+			if d.From != "" {
+				spec["from"] = d.From
+			}
+			if d.Input != "" {
+				spec["input"] = d.Input
+			}
+			if err := docs.set(name, spec); err != nil {
+				return nil, err
+			}
+		}
+		front.add("documents", &docs.Node)
+	}
 	for _, s := range []struct {
 		key string
 		set bool
@@ -132,6 +149,16 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 	written.Sources = ""
 	// The file names a step's instructions, and loading reads them.
 	written.Nodes = slices.Clone(g.Nodes)
+	// And each document's first text, from its file.
+	if g.Documents != nil {
+		written.Documents = maps.Clone(g.Documents)
+		for name, d := range written.Documents {
+			if d.From != "" {
+				d.Text = ""
+				written.Documents[name] = d
+			}
+		}
+	}
 	for i := range written.Nodes {
 		if written.Nodes[i].InstructionsFile != "" {
 			written.Nodes[i].Instructions = ""
@@ -203,6 +230,19 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 	set("policy", n.Policy != nil, policyOut(n.Policy))
 	set("instructions", n.InstructionsFile != "", n.InstructionsFile)
 	set("child", n.Child != "", n.Child)
+	if n.Reads != nil || n.Edits != nil || n.Writes != nil {
+		docs := map[string]any{}
+		if n.Reads != nil {
+			docs["read"] = n.Reads
+		}
+		if n.Edits != nil {
+			docs["edit"] = n.Edits
+		}
+		if n.Writes != nil {
+			docs["write"] = n.Writes
+		}
+		set("documents", true, docs)
+	}
 	set("outcomes", n.Outcomes != nil, n.Outcomes)
 	if n.Data != nil {
 		out := mapping()

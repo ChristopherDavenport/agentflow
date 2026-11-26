@@ -91,6 +91,9 @@ type Result struct {
 	// Reason is why, in the words of whoever chose. It is for whoever
 	// reads the record: no step reads it as data.
 	Reason string `json:"reason,omitempty"`
+	// Documents are, for a fresh model step, the texts its child left the
+	// documents the step edits in, which the caller takes back.
+	Documents map[string]string `json:"documents,omitempty"`
 	// Entries and Granted are, for a call into a child, the steps its
 	// runs entered and the more a person granted there, which count
 	// toward the caller's tree. Limit names a bound across the tree its
@@ -175,6 +178,8 @@ type State struct {
 	// Deadline is when the current attempt of a model step must be done
 	// by, as the program's clock recorded it; zero for no timeout.
 	Deadline time.Time
+	// Documents are what the run's documents say, by name.
+	Documents map[string]string
 	// Path is the way from the root run to this one, with the step each
 	// is at.
 	Path []Place
@@ -210,6 +215,9 @@ type State struct {
 	maxSteps int
 	// calleeInputs is what Callee was started with.
 	calleeInputs any
+	// docAt says, for each document written, how many steps had finished
+	// when it was, plus one: which is newer than which, for latest.
+	docAt map[string]int
 	// limit names the bound across the tree the run failed on, which no
 	// caller may retry or route on.
 	limit string
@@ -264,6 +272,9 @@ type startPayload struct {
 	// called, so the child reads on its own.
 	Context string  `json:"context,omitempty"`
 	Path    []Place `json:"path,omitempty"`
+	// Documents are, for a run in a child, the texts its call passed in of
+	// the documents its step reads.
+	Documents map[string]string `json:"documents,omitempty"`
 }
 
 // pinned is one workflow a run may reach, as its start recorded it.
@@ -445,6 +456,7 @@ func (r *replay) top() *frame {
 // state is f's state as the rest of the package reads it.
 func (r *replay) state(f *frame) State {
 	st := f.st
+	st.Documents = maps.Clone(f.st.Documents)
 	st.abandoned = r.abandoned
 	st.Entries, st.Granted, st.maxSteps = r.entries, r.granted, r.maxSteps
 	st.Path = slices.Clone(r.root.path)
@@ -585,7 +597,7 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 		if !strings.HasPrefix(c.CallID, st.prefix) {
 			return
 		}
-	case c.Name == finishTool || c.Name == judgeTool:
+	case c.Name == finishTool || c.Name == judgeTool || c.Name == docReadTool || c.Name == docWriteTool:
 		if runOf(c.Arguments) != st.Instance {
 			return
 		}
@@ -674,6 +686,15 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 	case st.Held != nil:
 		// Nothing but the judge's look moves a held answer on.
 		return
+	case c.Name == docReadTool || c.Name == docWriteTool:
+		// A write the step may make sets the document's text, at this
+		// point of the run; a refused one, or a read, changes nothing.
+		if c.Name == docWriteTool && n.Kind == Agent && finishStep(c.Arguments) == n.ID && r.at[out.CallID] >= f.since {
+			if name, text, ok := docResult(out.Output.String()); ok && n.edits(name) {
+				st.write(name, text)
+			}
+		}
+		return
 	case n.Kind == Agent && !n.fresh():
 		// A finish that was rejected or is for another node is not
 		// progress; the model saw the error and goes on. A judge that
@@ -732,6 +753,19 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 			}
 			return
 		}
+		if err := n.written(st, res); err != nil {
+			st.Failure = err.Error()
+			return
+		}
+		if n.Kind == Agent && n.fresh() {
+			// What the child left the documents the step edits saying is
+			// theirs now.
+			for _, name := range slices.Sorted(maps.Keys(res.Documents)) {
+				if n.edits(name) && len(res.Documents[name]) <= MaxDocument {
+					st.write(name, res.Documents[name])
+				}
+			}
+		}
 	}
 	// A person's answer to a question judged unseen waits for the judge.
 	// An answer from anything else does not.
@@ -775,6 +809,7 @@ func (r *replay) started(i int, f *frame, c *openresponses.FunctionCall, out *op
 		root.st = State{Started: true, Instance: p.Run, Workflow: r.g.Name, Inputs: p.Inputs, Parent: p.Parent, Caller: p.Caller,
 			Depth: p.Depth, Fresh: p.Context == ContextFresh, g: r.g, prefix: prefix, maxDepth: cmpDepth(p.MaxDepth)}
 		root.path = p.Path
+		root.st.Documents, root.st.docAt = initialDocuments(r.g, p.Inputs, p.Documents)
 		root.start = r.at[c.CallID]
 		// A child is given what its caller's tree had left, none included.
 		r.maxSteps = p.MaxSteps
@@ -806,6 +841,7 @@ func (r *replay) started(i int, f *frame, c *openresponses.FunctionCall, out *op
 	st.Callee, st.calleeInputs = p.Run, p.Inputs
 	child := newFrame(State{Started: true, Instance: p.Run, Workflow: g.Name, Parent: p.Parent, Caller: p.Caller, Depth: p.Depth,
 		Inputs: p.Inputs, g: g, prefix: prefix, maxDepth: st.maxDepth}, r.at[c.CallID], f)
+	child.st.Documents, child.st.docAt = initialDocuments(g, p.Inputs, nil)
 	r.stack = append(r.stack, child)
 	r.frames = append(r.frames, child)
 	r.enter(child, i, &g.Nodes[0])

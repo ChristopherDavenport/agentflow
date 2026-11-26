@@ -191,6 +191,12 @@ type Node struct {
 	// to the step's. Loading reads each one's text into the definition,
 	// so its digest pins what the model is told.
 	Skills []StepSkill `json:",omitempty"`
+	// Reads and Edits name the documents a model step may read, and read
+	// and edit. Writes, on a script or tool step, sets documents from
+	// members of its result's data, by document.
+	Reads  []string          `json:",omitempty"`
+	Edits  []string          `json:",omitempty"`
+	Writes map[string]string `json:",omitempty"`
 	// Verdict says the node is a judge's: it ends with flow_judge, giving
 	// a reason. Only a workflow agentflow makes to judge a step has one.
 	Verdict bool `json:",omitempty"`
@@ -332,6 +338,8 @@ type Graph struct {
 	// enter, across every run it calls. 0 means [DefaultMaxSteps]; a
 	// host's [MaxSteps] may lower it.
 	MaxSteps int `json:",omitempty"`
+	// Documents are the workflow's named markdown documents, by name.
+	Documents map[string]Document `json:",omitempty"`
 	// Model and Thinking are what the workflow's model steps ask for when
 	// they do not say.
 	Model    string `json:",omitempty"`
@@ -555,6 +563,7 @@ func (g *Graph) Validate() error {
 		}
 	}
 	errs = append(errs, g.checkKept()...)
+	errs = append(errs, g.checkDocuments()...)
 	if len(g.Nodes) > 0 {
 		errs = append(errs, g.checkRefs()...)
 	}

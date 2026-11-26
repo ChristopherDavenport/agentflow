@@ -222,7 +222,7 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 	if (needs || len(f.modes) > 0) && f.children == nil {
 		return cfg, errors.New("agentflow: the graph runs work in children, a fresh step or call or a judge, and the host gave no Children to open them")
 	}
-	own := []agenttool.Tool{f.startTool(), f.askTool(), f.finishTool(), f.judgeTool(), f.endTool(), f.callTool(), f.clockTool(), f.stuckTool()}
+	own := append([]agenttool.Tool{f.startTool(), f.askTool(), f.finishTool(), f.judgeTool(), f.endTool(), f.callTool(), f.clockTool(), f.stuckTool()}, f.docTools()...)
 	if p := cfg.ToolProvider; p != nil {
 		cfg.ToolProvider = func(ctx context.Context) []agenttool.Tool {
 			return append(f.timed(p(ctx)), own...)
@@ -456,7 +456,8 @@ func (f *flow) prepare(ctx context.Context, req *openresponses.Request) error {
 			finish, more = judgeTool, map[string]any{"reason": map[string]any{"type": "string"}}
 		}
 		keep = func(name string) bool {
-			return name == finish || name == stuckTool && n.canStick() || slices.Contains(n.Tools, name)
+			return name == finish || name == stuckTool && n.canStick() || slices.Contains(n.Tools, name) ||
+				name == docReadTool && n.documented() || name == docWriteTool && len(n.Edits) > 0
 		}
 		if req.Tools, err = stepTools(req.Tools, finish, st, more); err != nil {
 			return err
@@ -514,16 +515,33 @@ func stepTools(tools openresponses.Tools, finish string, st State, more map[stri
 	if err != nil {
 		return nil, err
 	}
+	var read, write json.RawMessage
+	if n.documented() {
+		if read, write, err = docSchemas(st); err != nil {
+			return nil, err
+		}
+	}
 	out := slices.Clone(tools)
 	for i, t := range out {
-		if fn, ok := t.(*openresponses.FunctionTool); ok && (fn.Name == finish || fn.Name == stuckTool) {
-			own := *fn
-			own.Parameters, own.Strict = params, nil
-			if fn.Name == stuckTool {
-				own.Parameters = stuck
-			}
-			out[i] = &own
+		fn, ok := t.(*openresponses.FunctionTool)
+		if !ok {
+			continue
 		}
+		own := *fn
+		own.Strict = nil
+		switch {
+		case fn.Name == finish:
+			own.Parameters = params
+		case fn.Name == stuckTool:
+			own.Parameters = stuck
+		case fn.Name == docReadTool && read != nil:
+			own.Parameters = read
+		case fn.Name == docWriteTool && write != nil:
+			own.Parameters = write
+		default:
+			continue
+		}
+		out[i] = &own
 	}
 	return out, nil
 }
@@ -538,6 +556,7 @@ func (f *flow) instructions(st State) (string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are on step %q of workflow %q.\n%s", n.ID, st.g.Name, n.Prompt)
 	skillsText(&b, n.Skills)
+	documentsText(&b, st)
 	with, err := st.resolveAll(n.With)
 	if err != nil {
 		return "", fmt.Errorf("agentflow: step %q: %w", n.ID, err)
@@ -657,6 +676,9 @@ func (f *flow) call(st State) (name string, args any, err error) {
 			return "", nil, err
 		}
 		a := callArgs{Workflow: c.Name, Digest: c.OwnDigest(), Run: key, With: with, Context: ContextFresh, Child: n.Child, Spawn: key, MaxSteps: st.left()}
+		if n.Kind == Agent {
+			a.Documents = st.passedDocuments(n)
+		}
 		if spawn := st.kept[n.Child]; n.Child != "" && spawn != "" {
 			a.Spawn = spawn
 		}
@@ -903,6 +925,12 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 				return nil, nil
 			}
 			return block("only the workflow reads the clock")
+		}
+		if name == docReadTool || name == docWriteTool {
+			if err := checkDocCall(st, name, info.Args); err != nil {
+				return block(err.Error())
+			}
+			return nil, nil
 		}
 		if name == stuckTool && n.canStick() {
 			name = finish

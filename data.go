@@ -56,8 +56,10 @@ func (v Value) refs() []string {
 func Literal(v any) Value { return Value{Literal: v} }
 
 type ref struct {
-	// step is empty for a reference to the workflow's inputs.
+	// step is empty for a reference to the workflow's inputs, and doc
+	// names a document for a reference to its text.
 	step string
+	doc  string
 	path []string
 }
 
@@ -69,8 +71,10 @@ func parseRef(s string) (ref, error) {
 		return ref{path: p[1:]}, nil
 	case p[0] == "steps" && len(p) > 2 && p[2] == "outputs":
 		return ref{step: p[1], path: p[3:]}, nil
+	case p[0] == "documents" && len(p) == 2:
+		return ref{doc: p[1]}, nil
 	}
-	return ref{}, fmt.Errorf("invalid reference %q: want inputs.<name> or steps.<id>.outputs", s)
+	return ref{}, fmt.Errorf("invalid reference %q: want inputs.<name>, steps.<id>.outputs or documents.<name>", s)
 }
 
 // decode reads JSON keeping numbers as written.
@@ -150,6 +154,13 @@ func (st State) lookup(path string) (any, int, error) {
 	r, err := parseRef(path)
 	if err != nil {
 		return nil, 0, err
+	}
+	if r.doc != "" {
+		text, ok := st.Documents[r.doc]
+		if !ok {
+			return nil, 0, fmt.Errorf("%s: no document %q", path, r.doc)
+		}
+		return text, st.docAt[r.doc] - 1, nil
 	}
 	cur, at := st.Inputs, -1
 	if r.step != "" {
@@ -255,6 +266,12 @@ func (g *Graph) checkRefs() []error {
 		}
 		bad := func(format string, args ...any) {
 			errs = append(errs, fmt.Errorf("agentflow: %s: %s: "+format, append([]any{where, v.From}, args...)...))
+		}
+		if r.doc != "" {
+			if _, ok := g.Documents[r.doc]; !ok {
+				bad("no document %q%s", r.doc, suggest(r.doc, g.documentNames()))
+			}
+			return
 		}
 		if r.step == "" {
 			switch {
@@ -389,6 +406,12 @@ func (g *Graph) checkAlternatives() []error {
 // possible says r could have a value at all, which catches a misspelt
 // name that an optional reference would otherwise swallow.
 func (g *Graph) possible(r ref) error {
+	if r.doc != "" {
+		if _, ok := g.Documents[r.doc]; !ok {
+			return fmt.Errorf("no document %q%s", r.doc, suggest(r.doc, g.documentNames()))
+		}
+		return nil
+	}
 	if r.step == "" {
 		if g.Inputs == nil || !declares(g.Inputs, r.path[0]) {
 			return fmt.Errorf("not an input of the workflow%s", suggest(r.path[0], memberNames(g.Inputs)))
@@ -439,7 +462,8 @@ func (n *Node) available(refs []ref, have uint, outcome string) uint {
 func (g *Graph) reached(refs []ref) map[string]map[uint]bool {
 	var first uint
 	for i, r := range refs {
-		if r.step == "" && g.Inputs != nil && slices.Contains(g.Inputs.Required, r.path[0]) {
+		// A document always has a text, empty at first.
+		if r.doc != "" || r.step == "" && g.Inputs != nil && slices.Contains(g.Inputs.Required, r.path[0]) {
 			first |= 1 << i
 		}
 	}

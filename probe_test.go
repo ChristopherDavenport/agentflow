@@ -58,6 +58,13 @@ func runAndDie(t *testing.T, dir string, cfg agentturn.Config) {
 // session with cfg.
 func killed(t *testing.T, childCfg func() agentturn.Config, cfg agentturn.Config) *agentturn.Agent {
 	t.Helper()
+	return killedRecord(t, childCfg, func(*jsonl.Store, string) agentturn.Config { return cfg })
+}
+
+// killedRecord is [killed] with a config made for the resumed session,
+// which may read it as its record.
+func killedRecord(t *testing.T, childCfg func() agentturn.Config, makeCfg func(*jsonl.Store, string) agentturn.Config) *agentturn.Agent {
+	t.Helper()
 	if dir := os.Getenv(childEnv); dir != "" {
 		runAndDie(t, dir, childCfg())
 	}
@@ -83,7 +90,7 @@ func killed(t *testing.T, childCfg func() agentturn.Config, cfg agentturn.Config
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := agentturn.New(cfg, seed...)
+	a := agentturn.New(makeCfg(store, string(id)), seed...)
 	rec.Attach(a)
 	return a
 }
