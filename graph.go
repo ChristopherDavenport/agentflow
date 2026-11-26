@@ -211,6 +211,9 @@ type Node struct {
 	Reads  []string          `json:",omitempty"`
 	Edits  []string          `json:",omitempty"`
 	Writes map[string]string `json:",omitempty"`
+	// Show, on a script or tool step, is what a working model sees of its
+	// result; nil for all of it. See [Show].
+	Show *Show `json:",omitempty"`
 	// Verdict says the node is a judge's: it ends with flow_judge, giving
 	// a reason. Only a workflow agentflow makes to judge a step has one.
 	Verdict bool `json:",omitempty"`
@@ -512,6 +515,7 @@ func (g *Graph) Validate() error {
 		errs = append(errs, n.checkChild()...)
 		errs = append(errs, n.checkSettings()...)
 		errs = append(errs, n.checkFiles()...)
+		errs = append(errs, n.checkShow()...)
 		errs = append(errs, g.checkDir(n)...)
 		for _, v := range n.Files {
 			if s := g.refSchema(v.From); v.From != "" && s != nil && s.Type != "" && s.Type != "string" && (s.Type != "array" || s.Items != nil && s.Items.Type != "" && s.Items.Type != "string") {

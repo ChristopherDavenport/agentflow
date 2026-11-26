@@ -242,7 +242,7 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 	if (needs || len(f.modes) > 0) && f.children == nil {
 		return cfg, errors.New("agentflow: the graph runs work in children, a fresh step or call or a judge, and the host gave no Children to open them")
 	}
-	own := append([]agenttool.Tool{f.startTool(), f.askTool(), f.finishTool(), f.judgeTool(), f.endTool(), f.callTool(), f.clockTool(), f.stuckTool(), f.overrideTool(), f.filesTool()}, f.docTools()...)
+	own := append([]agenttool.Tool{f.startTool(), f.askTool(), f.finishTool(), f.judgeTool(), f.endTool(), f.callTool(), f.clockTool(), f.stuckTool(), f.overrideTool(), f.filesTool(), f.shownTool()}, f.docTools()...)
 	if p := cfg.ToolProvider; p != nil {
 		cfg.ToolProvider = func(ctx context.Context) []agenttool.Tool {
 			return append(f.timed(p(ctx)), own...)
@@ -470,7 +470,7 @@ func (f *flow) timeout(st State) time.Duration {
 // before the turn is recorded, so the record holds what was sent.
 func (f *flow) prepare(ctx context.Context, req *openresponses.Request) error {
 	st, all, err := f.read(ctx, req.Input)
-	if f.overdue(st, err) != nil {
+	if st.show != nil || f.overdue(st, err) != nil {
 		req.Model = programPrefix + f.g.Name
 		return nil
 	}
@@ -791,13 +791,17 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 	}
 	st, all, err := f.read(ctx, req.Input)
 	over := f.overdue(st, err)
-	if err != nil && over == nil {
+	if err != nil && over == nil && st.show == nil {
 		return err
 	}
 	e := openresponses.NewEmitter(sink, &openresponses.Response{Model: req.Model})
 	var id, name string
 	var args any
 	switch {
+	case st.show != nil:
+		// What a model sees of a result comes before anything a model
+		// could read it in.
+		id, name, args = st.show.id(), shownTool, st.show.args()
 	case over != nil:
 		over.Summary = f.summarize(ctx, st, all)
 		id, name, args = over.id, endTool, over
@@ -945,6 +949,12 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 	}
 	st, _, err := f.read(ctx, t)
 	name, id := info.Call.Name, info.Call.CallID
+	if name == shownTool {
+		if st.show == nil || id != st.show.id() {
+			return block("only the workflow shows a step's result")
+		}
+		return nil, nil
+	}
 	if name == endTool {
 		if over := f.overdue(st, err); over == nil || id != over.id {
 			return block("only the workflow ends a run")
@@ -1193,15 +1203,16 @@ func (f *flow) endTool() agenttool.Tool {
 }
 
 // withoutHidden keeps from the model flow_start, which holds the whole
-// definition, a judge's criteria among it, and a judge's look at an
-// answer it judged unseen.
+// definition, a judge's criteria among it, a judge's look at an answer it
+// judged unseen, and a result a flow_shown shows in its place.
 func withoutHidden(t openresponses.Items) openresponses.Items {
 	dropped := map[string]bool{}
+	shown := veiled(t)
 	var out openresponses.Items
 	for _, item := range t {
 		switch it := item.(type) {
 		case *openresponses.FunctionCall:
-			if hidden(it) {
+			if hidden(it) || shown[it.CallID] {
 				dropped[it.CallID] = true
 				continue
 			}

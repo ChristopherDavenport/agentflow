@@ -75,8 +75,9 @@ func (f *flow) read(ctx context.Context, local agentturn.Transcript) (State, age
 	return st, all, err
 }
 
-// visible drops from input what no model may read: flow_start, and a
-// judge's look at an answer a person gave, which it judged unseen.
+// visible drops from input what no model may read: flow_start, a
+// judge's look at an answer a person gave, which it judged unseen, and a
+// result a model sees only as its step's show says.
 func (f *flow) visible(input openresponses.Items, record agentturn.Transcript, st State) openresponses.Items {
 	if f.history == nil {
 		return withoutHidden(input)
@@ -92,6 +93,11 @@ func (f *flow) visible(input openresponses.Items, record agentturn.Transcript, s
 		if k := itemKey(item); !shown[k] {
 			hidden[k] = true
 		}
+	}
+	// A result whose flow_shown is still to be made is not read whole
+	// either.
+	if u := st.show; u != nil {
+		hidden["call "+u.of], hidden["output "+u.of] = true, true
 	}
 	if len(hidden) == 0 {
 		return input
@@ -132,6 +138,12 @@ func itemKey(item openresponses.Item) string {
 // stands.
 func (f *flow) transform(host func(context.Context, agentturn.Transcript) (agentturn.Transcript, error)) func(context.Context, agentturn.Transcript) (agentturn.Transcript, error) {
 	return func(ctx context.Context, t agentturn.Transcript) (agentturn.Transcript, error) {
+		// Between a result a model sees only in part and the flow_shown
+		// that shows it, the program's turn comes first, and nothing is
+		// summarised: a summary made then could take in the whole result.
+		if st, _, _ := f.read(ctx, t); st.show != nil {
+			return t, nil
+		}
 		if f.history == nil {
 			out, err := host(ctx, t)
 			if err != nil {
@@ -160,10 +172,23 @@ func (f *flow) transform(host func(context.Context, agentturn.Transcript) (agent
 // result by a note saying whose it was, since a summarizer cannot tell
 // and writes that the assistant did it.
 //
+// A result a step shows only in part, through flow_shown, is left out,
+// and the shown part noted, so the whole result reaches no summary.
+//
 // It shapes only what the summarizer reads. The request keeps its items
 // and its hash.
 func SummaryFilter(t agentturn.Transcript) agentturn.Transcript {
 	items := agentturn.DefaultFilter(t)
+	shown := veiled(openresponses.Items(items))
+	items = slices.DeleteFunc(slices.Clone(items), func(item openresponses.Item) bool {
+		switch it := item.(type) {
+		case *openresponses.FunctionCall:
+			return shown[it.CallID]
+		case *openresponses.FunctionCallOutput:
+			return shown[it.CallID]
+		}
+		return false
+	})
 	outputs := map[string]string{}
 	others := map[string]bool{}
 	for _, item := range items {
@@ -258,6 +283,10 @@ func note(c *openresponses.FunctionCall, result string, answered bool) string {
 			where = " in a session of its own"
 		}
 		return fmt.Sprintf("%sthe workflow, not the assistant, called the workflow %s%s, which came to: %s", recordPrefix, a.Workflow, where, result)
+	case shownTool:
+		var a shownArgs
+		_ = decode([]byte(c.Arguments), &a)
+		return fmt.Sprintf("%sthe workflow, not the assistant, ran step %q, which shows of its result: %s", recordPrefix, a.Step, result)
 	case ScriptTool:
 		var sc ScriptCall
 		_ = decode([]byte(c.Arguments), &sc)

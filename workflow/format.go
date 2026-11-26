@@ -257,6 +257,13 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 		}
 		set("documents", true, docs)
 	}
+	switch {
+	case n.Show == nil:
+	case len(n.Show.Members) == 0:
+		set("show", true, "none")
+	default:
+		set("show", true, n.Show.Members)
+	}
 	set("outcomes", n.Outcomes != nil, n.Outcomes)
 	if n.Data != nil {
 		out := mapping()
