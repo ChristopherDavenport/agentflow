@@ -22,7 +22,28 @@ const (
 	maxProgress = 1 << 20
 	// maxProgressLine bounds one update. A longer line is not reported.
 	maxProgressLine = 4 << 10
+	// MaxKeptProgress bounds the updates of one call that are kept in the
+	// session. Later ones are reported as they come and not kept.
+	MaxKeptProgress = 256
 )
+
+// ProgressNS is the namespace of the session entry each kept update is
+// written under, beside the call that reported it.
+const ProgressNS = "agentflow:progress"
+
+// ProgressRecord is a kept update: what a front reads back of a script's
+// progress after the process that ran it has gone. Seq counts the call's
+// kept updates from 1.
+type ProgressRecord struct {
+	Seq      int     `json:"seq"`
+	Progress float64 `json:"progress,omitempty"`
+	Total    float64 `json:"total,omitempty"`
+	Message  string  `json:"message,omitempty"`
+}
+
+// RecordNS returns [ProgressNS], so a recorder writes the update as a
+// custom entry of that namespace.
+func (ProgressRecord) RecordNS() string { return ProgressNS }
 
 // progressLine is one line of a progress file.
 type progressLine struct {
@@ -34,12 +55,25 @@ type progressLine struct {
 // watchProgress reports each line a script appends to the progress file
 // name, until the stop it returns is called, which reports what is left
 // and waits. The updates go to the call on ctx, as a long-running tool's
-// do; none is recorded with the result, which they do not change.
+// do, and the first [MaxKeptProgress] are written to the record on ctx
+// as [ProgressRecord]s; none is part of the result, which they do not
+// change, and none is an item of the transcript, which a model reads.
 func watchProgress(ctx context.Context, fsys fs.FS, name string) (stop func()) {
 	done, finished := make(chan struct{}), make(chan struct{})
-	var read int
+	var read, kept int
 	var partial []byte
-	report := func(final bool) {
+	update := func(ctx context.Context, line []byte) {
+		if p, ok := progressOf(line); ok {
+			report(ctx, p)
+			if kept < MaxKeptProgress {
+				kept++
+				// A record that cannot be written costs the front a line
+				// of progress, and never the script its run.
+				_ = agenttool.WriteRecord(ctx, ProgressRecord{Seq: kept, Progress: p.Progress, Total: p.Total, Message: p.Message})
+			}
+		}
+	}
+	scan := func(final bool) {
 		if read >= maxProgress {
 			return
 		}
@@ -73,14 +107,14 @@ func watchProgress(ctx context.Context, fsys fs.FS, name string) (stop func()) {
 			case <-ctx.Done():
 				return
 			case <-tick.C:
-				report(false)
+				scan(false)
 			}
 		}
 	}()
 	return func() {
 		close(done)
 		<-finished
-		report(true)
+		scan(true)
 	}
 }
 
@@ -98,17 +132,23 @@ func readFrom(fsys fs.FS, name string, offset int) ([]byte, error) {
 	return b[offset:], nil
 }
 
-// update reports one line: an update of numbers and a message, or of a
-// message alone when the line is not one.
-func update(ctx context.Context, line []byte) {
+// progressOf reads one line: an update of numbers and a message, or of
+// a message alone when the line is not one. A blank or long line is
+// none.
+func progressOf(line []byte) (progressLine, bool) {
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 || len(line) > maxProgressLine {
-		return
+		return progressLine{}, false
 	}
 	var p progressLine
 	if line[0] != '{' || json.Unmarshal(line, &p) != nil {
 		p = progressLine{Message: string(line)}
 	}
+	return p, true
+}
+
+// report sends one update to the call on ctx.
+func report(ctx context.Context, p progressLine) {
 	text := p.Message
 	if p.Total > 0 {
 		text = strings.TrimSpace(fmt.Sprintf("%g/%g %s", p.Progress, p.Total, p.Message))
