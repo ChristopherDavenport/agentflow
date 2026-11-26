@@ -97,10 +97,15 @@ type Instance struct {
 func Instances(t agentturn.Transcript) ([]Instance, error) {
 	calls := map[string]int{}
 	var out []Instance
+	started, made := false, false
 	for i, item := range t {
 		switch it := item.(type) {
 		case *openresponses.FunctionCall:
 			calls[it.CallID] = i
+			if strings.HasPrefix(it.CallID, reserved) {
+				started = started || it.Name == startTool
+				made = true
+			}
 		case *openresponses.FunctionCallOutput:
 			at, ok := calls[it.CallID]
 			if !ok {
@@ -116,6 +121,9 @@ func Instances(t agentturn.Transcript) ([]Instance, error) {
 			}
 			out = append(out, in)
 		}
+	}
+	if made && !started {
+		return nil, fmt.Errorf("%w: calls of a workflow and no flow_start; read every item of the session's path, not the context rebuilt from it", ErrPositionLost)
 	}
 	return out, nil
 }

@@ -152,9 +152,10 @@ func Apply(g *Graph, cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 	return cfg, nil
 }
 
-// ErrPositionLost is a transform, a compaction say, whose result no
-// longer says where the workflow stands.
-var ErrPositionLost = errors.New("agentflow: the transform dropped what the workflow's position is read from")
+// ErrPositionLost is a transcript that no longer says where the workflow
+// stands: a transform, a compaction say, dropped part of a run, or the
+// transcript was rebuilt from a session without it.
+var ErrPositionLost = errors.New("agentflow: what the workflow's position is read from is gone")
 
 func (f *flow) samePosition(before, after agentturn.Transcript) error {
 	b, err := f.g.Replay(before)

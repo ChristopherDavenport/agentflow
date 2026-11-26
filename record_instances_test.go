@@ -44,10 +44,7 @@ func recorded(t *testing.T, g *Graph, tool agenttool.Tool, m *cast, opts ...Opti
 			t.Fatal(err)
 		}
 		checkHashes(t, got)
-		items, _, _, err := session.TranscriptMarks(got)
-		if err != nil {
-			t.Fatal(err)
-		}
+		items := pathItems(got)
 		all, err := Instances(items)
 		if err != nil {
 			t.Fatal(err)
@@ -65,6 +62,68 @@ func recorded(t *testing.T, g *Graph, tool agenttool.Tool, m *cast, opts ...Opti
 func run(a *agentturn.Agent) *agentturn.RunEnd {
 	end, _ := a.Prompt(context.Background(), openresponses.UserText("go"))
 	return end
+}
+
+// pathItems is every item of the session's path. The context rebuilt
+// from it leaves out what the last request did.
+func pathItems(s *agentsession.Session) (out agentturn.Transcript) {
+	for _, e := range s.Path(s.Leaf()) {
+		if item, ok := e.(*agentsession.ItemEntry); ok {
+			out = append(out, item.Item)
+		}
+	}
+	return out
+}
+
+// A session rebuilt for a run that stopped inside a model step has lost
+// the items its last request left out. That is refused, not begun again.
+func TestATrimmedTranscriptIsRefused(t *testing.T) {
+	ctx := context.Background()
+	store, err := jsonl.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, s, err := session.Start(ctx, store, agentsession.Header{CWD: "/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ran []string
+	g := release()
+	config := func(m *cast) agentturn.Config {
+		cfg, err := Apply(g, agentturn.Config{Model: m, ModelName: "w", Tools: []agenttool.Tool{scriptTool(&ran)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+	// The model only talks, so the run ends in the middle of review.
+	a := agentturn.New(config(&cast{script: []says{{}}}))
+	rec.Attach(a)
+	start(t, a)
+	got, err := store.Open(ctx, s.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	trimmed, err := session.Transcript(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.Replay(trimmed); !errors.Is(err, ErrPositionLost) {
+		t.Errorf("replay: %v", err)
+	}
+	if _, err := Instances(trimmed); !errors.Is(err, ErrPositionLost) {
+		t.Errorf("instances: %v", err)
+	}
+	ran = nil
+	b := agentturn.New(config(&cast{script: []says{clean}}), agentturn.WithTranscript(trimmed))
+	if end := run(b); !errors.Is(end.Err, ErrPositionLost) || len(ran) != 0 {
+		t.Errorf("resumed: %v, ran %v", end.Err, ran)
+	}
+	// Every item of the path still says where it stood.
+	st, err := g.Replay(pathItems(got))
+	if err != nil || st.Node == nil || st.Node.ID != "review" {
+		t.Errorf("path items: %+v, %v", st, err)
+	}
 }
 
 func steps(st State) (out []string) {

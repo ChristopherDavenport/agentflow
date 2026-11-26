@@ -61,6 +61,11 @@ agentflow.Apply(graph, cfg, agentflow.Delegate(agentflow.Decide, "approve")) // 
 A session says which runs it holds and how each ended, whatever the
 workflow has become since:
 
+Give it every item of the session's path. The context
+`agentturn/session` rebuilds leaves out what the last request did, and a
+workflow stopped inside a model step cannot yet be resumed from it: it is
+refused, see the RFC.
+
 ```go
 runs, err := agentflow.Instances(transcript)
 state, err := runs[0].At(transcript, i) // where it stood after item i

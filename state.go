@@ -195,6 +195,8 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 		// unseen outlives an instance: a later one's model reads the
 		// same transcript.
 		unseen [][2]int
+		// orphaned says something a run made is here with its start gone.
+		orphaned bool
 	)
 	// finish ends the current node with step, at item i.
 	finish := func(i int, step Step) {
@@ -241,12 +243,16 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 						left = ending(st, failed)
 					}
 					st, failed, visits = State{Inputs: inputs, abandoned: left}, nil, map[string]int{}
+					orphaned = false
+					orphaned = false
 					continue
 				}
 			}
 			switch {
 			// A judge that replied in words is waited on no longer: the
 			// next thing said, the driver's or the person's, moves on.
+			case !st.Started && it.Role == openresponses.RoleUser && strings.HasPrefix(it.Text(), beginPrefix):
+				orphaned = true
 			case st.Held != nil && it.Role == openresponses.RoleUser && (st.talked || strings.HasPrefix(it.Text(), noVerdict)):
 				release(i, nil)
 			case st.Held != nil && st.Begun && it.Role == openresponses.RoleAssistant:
@@ -259,6 +265,9 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 				st.Reported = true
 			}
 		case *openresponses.FunctionCall:
+			// Only the program makes these IDs. Its start and an earlier
+			// run's end are the two that stand without a run.
+			orphaned = orphaned || !st.Started && it.Name != startTool && it.Name != endTool && strings.HasPrefix(it.CallID, g.idPrefix())
 			calls[it.CallID] = it
 			at[it.CallID] = i
 		case *openresponses.FunctionCallOutput:
@@ -364,6 +373,10 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 		}
 	}
 	st.unseen = unseen
+	// Starting again would run every step a second time.
+	if orphaned && !st.Started && failed == nil {
+		return st, fmt.Errorf("%w: the transcript holds a run of %q without its start", ErrPositionLost, g.Name)
+	}
 	return st, failed
 }
 

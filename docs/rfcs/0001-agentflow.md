@@ -338,6 +338,25 @@ unfinished instance. After an instance has finished and said so, a plain
 prompt is a conversation with the model, with its tools. An instance
 that failed stays failed until an invocation.
 
+### Resuming a session (broken for a run stopped inside a model step)
+
+Leaving an item out of a request, for a fresh step, for what a blind
+judge did or for `flow_start`, is recorded as an omission, and
+`agentturn/session` reads an omission in force as a trim: `Transcript`
+and `AgentOptions` rebuild the conversation without those items. A
+program turn sends everything and lifts it, so a session left at a
+question resumes. One left inside a model step, by a stall, a model error
+or a kill, or after a model's reply to a finished workflow, does not.
+Until 2026-11-26 it then started the workflow again, running its steps a
+second time. Now `Replay` returns `ErrPositionLost` when it finds a run's
+calls or step messages without its start, and `Instances` when it finds
+no start at all.
+
+Every item of the session's path still holds the position, so read those,
+not the rebuilt context. Resuming an agent on them has not been built or
+tried. Open: a helper that seeds an agent that way, and a way in
+`agentturn/session` to say an omission was for one request.
+
 ### Leaving, and reading it back (spiked)
 
 An instance's end is written, not inferred. The program calls `flow_end`
@@ -354,7 +373,8 @@ interrupted, or left by a host that never prompted again. A run stopped
 by a model error or a turn limit has not left the workflow. Only the
 program may call `flow_end`.
 
-`Instances(transcript)` lists the runs of a transcript with where each
+`Instances(transcript)`, given every item of a session's path, lists the
+runs with where each
 starts and ends, its status, the definition it ran and its state, and
 `Instance.At` gives the state after any item. It needs neither the
 current workflow nor a graph: it reads the recorded definition, checks it
