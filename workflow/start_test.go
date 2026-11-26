@@ -338,3 +338,33 @@ func (stuckModel) CreateStream(_ context.Context, req openresponses.Request, sin
 	}
 	return e.Complete()
 }
+
+// A workflow whose frontmatter says hidden is one only workflows call: the
+// skill tool refuses to start it, and the prompt does not offer it.
+func TestAHiddenWorkflowIsNotStartedFromItsSkill(t *testing.T) {
+	dir := t.TempDir()
+	skill(t, dir, "helper", map[string]string{"WORKFLOW.md": strings.Replace(greetFlow, "---\ninputs:", "---\nhidden: true\ninputs:", 1)})
+	catalog, err := agentskill.DiscoverDirs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, ok := catalog.Lookup("helper")
+	if !ok {
+		t.Fatal("no skill helper")
+	}
+	w, err := workflow.Load(s)
+	if err != nil || !w.Graph.Hidden {
+		t.Fatalf("loaded %+v, %v", w, err)
+	}
+	flows := []*workflow.Workflow{w}
+	tool, err := workflow.SkillTool(catalog, flows, workflow.ModelInvokes("helper"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ask(t, tool, nil, `{"name":"helper","inputs":{"who":"x"}}`); err == nil || !strings.Contains(err.Error(), "only for other workflows to call") {
+		t.Errorf("err = %v", err)
+	}
+	if text := workflow.StartPrompt(flows, workflow.ModelInvokes("helper")); strings.Contains(text, "helper") {
+		t.Errorf("the prompt offers a hidden workflow: %q", text)
+	}
+}

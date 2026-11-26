@@ -202,18 +202,20 @@ and be none. Unknown keys are errors.
 | `flow` | program | a workflow to call instead: a skill's name, or `./<path>.md` in this skill; see [RFC 0002](0002-nesting-and-children.md) |
 | `with` | all | the step's inputs, by name |
 | `outputs` | all | schema of the step's data, by outcome |
-| `tools` | model | tools the model may call; none if absent |
+| `tools` | model | tools the model may call; none if absent; `all` for every tool the host offers (RFC 0008, section 5) |
+| `exclude_tools` | model, frontmatter | tools the step is never offered, whatever `tools` says; the frontmatter's hold every model step and judge of the workflow (RFC 0008, section 5) |
 | `skills` | model | skills whose instructions are added to the step's, read and pinned at load; they grant no tools (RFC 0005, section 16) |
 | `context` | model, call | `session` or `fresh`, a child session; see [Context](#context-spiked). `session` is the default, except for a model step that asks for another model than its workflow's, which defaults to `fresh` (RFC 0003, section 14) |
 | `dir` | fresh model, fresh call, script | the directory below the workspace's root the step works in: a path, or a reference to one, resolved when the call is made and recorded in it (RFC 0002, section 10) |
 | `instructions` | fresh model, fresh call | a file of the skill added to the child's instructions (RFC 0002, section 10) |
 | `model`, `thinking` | model; `model` also a fresh call | the model a step asks and how hard it reasons; the frontmatter's `model` and `thinking` are the workflow's defaults (RFC 0003, section 14) |
-| `timeout` | script, tool, model, person | a duration past which the step fails and asks to be retried (RFC 0003, section 13); on a person step, past which the question takes `on_timeout` (RFC 0004, section 26) |
+| `timeout` | script, tool, model, person, call, frontmatter | a duration past which the step fails and asks to be retried (RFC 0003, section 13); on a person step, past which the question takes `on_timeout` (RFC 0004, section 26); on a call, past which the runs it waits on are abandoned and it fails, routable on `failed`; the frontmatter's is the default of every script, tool and model step (RFC 0008, section 3) |
 | `on_timeout` | person | the outcome, and data, a question takes when its timeout passes unanswered (RFC 0004, section 26) |
 | `choices` | person | values an answer picks from, one or many, resolved from an earlier result into the question (RFC 0004, section 24) |
 | `text` | person | the outcome an answer in the person's own words takes, the words in its data (RFC 0004, section 25) |
-| `policy` | model, call | `allow` and `deny` rules in agentpolicy's grammar, which can only narrow what the host permits; on a call, for every model step it calls (RFC 0003, section 17) |
+| `policy` | model, call | `allow` and `deny` rules in agentpolicy's grammar, which can only narrow what the host permits; on a call, for every model step it calls (RFC 0003, section 17). A rule may take its paths or commands from the record (RFC 0008, section 1) |
 | `child` | fresh model | a child kept across the visits and steps that name it (RFC 0002, section 11) |
+| `context`, `hidden` | frontmatter | `context: fresh` runs every call to the workflow in a child; `hidden: true` lets only a calling workflow run it (RFC 0008, section 4) |
 | `on_abort` | frontmatter | the step a cleanup path starts at, run when the run is abandoned (RFC 0006, section 30) |
 | `files` | model | files given to the step as context when it opens, in order: workspace paths, literal or referred to, and `./` files of the skill, read and pinned at load (RFC 0006, section 34) |
 | `documents` | model; script, tool | on a model step, the documents it may `read` and `edit`; on a script or tool step, those it `write`s from members of its result. The frontmatter's `documents` declares them (RFC 0006, section 29) |
@@ -238,7 +240,10 @@ outputs:
 ```
 
 Outputs may instead be given by outcome, as a step's are; see
-[RFC 0002](0002-nesting-and-children.md).
+[RFC 0002](0002-nesting-and-children.md). An input that is not required
+may have a `default`, which a run's start records in its inputs when the
+invocation or the caller leaves it out; see
+[RFC 0008](0008-contracts-and-step-settings.md), section 2.
 
 ```yaml
 tool: git_tag
@@ -254,6 +259,13 @@ forms over references. There are no operators, no
 interpolation, no other functions and no `if:`: a decision is a step with
 a named outcome, so every branch is in the diagram. In Go these are
 `From`, `Latest` and `Optional`.
+
+The one place a value is put into text is a person step's question,
+which may hold these expressions to be filled in when it is asked. The
+question records both the text as asked and the text as written, and its
+`version` is read from the written text, so answers still join across
+sessions; see [RFC 0008](0008-contracts-and-step-settings.md), section 1.
+A model step's prompt takes none: its values go through `with`.
 
 | Expression | Value |
 |---|---|

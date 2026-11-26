@@ -89,10 +89,9 @@ workflow's, which reads nothing.
   starts none. A workflow not named is refused with a reason saying a
   person can start it.
 - **A hidden workflow** (`Graph.Hidden`, frontmatter `hidden: true`) is
-  refused whatever the host names. It is only for other workflows to
-  call. This change adds the field; the frontmatter key is read by the
-  loader with the work that defines `hidden`, and until then it is set
-  in Go.
+  refused whatever the host names, and `workflow.StartPrompt` leaves it
+  out. It is only for other workflows to call (RFC 0008, section 4, which
+  defines the key and the field).
 - **Only in conversation.** A request while a run is under way is
   refused (`agentflow.UnderWay`): inside a running step the model is
   working on that step, and a new invocation would abandon the run it is

@@ -252,6 +252,9 @@ func (g *Graph) contract(n *Node) []error {
 	bad := func(format string, args ...any) {
 		errs = append(errs, fmt.Errorf("agentflow: %s: node %q calls %s: "+format, append([]any{g.Name, n.ID, c.Name}, args...)...))
 	}
+	if c.Context == ContextFresh && n.Context == ContextSession {
+		bad("it says it runs in a child of its own, context: %s, and the call says %s", ContextFresh, ContextSession)
+	}
 	if len(n.Outcomes) > 0 {
 		own := slices.Sorted(slices.Values(n.Outcomes))
 		without := slices.DeleteFunc(slices.Clone(n.call.outcomes), func(o string) bool { return o == Failed })

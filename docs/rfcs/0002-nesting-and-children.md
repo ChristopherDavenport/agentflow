@@ -539,8 +539,8 @@ instructions: prompts/api.md   # a file in the skill
     judge's look gives no verdict, so the person is asked. Unattended,
     the run fails as for any failed step. No step of the child ran, so
     nothing is added to the caller's count. Setting such a call aside,
-    by an override or an invocation, answers it the same way and never
-    fails for it. Any other opener error is the host's and comes back
+    by an override, an invocation or its call's timeout (RFC 0008,
+    section 3), answers it the same way and never fails for it. Any other opener error is the host's and comes back
     from `Drive`, the call still held.
   - **A script step takes `dir`** and runs there, through the
     workspace's `Command.Dir`, so a script can work in a worktree an

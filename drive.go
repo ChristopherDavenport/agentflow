@@ -92,6 +92,20 @@ func (f *flow) drive(ctx context.Context, a *agentturn.Agent, end *agentturn.Run
 			return end, st, end.Err
 		case err != nil:
 			return end, st, err
+		case end.Reason == agentturn.ReasonInputRequired && f.callExpired(st) != nil:
+			// A call the waiting run is nested in has run out of time: what
+			// waits is set aside, and the program says so, which abandons the
+			// runs the call waits on.
+			outs, err := f.setAside(ctx, a, timedOutText, f.callExpired(st).why())
+			if err != nil {
+				return end, st, err
+			}
+			next, err := a.Prompt(ctx, outs...)
+			if next == nil {
+				return end, st, err
+			}
+			end = next
+			continue
 		case requested && req.Workflow != f.g.Name:
 			// Another workflow's config is the host's to apply.
 			return end, st, req

@@ -282,8 +282,8 @@ func (g *Graph) checkRefs() []error {
 			switch {
 			case g.Inputs == nil || !declares(g.Inputs, r.path[0]):
 				bad("not an input of the workflow%s", suggest(r.path[0], memberNames(g.Inputs)))
-			case !slices.Contains(g.Inputs.Required, r.path[0]):
-				bad("not a required input of the workflow")
+			case !g.certainInput(r.path[0]):
+				bad("not a required input of the workflow, nor one with a default")
 			}
 			return
 		}
@@ -305,6 +305,16 @@ func (g *Graph) checkRefs() []error {
 		}
 		if c := n.Choices; c != nil && plain(c.From) {
 			use("node "+n.ID+": choices", c.From, at)
+		}
+		for _, v := range n.questionValues() {
+			if plain(v) {
+				use("node "+n.ID+": question", v, at)
+			}
+		}
+		for _, v := range n.Policy.dataValues() {
+			if plain(v) {
+				use("node "+n.ID+": policy", v, at)
+			}
 		}
 		for _, name := range slices.Sorted(maps.Keys(n.With)) {
 			if v := n.With[name]; plain(v) {
@@ -389,6 +399,16 @@ func (g *Graph) checkAlternatives() []error {
 		}
 		if c := n.Choices; c != nil {
 			check("node "+n.ID+": choices", c.From, func(refs []ref) bool {
+				return !g.reached(refs)[n.ID][0]
+			})
+		}
+		for _, v := range n.questionValues() {
+			check("node "+n.ID+": question", v, func(refs []ref) bool {
+				return !g.reached(refs)[n.ID][0]
+			})
+		}
+		for _, v := range n.Policy.dataValues() {
+			check("node "+n.ID+": policy", v, func(refs []ref) bool {
 				return !g.reached(refs)[n.ID][0]
 			})
 		}
@@ -486,7 +506,7 @@ func (g *Graph) reached(refs []ref) map[string]map[uint]bool {
 	var first uint
 	for i, r := range refs {
 		// A document always has a text, empty at first.
-		if r.doc != "" || r.step == "" && g.Inputs != nil && slices.Contains(g.Inputs.Required, r.path[0]) {
+		if r.doc != "" || r.step == "" && g.certainInput(r.path[0]) {
 			first |= 1 << i
 		}
 	}

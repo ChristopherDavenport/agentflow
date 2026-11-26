@@ -164,8 +164,13 @@ type Node struct {
 
 	// Prompt is an Agent node's instructions or a Person node's question.
 	Prompt string
-	// Tools names the tools an Agent node may call.
-	Tools []string
+	// Tools names the tools an Agent node may call. AllTools, written
+	// tools: all, offers every tool the host does instead, and
+	// ExcludeTools takes tools out of what the step is offered, with the
+	// workflow's own [Graph.ExcludeTools].
+	Tools        []string
+	AllTools     bool     `json:",omitempty"`
+	ExcludeTools []string `json:",omitempty"`
 	// Context is [ContextSession], [ContextFresh] or empty, on an Agent
 	// node or a call.
 	Context string
@@ -346,12 +351,14 @@ type Graph struct {
 	Name string
 	// Description says what the workflow is for, as a step's does.
 	Description string `json:",omitempty"`
-	// Hidden says the workflow is only for other workflows to call: no
-	// model starts it by asking for its skill.
-	Hidden bool `json:",omitempty"`
-	Nodes  []Node
+	Nodes       []Node
 	// Inputs is the schema of what an invocation carries.
 	Inputs *agenttool.Schema
+	// InputDefaults are the values of inputs an invocation or a caller may
+	// leave out, by name. A run's start records its inputs with them
+	// filled in, so the record holds what the run was given. An input with
+	// a default is not required.
+	InputDefaults map[string]any `json:",omitempty"`
 	// Outputs is what the finished workflow gives back, whatever its
 	// outcome.
 	Outputs map[string]Value
@@ -372,6 +379,20 @@ type Graph struct {
 	OnAbort string `json:",omitempty"`
 	// Documents are the workflow's named markdown documents, by name.
 	Documents map[string]Document `json:",omitempty"`
+	// Context, set to [ContextFresh], says every call to the workflow runs
+	// it in a child of its own, whatever the call says; a call that says
+	// context session is a load error. Empty leaves it to each call.
+	Context string `json:",omitempty"`
+	// Hidden says the workflow is run only by other workflows that call
+	// it: neither an invocation nor a model's request for its skill starts
+	// it, and a catalog should leave it out.
+	Hidden bool `json:",omitempty"`
+	// Timeout bounds each script, tool and model step of the workflow that
+	// sets no timeout of its own. A question's and a call's are their own.
+	Timeout time.Duration `json:",omitempty"`
+	// ExcludeTools are tools no model step of the workflow is offered,
+	// whatever it names, and no judge of it may call.
+	ExcludeTools []string `json:",omitempty"`
 	// Model and Thinking are what the workflow's model steps ask for when
 	// they do not say.
 	Model    string `json:",omitempty"`
@@ -451,6 +472,18 @@ func (g *Graph) Validate() error {
 	if g.Outputs != nil && g.OutputsBy != nil {
 		bad("outputs are either by outcome or for every outcome")
 	}
+	errs = append(errs, g.checkDefaults()...)
+	if g.Timeout < 0 || g.Timeout > MaxTimeout {
+		bad("timeout must be above 0 and at most %s", MaxTimeout)
+	}
+	if g.Context != "" && g.Context != ContextFresh {
+		bad("context %q: a workflow may say only %q, that every call runs it in a child; leave it out to let each call say%s", g.Context, ContextFresh, suggest(g.Context, []string{ContextFresh}))
+	}
+	for _, tool := range g.ExcludeTools {
+		if tool == ScriptTool || strings.HasPrefix(tool, reserved) {
+			bad("exclude_tools: %s is the program's, which no model step is offered", tool)
+		}
+	}
 	if len(g.Nodes) == 0 {
 		bad("graph has no nodes")
 	}
@@ -519,10 +552,19 @@ func (g *Graph) Validate() error {
 		errs = append(errs, n.checkSettings()...)
 		errs = append(errs, n.checkFiles()...)
 		errs = append(errs, n.checkShow()...)
+		errs = append(errs, g.checkOffer(n)...)
+		errs = append(errs, n.checkTemplate()...)
 		errs = append(errs, g.checkDir(n)...)
 		for _, v := range n.Files {
 			if s := g.refSchema(v.From); v.From != "" && s != nil && s.Type != "" && s.Type != "string" && (s.Type != "array" || s.Items != nil && s.Items.Type != "" && s.Items.Type != "string") {
 				bad("node %q: file %s is not a path, nor a list of paths", n.ID, v.From)
+			}
+		}
+		for _, v := range n.Policy.dataValues() {
+			for _, from := range v.refs() {
+				if s := g.refSchema(from); s != nil && s.Type != "" && s.Type != "string" && (s.Type != "array" || s.Items != nil && s.Items.Type != "" && s.Items.Type != "string") {
+					bad("node %q: policy: %s is not a string, nor a list of them", n.ID, from)
+				}
 			}
 		}
 		if j := n.Judge; j != nil {

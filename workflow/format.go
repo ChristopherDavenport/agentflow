@@ -34,7 +34,19 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 		}
 	}
 	if g.Inputs != nil {
-		front.add("inputs", fields(g.Inputs))
+		inputs := fields(g.Inputs)
+		// An input's default is written beside its schema.
+		for i := 0; i+1 < len(inputs.Content); i += 2 {
+			if d, ok := g.InputDefaults[inputs.Content[i].Value]; ok {
+				var v yaml.Node
+				if err := v.Encode(d); err != nil {
+					return nil, err
+				}
+				m := inputs.Content[i+1]
+				m.Content = append(m.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "default"}, &v)
+			}
+		}
+		front.add("inputs", inputs)
 	}
 	if g.Outputs != nil {
 		front.add("outputs", valuesNode(g.Outputs))
@@ -67,7 +79,8 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 		key string
 		set bool
 		v   any
-	}{{"max_depth", g.MaxDepth != 0, g.MaxDepth}, {"max_steps", g.MaxSteps != 0, g.MaxSteps}, {"model", g.Model != "", g.Model}, {"thinking", g.Thinking != "", g.Thinking}, {"on_abort", g.OnAbort != "", g.OnAbort}} {
+	}{{"max_depth", g.MaxDepth != 0, g.MaxDepth}, {"max_steps", g.MaxSteps != 0, g.MaxSteps}, {"model", g.Model != "", g.Model}, {"thinking", g.Thinking != "", g.Thinking}, {"on_abort", g.OnAbort != "", g.OnAbort}, {"exclude_tools", g.ExcludeTools != nil, g.ExcludeTools},
+		{"context", g.Context != "", g.Context}, {"hidden", g.Hidden, true}, {"timeout", g.Timeout != 0, g.Timeout.String()}} {
 		if !s.set {
 			continue
 		}
@@ -224,6 +237,8 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 		m.add("with", valuesNode(n.With))
 	}
 	set("tools", n.Tools != nil, n.Tools)
+	set("tools", n.AllTools, "all")
+	set("exclude_tools", n.ExcludeTools != nil, n.ExcludeTools)
 	if n.Files != nil {
 		var files []any
 		for _, v := range n.Files {
@@ -375,10 +390,20 @@ func policyOut(p *agentflow.Policy) map[string]any {
 	list := func(rules []agentflow.PolicyRule) []any {
 		out := []any{}
 		for _, r := range rules {
-			if r.Note == "" {
+			entry := map[string]any{"rule": r.Rule}
+			if r.Note != "" {
+				entry["note"] = r.Note
+			}
+			if r.Path.From != "" || r.Path.Literal != nil {
+				entry["path"] = written(r.Path)
+			}
+			if r.Command.From != "" || r.Command.Literal != nil {
+				entry["command"] = written(r.Command)
+			}
+			if len(entry) == 1 {
 				out = append(out, r.Rule)
 			} else {
-				out = append(out, map[string]any{"rule": r.Rule, "note": r.Note})
+				out = append(out, entry)
 			}
 		}
 		return out

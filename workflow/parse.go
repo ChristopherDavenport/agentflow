@@ -127,6 +127,14 @@ type frontmatter struct {
 	Documents map[string]*documentSpec `yaml:"documents"`
 	// OnAbort names the step the cleanup path starts at.
 	OnAbort string `yaml:"on_abort"`
+	// ExcludeTools are tools no model step is offered.
+	ExcludeTools []string `yaml:"exclude_tools"`
+	// Context fresh says every call runs the workflow in a child, and
+	// Hidden that only a workflow that calls it runs it.
+	Context string `yaml:"context"`
+	Hidden  bool   `yaml:"hidden"`
+	// Timeout is the default of each script, tool and model step.
+	Timeout string `yaml:"timeout"`
 }
 
 // documentSpec is how a document starts: from a file of the skill, or as
@@ -154,9 +162,11 @@ type settings struct {
 	Args        map[string]any `yaml:"args"`
 	With        yaml.Node      `yaml:"with"`
 	Outputs     yaml.Node      `yaml:"outputs"`
-	Tools       []string       `yaml:"tools"`
-	Skills      []string       `yaml:"skills"`
-	Context     string         `yaml:"context"`
+	// Tools is a list of tools, or all for every tool the host offers.
+	Tools        yaml.Node `yaml:"tools"`
+	ExcludeTools []string  `yaml:"exclude_tools"`
+	Skills       []string  `yaml:"skills"`
+	Context      string    `yaml:"context"`
 	// A child's own settings, with context: fresh. A script takes dir.
 	Dir          yaml.Node `yaml:"dir"`
 	Model        string    `yaml:"model"`
@@ -223,11 +233,19 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 			return nil, fmt.Errorf("workflow: frontmatter: %w", err)
 		}
 		var err error
-		if g.Inputs, err = objectSchema(&fm.Inputs); err != nil {
+		if g.Inputs, g.InputDefaults, err = inputsSchema(&fm.Inputs); err != nil {
 			return nil, fmt.Errorf("workflow: inputs: %w", err)
 		}
 		outputs, g.MaxDepth, g.MaxSteps, g.Model, g.Thinking = fm.Outputs, fm.MaxDepth, fm.MaxSteps, fm.Model, fm.Thinking
-		g.Description, g.OnAbort = strings.TrimSpace(fm.Description), fm.OnAbort
+		g.Description, g.OnAbort, g.ExcludeTools = strings.TrimSpace(fm.Description), fm.OnAbort, fm.ExcludeTools
+		g.Context, g.Hidden = fm.Context, fm.Hidden
+		if fm.Timeout != "" {
+			d, err := time.ParseDuration(fm.Timeout)
+			if err != nil || d <= 0 {
+				return nil, fmt.Errorf("workflow: frontmatter: timeout %q: want a duration such as 90s, 10m or 1h", fm.Timeout)
+			}
+			g.Timeout = d
+		}
 		for name, d := range fm.Documents {
 			if g.Documents == nil {
 				g.Documents = map[string]agentflow.Document{}
@@ -462,7 +480,14 @@ func node(n *agentflow.Node, s section) error {
 	n.Prompt = strings.TrimSpace(strings.Join(prose, "\n"))
 	n.Description = strings.TrimSpace(set.Description)
 
-	n.Script, n.Tool, n.Tools, n.Outcomes, n.Flow = set.Run, set.Tool, set.Tools, set.Outcomes, set.Flow
+	n.Script, n.Tool, n.Outcomes, n.Flow, n.ExcludeTools = set.Run, set.Tool, set.Outcomes, set.Flow, set.ExcludeTools
+	switch t := &set.Tools; {
+	case t.IsZero():
+	case t.Kind == yaml.ScalarNode && t.Value == "all":
+		n.AllTools = true
+	case t.Kind != yaml.SequenceNode || t.Decode(&n.Tools) != nil:
+		return fmt.Errorf("line %d: tools: want a list of tools, or all for every tool the host offers", t.Line)
+	}
 	switch v := &set.MaxVisits; {
 	case v.IsZero():
 	case v.Kind == yaml.ScalarNode && v.Value == "person":
@@ -514,8 +539,8 @@ func node(n *agentflow.Node, s section) error {
 	if j := set.Judge; j != nil {
 		n.Judge = &agentflow.Judge{Criteria: strings.TrimSpace(j.Criteria), Outcomes: j.Outcomes, Tools: j.Tools, Returns: j.Returns, Policy: j.Policy.policy()}
 	}
-	if n.Kind != agentflow.Agent && n.Tools != nil {
-		return errors.New("only a model node has tools")
+	if n.Kind != agentflow.Agent && (n.Tools != nil || n.AllTools || n.ExcludeTools != nil) {
+		return errors.New("only a model node has tools or exclude_tools")
 	}
 	if set.Skills != nil && n.Kind != agentflow.Agent {
 		return errors.New("only a model node names skills")
@@ -717,13 +742,20 @@ func (r *ruleSpec) UnmarshalYAML(n *yaml.Node) error {
 		return fmt.Errorf("line %d: a rule is a string, or a mapping with rule and note", n.Line)
 	}
 	return pairs(n, func(key string, v *yaml.Node) error {
+		var err error
 		switch key {
 		case "rule":
 			return v.Decode(&r.Rule)
 		case "note":
 			return v.Decode(&r.Note)
+		case "path":
+			r.Path, err = pathValue(v, "a rule's path is a reference to a path, or a list of them")
+			return err
+		case "command":
+			r.Command, err = pathValue(v, "a rule's command is a reference to a command, or a list of them")
+			return err
 		}
-		return fmt.Errorf("line %d: a rule has no key %q%s", v.Line, key, agentflow.Suggest(key, []string{"rule", "note"}))
+		return fmt.Errorf("line %d: a rule has no key %q%s", v.Line, key, agentflow.Suggest(key, []string{"rule", "note", "path", "command"}))
 	})
 }
 
@@ -878,6 +910,43 @@ func objectSchema(n *yaml.Node) (*agenttool.Schema, error) {
 	return s, nil
 }
 
+// inputsSchema reads a workflow's inputs: an object schema whose fields
+// may each have a default, which only an input has.
+func inputsSchema(n *yaml.Node) (*agenttool.Schema, map[string]any, error) {
+	var defaults map[string]any
+	var stripped []*yaml.Node
+	err := pairs(n, func(name string, v *yaml.Node) error {
+		field := v
+		if v.Kind == yaml.MappingNode {
+			field = &yaml.Node{Kind: yaml.MappingNode, Tag: v.Tag, Line: v.Line, Column: v.Column}
+			for i := 0; i+1 < len(v.Content); i += 2 {
+				if v.Content[i].Value != "default" {
+					field.Content = append(field.Content, v.Content[i], v.Content[i+1])
+					continue
+				}
+				var d any
+				if err := v.Content[i+1].Decode(&d); err != nil {
+					return fmt.Errorf("%s: default: %w", name, err)
+				}
+				if hasReference(d) {
+					return fmt.Errorf("%s: a default is a literal", name)
+				}
+				if defaults == nil {
+					defaults = map[string]any{}
+				}
+				defaults[name] = d
+			}
+		}
+		stripped = append(stripped, &yaml.Node{Kind: yaml.ScalarNode, Value: name}, field)
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	s, err := objectSchema(&yaml.Node{Kind: yaml.MappingNode, Content: stripped})
+	return s, defaults, err
+}
+
 var types = []string{"string", "number", "integer", "boolean", "array", "object"}
 
 func fieldSchema(n *yaml.Node) (s *agenttool.Schema, required bool, err error) {
@@ -905,6 +974,8 @@ func fieldSchema(n *yaml.Node) (s *agenttool.Schema, required bool, err error) {
 				s.Properties, s.Required = object.Properties, object.Required
 			}
 			return err
+		case "default":
+			return errors.New("only a workflow's input has a default")
 		default:
 			return unknownKey("", key, "type", "required", "description", "enum", "items", "properties")
 		}

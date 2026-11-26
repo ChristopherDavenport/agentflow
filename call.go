@@ -43,6 +43,9 @@ type callArgs struct {
 	// host lets it answer.
 	Step string `json:"step,omitempty"`
 	Mode string `json:"mode,omitempty"`
+	// Question is, for a judge of a question whose text names values, the
+	// text as the person is asked it, which the judge reads.
+	Question string `json:"question,omitempty"`
 	// Files are the files a fresh model step is given, passed into its
 	// child, which reads them there.
 	Files []fileRef `json:"files,omitempty"`
@@ -103,11 +106,12 @@ func (f *flow) rootStart(inputs any) (startPayload, error) {
 	if err != nil {
 		return startPayload{}, err
 	}
-	p := startPayload{Workflow: f.g.Name, Digest: f.g.Digest(), Inputs: inputs, Format: RecordFormat,
+	// The start records the inputs the run was given, defaults filled in.
+	p := startPayload{Workflow: f.g.Name, Digest: f.g.Digest(), Inputs: f.g.withDefaults(inputs), Format: RecordFormat,
 		Definition: json.RawMessage(definition), MaxDepth: f.depth(), MaxSteps: f.steps()}
 	if c := f.child; c != nil {
 		p.Run, p.Parent, p.Caller, p.Depth, p.Path, p.Context = c.Run, c.Parent, c.Caller, c.Depth, c.Path, ContextFresh
-		p.MaxDepth, p.MaxSteps, p.Documents, p.Files = c.maxDepth, c.maxSteps, c.documents, c.files
+		p.MaxDepth, p.MaxSteps, p.Documents, p.Files, p.Question = c.maxDepth, c.maxSteps, c.documents, c.files, c.question
 	} else if p.Run, err = newKey(); err != nil {
 		return startPayload{}, err
 	}
@@ -225,7 +229,7 @@ func callReturn(st State, c *openresponses.FunctionCall) error {
 		return errors.New("the call is not readable")
 	case a.Run != st.Returned.Instance || a.Workflow != st.g.Callees[n.Flow].Name:
 		return fmt.Errorf("step %q called run %q", n.ID, st.Returned.Instance)
-	case !sameJSON(a.With, st.calleeInputs):
+	case !sameJSON(st.g.Callees[n.Flow].withDefaults(a.With), st.calleeInputs):
 		return fmt.Errorf("step %q passed run %q other inputs than it started with", n.ID, a.Run)
 	}
 	return nil
@@ -300,7 +304,7 @@ func returned(n *Node, workflow string, e *Ending) (Result, error) {
 	switch {
 	case e.Status == Done:
 		return Result{Outcome: e.Outcome, Data: e.Outputs}, nil
-	case e.Status == Failed && !treeWide(e.Limit) && n.routesFailure():
+	case (e.Status == Failed && !treeWide(e.Limit) || e.Status == Abandoned && strings.HasPrefix(e.Reason, timedOutPrefix)) && n.routesFailure():
 		data := map[string]any{"reason": e.Reason, "workflow": workflow}
 		if e.Step != "" {
 			data["step"] = e.Step

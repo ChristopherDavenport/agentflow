@@ -17,7 +17,7 @@ func (n *Node) checkChild() []error {
 	bad := func(format string, args ...any) {
 		errs = append(errs, fmt.Errorf("agentflow: node %q: "+format, append([]any{n.ID}, args...)...))
 	}
-	if !n.fresh() {
+	if !n.fresh() && !n.unlinked() {
 		for _, s := range []struct {
 			key string
 			set bool
@@ -49,7 +49,7 @@ func (n *Node) checkSettings() []error {
 	}
 	call := n.Flow != ""
 	switch {
-	case n.Model != "" && n.Kind != Agent && !(call && n.fresh()):
+	case n.Model != "" && n.Kind != Agent && !(call && (n.fresh() || n.unlinked())):
 		bad("model is a model step's, or a child's")
 	case n.Thinking != "" && n.Kind != Agent:
 		bad("thinking is a model step's")
@@ -59,8 +59,6 @@ func (n *Node) checkSettings() []error {
 	switch {
 	case n.Timeout < 0 || n.Timeout > MaxTimeout:
 		bad("timeout must be above 0 and at most %s", MaxTimeout)
-	case n.Timeout > 0 && call:
-		bad("a timeout is a script's, a tool's, a model step's or a question's")
 	case n.Timeout > 0 && n.Verdict:
 		bad("a judge's look has the timeout of an unattended model step")
 	}
@@ -75,13 +73,16 @@ func (n *Node) checkSettings() []error {
 		if len(n.Files) > 0 && !slices.Contains(tools, "read") {
 			tools = append(slices.Clone(tools), "read")
 		}
-		if err := n.Policy.check(tools, !call); err != nil {
+		if err := n.Policy.check(tools, !call && !n.AllTools); err != nil {
 			bad("policy: %v", err)
 		}
 	}
 	if j := n.Judge; j != nil && j.Policy != nil {
 		if err := j.Policy.check(j.Tools, true); err != nil {
 			bad("judge: policy: %v", err)
+		}
+		if j.Policy.fromData() {
+			bad("judge: policy: a judge's rules are fixed, and take nothing from the record")
 		}
 	}
 	seen := map[string]bool{}
@@ -133,9 +134,16 @@ func (g *Graph) checkKept() []error {
 // it is a model step that asks for another model than its workflow's and
 // does not say context session. The other model would otherwise read a
 // conversation another model wrote, without that model's reasoning.
+//
+// A call also runs in a child when the workflow it calls says context
+// fresh of itself, which linking finds.
 func (n *Node) fresh() bool {
-	return n.Context == ContextFresh || n.Context == "" && n.otherModel
+	return n.Context == ContextFresh || n.Context == "" && (n.otherModel || n.call != nil && n.call.g.Context == ContextFresh)
 }
+
+// unlinked says n calls a workflow linking has not yet found, so where
+// it runs is not yet known: checks that turn on it wait for the link.
+func (n *Node) unlinked() bool { return n.Flow != "" && n.call == nil }
 
 // inputsOf is the inputs schema and the with of a workflow made from n,
 // which reads n's inputs as its own.
@@ -158,7 +166,7 @@ func (g *Graph) stepGraph(n *Node) *Graph {
 	inputs, with := inputsOf(n)
 	// The child reports a stuck model as its outcome, and the caller
 	// decides what that means.
-	step := Node{ID: n.ID, Kind: Agent, Description: n.Description, Prompt: n.Prompt, Tools: n.Tools, Outcomes: n.Outcomes, Data: n.Data, With: with,
+	step := Node{ID: n.ID, Kind: Agent, Description: n.Description, Prompt: n.Prompt, Tools: n.Tools, AllTools: n.AllTools, ExcludeTools: g.excluded(n), Outcomes: n.Outcomes, Data: n.Data, With: with,
 		Model: cmp.Or(n.Model, g.Model), Thinking: cmp.Or(n.Thinking, g.Thinking), Timeout: n.Timeout, Policy: n.Policy, Skills: n.Skills,
 		Ends: map[string]string{Stuck: Stuck}, Reads: n.Reads, Edits: n.Edits, SkillFiles: n.SkillFiles}
 	// The documents it reads are the child's, as its call passes them in.
@@ -173,7 +181,7 @@ func (g *Graph) stepGraph(n *Node) *Graph {
 	}
 	// The step's model is its workflow's, so the step reads its own
 	// child's conversation rather than opening another.
-	return &Graph{Name: g.Name + ":" + n.ID, Description: g.Description, Nodes: []Node{step}, Inputs: inputs, Sources: g.Sources, Model: step.Model, Documents: docs}
+	return &Graph{Name: g.Name + ":" + n.ID, Description: g.Description, Nodes: []Node{step}, Inputs: inputs, Sources: g.Sources, Model: step.Model, Documents: docs, Timeout: g.Timeout}
 }
 
 // judgeGraph is the workflow a judge of n runs in its child: a model step

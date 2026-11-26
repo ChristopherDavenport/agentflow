@@ -27,6 +27,7 @@ const (
 	callTool   = "flow_call"
 	clockTool  = "flow_clock"
 	stuckTool  = "flow_stuck"
+	limitsTool = "flow_limits"
 
 	// The outcomes of the question a failed step raises.
 	retryOutcome = "retry"
@@ -242,14 +243,22 @@ type State struct {
 	// outermost first.
 	callers []caller
 	// clocked says the program has read the clock for this attempt, and
-	// asked counts the bounds asked about in it.
-	clocked bool
-	asked   int
+	// asked counts the bounds asked about in it. timedOut says, for a call,
+	// that the program has recorded its time ran out.
+	clocked  bool
+	timedOut bool
+	asked    int
+	// callDue are the deadlines of the calls in this context the run is
+	// nested in, outermost first: a run is held to its callers' time too.
+	callDue []callClock
 	// filed says the program has given the attempt's model step its
 	// files, and passedFiles are, for the step of a run in a child, the
 	// files its call passed in.
 	filed       bool
 	passedFiles []fileRef
+	// question is, for a judge's run, the text of the question it judges as
+	// the person is asked it, which its call passed in.
+	question string
 	// reasked counts the retry questions put again after an override
 	// that was refused, and reask says a question waits to be put again
 	// should the override waiting on it be refused.
@@ -271,10 +280,13 @@ type State struct {
 	limit string
 }
 
-// caller is a call a run is nested in.
+// caller is a call a run is nested in, with its policy as it stands
+// resolved from that run's record.
 type caller struct {
 	node     *Node
 	workflow string
+	policy   *Policy
+	err      error
 }
 
 // limits are the bounds a run can reach, by the name an ending records.
@@ -326,6 +338,9 @@ type startPayload struct {
 	// Documents are, for a run in a child, the texts its call passed in of
 	// the documents its step reads.
 	Documents map[string]string `json:"documents,omitempty"`
+	// Question is, for a judge's run, the question's text as the person is
+	// asked it, when it names values.
+	Question string `json:"question,omitempty"`
 }
 
 // pinned is one workflow a run may reach, as its start recorded it.
@@ -337,7 +352,19 @@ type pinned struct {
 // Invocation is the item that asks for a new instance, carrying its
 // inputs, nil for none. A transcript with no instance starts one without
 // it, with no inputs.
+//
+// A hidden workflow ([Graph.Hidden]) is refused: only another workflow's
+// call starts it.
 func (g *Graph) Invocation(inputs any) (openresponses.Item, error) {
+	if g.Hidden {
+		return nil, fmt.Errorf("agentflow: %s is hidden: only a workflow that calls it runs it", g.Name)
+	}
+	return g.invocation(inputs)
+}
+
+// invocation is the item that starts a run of g in a child, where its
+// caller's call asked for it: a hidden workflow's too.
+func (g *Graph) invocation(inputs any) (openresponses.Item, error) {
 	text := invocationPrefix + g.Name
 	if inputs != nil {
 		if err := checkData(g.Inputs, inputs); err != nil {
@@ -402,6 +429,10 @@ func (st State) judgeID() string { return st.callID() + "-judge" }
 // attempt, and timeoutID that of the one that says its time ran out.
 func (st State) clockID() string   { return st.callID() + "-clock" }
 func (st State) timeoutID() string { return st.callID() + "-timeout" }
+
+// limitsID is the ID of the call that says a step's policy cannot be
+// read from the record.
+func (st State) limitsID() string { return st.callID() + "-limits" }
 
 // limitID is the ID of the question a bound raises.
 func (st State) limitID() string { return st.callID() + "-limit" + strconv.Itoa(st.asked+1) }
@@ -596,8 +627,14 @@ func (r *replay) state(f *frame) State {
 		st.Entries, st.Granted = f.entries, f.granted
 	}
 	st.Path = slices.Clone(r.root.path)
-	st.callers = nil
+	st.callers, st.callDue = nil, nil
 	for _, s := range r.stack {
+		// A call's time holds the runs it called in this context, until the
+		// program has said it ran out; while runs are being abandoned there
+		// is nothing more to stop.
+		if s != f && r.abort == nil && s.st.Node != nil && s.st.Node.Flow != "" && !s.st.Node.fresh() && !s.st.Deadline.IsZero() && !s.st.timedOut && s.st.Callee != "" {
+			st.callDue = append(st.callDue, callClock{run: s.st.Instance, workflow: s.st.Workflow, step: s.st.Node.ID, id: s.st.timeoutID(), timeout: s.st.Node.Timeout, deadline: s.st.Deadline})
+		}
 		p := Place{Workflow: s.st.Workflow, Run: s.st.Instance}
 		if s.st.Node != nil {
 			p.Step = s.st.Node.ID
@@ -606,8 +643,9 @@ func (r *replay) state(f *frame) State {
 		if s == f {
 			break
 		}
-		if s.st.Node != nil {
-			st.callers = append(st.callers, caller{s.st.Node, s.st.Workflow})
+		if n := s.st.Node; n != nil {
+			p, err := n.Policy.resolved(s.st)
+			st.callers = append(st.callers, caller{n, s.st.Workflow, p, err})
 		}
 	}
 	return st
@@ -824,6 +862,9 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 		r.overridden(i, c, out)
 		return
 	}
+	if c != nil && c.Name == clockTool && strings.HasPrefix(c.CallID, reserved) && r.timesOut(i, out) {
+		return
+	}
 	f := r.top()
 	if c != nil && c.Name == startTool && strings.HasPrefix(c.CallID, reserved) {
 		r.started(i, f, c, out)
@@ -831,6 +872,11 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 	}
 	st := &f.st
 	if f.failed != nil || st.Done || !st.Started || c == nil {
+		return
+	}
+	// A question the host set aside because a call it is nested in ran out
+	// of time is not answered: the runs are abandoned next.
+	if out.Output.String() == timedOutText && c.Name == askTool && strings.HasPrefix(c.CallID, reserved) {
 		return
 	}
 	// What is not the run's is not its progress.
@@ -877,7 +923,7 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 		if answer.Outcome == retryOutcome {
 			st.Attempt, st.Failure = st.Attempt+1, ""
 			st.Callee, st.Returned, st.calleeInputs = "", nil, nil
-			st.clocked, st.Deadline, st.asked, st.reasked, st.reask, st.filed = false, time.Time{}, 0, 0, false, false
+			st.clocked, st.Deadline, st.asked, st.reasked, st.reask, st.filed, st.timedOut = false, time.Time{}, 0, 0, false, false, false
 			if n.Kind == Agent {
 				// The step opens again, and what came before is not about
 				// this attempt.
@@ -898,6 +944,13 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 			} else {
 				st.Failure = out.Output.String()
 			}
+		}
+		return
+	case c.Name == limitsTool && strings.HasPrefix(c.CallID, reserved):
+		// The step's policy could not be read from the record: its output
+		// is the step's failure, whatever it says.
+		if out.CallID == st.limitsID() {
+			st.Failure = out.Output.String()
 		}
 		return
 	case c.Name == clockTool && strings.HasPrefix(c.CallID, reserved):
@@ -1075,7 +1128,7 @@ func (r *replay) started(i int, f *frame, c *openresponses.FunctionCall, out *op
 		root.path = p.Path
 		root.st.Documents, root.st.docAt = initialDocuments(r.g, p.Inputs, p.Documents)
 		root.st.started = startedAt(out.Output.String())
-		root.st.passedFiles = p.Files
+		root.st.passedFiles, root.st.question = p.Files, p.Question
 		root.start = r.at[c.CallID]
 		// A child is given what its caller's tree had left, none included.
 		r.maxSteps = p.MaxSteps
@@ -1266,8 +1319,11 @@ func (r *replay) bounds(f *frame) {
 		switch {
 		case n.PersonPaced:
 			from = fmt.Sprintf("the default for a step on a loop, for visits no person paced (%d more were)", f.paced[n.ID])
-		case n.MaxVisits == 0:
+		case n.MaxVisits == 0 && g.onLoop(n.ID):
 			from = "the default for a step on a loop"
+		case n.MaxVisits == 0:
+			// Only a jump comes back to a step no loop reaches.
+			from = "the default for a step on no loop"
 		}
 		if f.extra[n.ID] > 0 {
 			from += fmt.Sprintf(" and %d granted", f.extra[n.ID])
@@ -1350,7 +1406,7 @@ func (r *replay) enter(f *frame, i int, n *Node) {
 	f.mark[n.ID] = len(st.Steps)
 	st.Visit, st.Attempt, st.Paced = f.visits[n.ID], 1, f.paced[n.ID]
 	f.since = i
-	st.clocked, st.Deadline, st.asked, st.reasked, st.reask, st.filed = false, time.Time{}, 0, 0, false, false
+	st.clocked, st.Deadline, st.asked, st.reasked, st.reask, st.filed, st.timedOut = false, time.Time{}, 0, 0, false, false, false
 	if !paced {
 		r.entries++
 	}
@@ -1413,4 +1469,46 @@ func runOf(args string) string {
 	}
 	_ = json.Unmarshal([]byte(args), &a)
 	return a.Run
+}
+
+// callClock is the deadline of a call in the current context that a run
+// is nested in.
+type callClock struct {
+	run, workflow, step, id string
+	timeout                 time.Duration
+	deadline                time.Time
+}
+
+// why is what the runs a call abandons as its time runs out record.
+func (c callClock) why() string {
+	return fmt.Sprintf("%scall %q of %s ran past its timeout of %s", timedOutPrefix, c.step, c.workflow, c.timeout)
+}
+
+// timedOutPrefix starts the reason of a run a call abandoned as its time
+// ran out, so the call reads it as its failure.
+const timedOutPrefix = "timeout: "
+
+// timedOutText is the output a host gives a question it sets aside as a
+// call the question's run is nested in runs out of time.
+const timedOutText = "agentflow: timed out"
+
+// timesOut reads the program's word that a call's time ran out, at item
+// i: every run the call is waiting on is abandoned, innermost first, each
+// after its cleanup, and the call is left to say what came of it. It says
+// whether out was that word.
+func (r *replay) timesOut(i int, out *openresponses.FunctionCallOutput) bool {
+	if r.abort != nil {
+		return false
+	}
+	for k, s := range r.stack {
+		st := &s.st
+		if k+1 >= len(r.stack) || st.Node == nil || st.Node.Flow == "" || st.Node.fresh() || st.timedOut || out.CallID != st.timeoutID() {
+			continue
+		}
+		st.timedOut = true
+		c := callClock{run: st.Instance, workflow: st.Workflow, step: st.Node.ID, timeout: st.Node.Timeout}
+		r.abandon(i, r.stack[k+1], nil, c.why())
+		return true
+	}
+	return false
 }

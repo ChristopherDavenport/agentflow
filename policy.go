@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/ChristopherDavenport/agentpolicy"
+	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
 )
 
@@ -30,14 +31,57 @@ type Policy struct {
 
 // PolicyRule is one rule, and the note that says why it is there, which
 // a refusal and the step's instructions give after it.
+//
+// A rule may take what it matches from the record: Rule names the tool
+// alone, and Path or Command is one reference to a string or a list of
+// them, resolved when the step works, one rule for each: "edit" with path
+// ${{ steps.plan.outputs.files }} holds the step to the plan's files. A
+// path must be clean and below the workspace's root.
 type PolicyRule struct {
-	Rule string `json:"rule"`
-	Note string `json:"note,omitempty"`
+	Rule    string `json:"rule"`
+	Note    string `json:"note,omitempty"`
+	Path    Value  `json:"path,omitzero"`
+	Command Value  `json:"command,omitzero"`
+}
+
+// fromData says the rule takes what it matches from the record.
+func (r PolicyRule) fromData() bool { return r.Path.set() || r.Command.set() }
+
+// value is the reference the rule takes what it matches from, and what it
+// is: "path" or "command".
+func (r PolicyRule) value() (Value, string) {
+	if r.Path.set() {
+		return r.Path, "path"
+	}
+	return r.Command, "command"
 }
 
 func (p *Policy) empty() bool { return p == nil || len(p.Allow)+len(p.Deny) == 0 }
 
-// rules parses the rules of one list.
+// fromData says some rule of the policy takes what it matches from the
+// record.
+func (p *Policy) fromData() bool {
+	return p != nil && (slices.ContainsFunc(p.Allow, PolicyRule.fromData) || slices.ContainsFunc(p.Deny, PolicyRule.fromData))
+}
+
+// dataValues are the references the policy's rules take from the record.
+func (p *Policy) dataValues() []Value {
+	if p == nil {
+		return nil
+	}
+	var out []Value
+	for _, r := range slices.Concat(p.Allow, p.Deny) {
+		if r.fromData() {
+			v, _ := r.value()
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// rules parses the rules of one list. A rule from data is read as its
+// tool alone, with a specifier standing in for what it will match, so the
+// grammar and the host's matchers can be held to it before it resolves.
 func rules(list []PolicyRule) ([]agentpolicy.Rule, error) {
 	var out []agentpolicy.Rule
 	for _, r := range list {
@@ -47,11 +91,87 @@ func rules(list []PolicyRule) ([]agentpolicy.Rule, error) {
 			return nil, fmt.Errorf("rule %q: %w", r.Rule, err)
 		case len(parsed) != 1:
 			return nil, fmt.Errorf("rule %q: want one rule to an entry", r.Rule)
+		case r.Path.set() && r.Command.set():
+			return nil, fmt.Errorf("rule %q: a rule takes a path or a command from the record, not both", r.Rule)
+		case r.fromData() && parsed[0].Spec != "":
+			return nil, fmt.Errorf("rule %q: a rule that takes what it matches from the record names its tool alone", r.Rule)
+		case r.fromData():
+			if v, what := r.value(); v.From == "" {
+				return nil, fmt.Errorf("rule %q: its %s is a reference; write a fixed one as %s(...)", r.Rule, what, r.Rule)
+			}
+			parsed[0].Spec = "*"
 		}
 		parsed[0].Note = r.Note
 		out = append(out, parsed[0])
 	}
 	return out, nil
+}
+
+// resolved is the policy with every rule from data made the rules its
+// values give, read from st's record: one for each path or command. A
+// policy with none is itself. A value that is no string or list of them,
+// a path that is not clean and below the workspace's root, or a command
+// the grammar cannot hold, is an error, which fails the step.
+func (p *Policy) resolved(st State) (*Policy, error) {
+	if !p.fromData() {
+		return p, nil
+	}
+	list := func(in []PolicyRule) ([]PolicyRule, error) {
+		if in == nil {
+			return nil, nil
+		}
+		out := []PolicyRule{}
+		for _, r := range in {
+			if !r.fromData() {
+				out = append(out, r)
+				continue
+			}
+			v, what := r.value()
+			got, ok, err := st.resolve(v)
+			if err != nil {
+				return nil, fmt.Errorf("rule %s: %w", r.Rule, err)
+			}
+			var specs []string
+			switch x := got.(type) {
+			case nil:
+				if ok {
+					return nil, fmt.Errorf("rule %s: %s %s is null, not a %s", r.Rule, what, v.From, what)
+				}
+			case string:
+				specs = []string{x}
+			case []any:
+				for _, item := range x {
+					s, isText := item.(string)
+					if !isText {
+						return nil, fmt.Errorf("rule %s: %s %s holds %v, not a %s", r.Rule, what, v.From, item, what)
+					}
+					specs = append(specs, s)
+				}
+			default:
+				return nil, fmt.Errorf("rule %s: %s %s is %v, not a %s or a list of them", r.Rule, what, v.From, got, what)
+			}
+			for _, spec := range specs {
+				if what == "path" && (!cleanPath(spec) || spec == ".") {
+					return nil, fmt.Errorf("rule %s: path %q: want a clean path below the workspace's root", r.Rule, spec)
+				}
+				rule := r.Rule + "(" + spec + ")"
+				if parsed, err := agentpolicy.ParseRules(rule); err != nil || len(parsed) != 1 || parsed[0].Tool != r.Rule {
+					return nil, fmt.Errorf("rule %s: %s %q is not one a rule can hold", r.Rule, what, spec)
+				}
+				out = append(out, PolicyRule{Rule: rule, Note: r.Note})
+			}
+		}
+		return out, nil
+	}
+	allow, err := list(p.Allow)
+	if err != nil {
+		return nil, err
+	}
+	deny, err := list(p.Deny)
+	if err != nil {
+		return nil, err
+	}
+	return &Policy{Allow: allow, Deny: deny}, nil
 }
 
 // parsed is the policy as agentpolicy reads it. A policy with an
@@ -140,8 +260,10 @@ func InDir(dir, field string) agentpolicy.Matcher {
 // engines are the agentpolicy engines of the policies a flow holds its
 // steps to, one for each, built for the flow's working directory.
 type engines struct {
-	mu    sync.Mutex
-	built map[*Policy]*agentpolicy.Engine
+	mu sync.Mutex
+	// built is by the policy's JSON: a policy resolved from data is a new
+	// value each time it is read, and the same rules are the same engine.
+	built map[string]*agentpolicy.Engine
 }
 
 // dir is the working directory the flow's model steps run in.
@@ -157,9 +279,13 @@ func (f *flow) engine(p *Policy) (*agentpolicy.Engine, error) {
 	if f.engines == nil {
 		f.engines = &engines{}
 	}
+	key, err := json.Marshal(p)
+	if err != nil {
+		return nil, err
+	}
 	f.engines.mu.Lock()
 	defer f.engines.mu.Unlock()
-	if e := f.engines.built[p]; e != nil {
+	if e := f.engines.built[string(key)]; e != nil {
 		return e, nil
 	}
 	parsed, err := p.parsed()
@@ -175,9 +301,9 @@ func (f *flow) engine(p *Policy) (*agentpolicy.Engine, error) {
 		return nil, err
 	}
 	if f.engines.built == nil {
-		f.engines.built = map[*Policy]*agentpolicy.Engine{}
+		f.engines.built = map[string]*agentpolicy.Engine{}
 	}
-	f.engines.built[p] = e
+	f.engines.built[string(key)] = e
 	return e, nil
 }
 
@@ -213,10 +339,19 @@ func (f *flow) buildPolicies() error {
 	return errors.Join(errs...)
 }
 
-// ruled is a policy with where it was set, for a refusal to name.
+// ruled is a policy with where it was set, for a refusal to name, as it
+// stands resolved from the record, and why it could not be, if it could
+// not.
 type ruled struct {
 	from   string
 	policy *Policy
+	err    error
+}
+
+// resolve is p, set at from, resolved from st's record.
+func resolve(from string, p *Policy, st State) ruled {
+	got, err := p.resolved(st)
+	return ruled{from, got, err}
 }
 
 // policies are the policies in force at st's step: those of the calls
@@ -230,9 +365,47 @@ func (f *flow) policies(st State) []ruled {
 			workflow, _, _ := strings.Cut(st.Workflow, ":")
 			from = fmt.Sprintf("the judge of step %q of %s", n.ID, workflow)
 		}
-		out = append(out, ruled{from, n.Policy})
+		out = append(out, resolve(from, n.Policy, st))
 	}
 	return out
+}
+
+// limitsArgs is flow_limits' arguments: the step whose policy cannot be
+// read from the record, and why.
+type limitsArgs struct {
+	Run    string `json:"run"`
+	Step   string `json:"step"`
+	Reason string `json:"reason"`
+}
+
+// limitsDue says st's model step, in this context, works under a policy
+// its record cannot resolve: the program says so with flow_limits, whose
+// error fails the step, before its model works.
+func (f *flow) limitsDue(st State) bool {
+	n := st.Node
+	return modelTurn(st) && n != nil && n.Kind == Agent && !n.fresh() && f.policyErr(st) != nil
+}
+
+// limitsTool fails a step whose policy cannot be read from the record,
+// with the reason, which the step's retry question shows.
+func (f *flow) limitsTool() agenttool.Tool {
+	return agenttool.New(limitsTool, "Say a workflow step's policy cannot be read from the record.", func(ctx context.Context, a limitsArgs) (Result, error) {
+		if err := exact(ctx, &a); err != nil {
+			return Result{}, err
+		}
+		return Result{}, fmt.Errorf("agentflow: step %q cannot work under its policy: %s", a.Step, a.Reason)
+	}, agenttool.WithReplay(safeReplay))
+}
+
+// policyErr is why a policy in force at st's step cannot be resolved from
+// the record, nil when every one can.
+func (f *flow) policyErr(st State) error {
+	for _, r := range f.policies(st) {
+		if r.err != nil {
+			return fmt.Errorf("the policy of %s: %w", r.from, r.err)
+		}
+	}
+	return nil
 }
 
 // chain are the policies of the calls st's run is nested in, a child's
@@ -244,7 +417,7 @@ func (f *flow) chain(st State) []ruled {
 	}
 	for _, caller := range st.callers {
 		if !caller.node.Policy.empty() {
-			out = append(out, ruled{fmt.Sprintf("step %q of %s", caller.node.ID, caller.workflow), caller.node.Policy})
+			out = append(out, ruled{fmt.Sprintf("step %q of %s", caller.node.ID, caller.workflow), caller.policy, caller.err})
 		}
 	}
 	return out
@@ -256,6 +429,9 @@ func (f *flow) chain(st State) []ruled {
 // only refuses, so there is nothing to wait on and nothing to answer.
 func (f *flow) police(ctx context.Context, st State, info agentturn.ToolCallInfo) string {
 	for _, r := range f.policies(st) {
+		if r.err != nil {
+			return fmt.Sprintf("the policy of %s cannot be read from the record: %v", r.from, r.err)
+		}
 		e, err := f.engine(r.policy)
 		if err != nil {
 			return fmt.Sprintf("the policy of %s cannot be read: %v", r.from, err)
@@ -294,6 +470,9 @@ func describe(policies []ruled) string {
 	}
 	var lines []string
 	for _, r := range policies {
+		if r.err != nil {
+			continue
+		}
 		p := r.policy
 		var said []string
 		if p.Allow != nil {
