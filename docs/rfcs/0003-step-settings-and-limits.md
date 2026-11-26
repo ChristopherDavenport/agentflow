@@ -13,7 +13,8 @@ It covers:
 - a bound on the steps a tree of runs may enter;
 - stopping a loop whose script repeats itself;
 - a model reporting that it is stuck;
-- asking a person for more when a bound is reached.
+- asking a person for more when a bound is reached;
+- a loop a person drives, which no visit bound stops.
 
 Every rule of the earlier RFCs holds. Each of these is a call with
 arguments and a result in the context it acts in. Position is read from
@@ -305,13 +306,79 @@ flowchart TD
 - **Timeouts are not asked about here:** a step that ran past its
   timeout has failed, and the retry question already asks.
 
+## 22. A loop a person drives
+
+````markdown
+```mermaid
+flowchart TD
+  draft[[draft]] --> review([review])
+  review -->|change| revise[[revise]]
+  revise --> review
+```
+
+## review
+```yaml
+outcomes: [change, done]
+max_visits: person
+```
+Good?
+
+## revise
+```yaml
+run: scripts/revise.sh
+max_visits: person
+```
+````
+
+A visit bound stops a loop that runs by itself and gets nowhere. A loop
+that waits on a person at every pass cannot run away, and asking that
+person, at the sixth pass, whether to allow more is noise while they are
+still at work.
+
+- **Paced.** A visit of a `max_visits: person` step is paced when, since
+  that step's last visit in the same run, a person step of the run was
+  answered by a person: an answer whose `by` is empty. Answers by the
+  host's rules, a judge that decides, the `unattended` default or a
+  timeout do not pace, so none of those can loop without a bound, and a
+  judge's `max_returns` keeps its meaning. A person's answer under
+  `shadow` or `advise`, or one a judge handed back, paces. A step's first
+  visit is never paced.
+- **No bound on a paced visit.** Paced visits are not held to the step's
+  visit bound. Every other visit is, and that bound is
+  `DefaultLoopVisits`. The visit number in call IDs still counts every
+  visit; `State.Paced` says how many of them a person paced. A bound
+  that is reached says how many paced visits went free, and asks for
+  more as section 21 says.
+- **No steps of the tree either.** A paced visit is not counted toward
+  the tree's steps (section 18): `State.Entries`, and the `entries` a
+  child's result carries to its caller, leave it out. Only that entry is
+  exempt. A retry of the step, an operator's override, and every visit
+  of a step that is not `max_visits: person` count as before. A run's
+  summary still counts every step that ran.
+- **Unaffected:** the repeat rule (section 19) and timeouts.
+- **Read from the record.** Whether a visit was paced is read from the
+  steps the run has finished, so it is a function of the definitions and
+  the record, after a resume as before it, in a called run and in a
+  child, each in its own run.
+- **Checked at load, from the graph alone:**
+  - the step is on a loop;
+  - every cycle through it passes a person step. A person step passes
+    its own. An error names a cycle that passes none, such as
+    `fix → check → fix`;
+  - `max_visits` is a number or `person`, not both;
+  - a step on a loop through a `max_visits: person` step, with no
+    `max_visits` of its own, would stop that loop at the default, so it
+    is an error: it says `person` too, or a number.
+- **Only this run's person steps.** A person asked inside a workflow a
+  step calls does not pace the caller's loop, since the caller reads
+  only its call's result.
+- In Go, `Node.PersonPaced` is `max_visits: person`, with `MaxVisits` 0.
+
 ## Open questions
 
 - A kept child's later runs each pass what the tree has left. A grant in
   one counts for the caller too, but is not passed back into the child's
   next run except through that count.
-- Item 22, letting a loop paced by a person run without the visit bound,
-  is not built. The grant is the nearest thing to it.
 - A model step's deadline cuts only its stream and its tools' calls. A
   turn whose stream has just finished runs its tool calls under the
   deadline, and the program records the timeout on the next turn.

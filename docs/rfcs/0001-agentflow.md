@@ -178,7 +178,10 @@ a person whether to grant more visits; unattended, with no rule that
 answers, it fails the workflow with an error naming the step, the bound,
 where it came from and the edge taken. A program step that gives the
 same outcome and data three times in a row is asked about the same way.
-See [RFC 0003](0003-step-settings-and-limits.md), sections 19 and 21.
+A loop a person drives, where each pass waits on a person's answer, can
+say `max_visits: person`: a visit a person paced is then held to no
+bound. See [RFC 0003](0003-step-settings-and-limits.md), sections 19, 21
+and 22.
 
 ### Sections
 
@@ -214,7 +217,7 @@ and be none. Unknown keys are errors.
 | `outcomes` | all | ways the node can end; `[ok]` if absent |
 | `unattended` | person | outcome, and data, taken when nobody can be asked |
 | `judge` | person | that a model may answer: `criteria`, `outcomes` it may choose, `tools`, `max_returns`, `policy` |
-| `max_visits` | all | how often the node may run; if absent, 5 for a node on a loop and 1 for any other |
+| `max_visits` | all | how often the node may run; if absent, 5 for a node on a loop and 1 for any other; `person` for a loop a person drives (RFC 0003, section 22) |
 
 The text under a model or person node is its prompt.
 
