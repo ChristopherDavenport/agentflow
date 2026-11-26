@@ -27,6 +27,9 @@ type Question struct {
 	Form map[string]any `json:"form,omitempty"`
 	// Advice is what a judge said, to show beside the question.
 	Advice *Verdict `json:"advice,omitempty"`
+	// SentBack is how many times running a judge has sent the work back
+	// here.
+	SentBack int `json:"sent_back,omitempty"`
 	// Retry says the question is whether to run a failed step again.
 	Retry bool `json:"retry,omitempty"`
 	// Answer is empty as asked. [Answer] fills it in.
@@ -353,6 +356,9 @@ func (f *flow) call(st State) (name string, args any, err error) {
 	switch {
 	case n.Kind == Person:
 		q := Question{Step: n.ID, Question: n.Prompt, Outcomes: n.outcomes(), With: with, Advice: st.Advice}
+		if f.modes[n.ID] != 0 {
+			q.SentBack = f.g.sentBack(st, n)
+		}
 		for outcome, s := range n.Data {
 			if q.Form == nil {
 				q.Form = map[string]any{}
@@ -559,15 +565,20 @@ func (f *flow) ask(ctx context.Context, info agentturn.ToolCallInfo, st State) (
 		}
 	}
 	// The verdict is read from the transcript, not from the question.
+	why := q.Question
 	if v := st.Advice; !q.Retry && v != nil && f.modes[n.ID] == Decide && v.Outcome != HandBack {
-		return answer(q, Result{Outcome: v.Outcome, Data: v.Data, By: ByJudge}, "decided by the judge")
+		if f.g.spent(st, *v) {
+			why = fmt.Sprintf("the judge has sent this back %d times: %s", f.g.sentBack(st, n), q.Question)
+		} else {
+			return answer(q, Result{Outcome: v.Outcome, Data: v.Data, By: ByJudge}, "decided by the judge")
+		}
 	}
 	// With nobody there, the tool takes the node's default, and refuses
 	// a retry, which ends the workflow.
 	if f.unattended && (q.Retry || n.Unattended != "") {
 		return nil, nil
 	}
-	return &agentturn.ToolDecision{Action: agentturn.Defer, Reason: "agentflow: " + q.Question}, nil
+	return &agentturn.ToolDecision{Action: agentturn.Defer, Reason: "agentflow: " + why}, nil
 }
 
 func safeReplay(context.Context, json.RawMessage) agenttool.Replay { return agenttool.ReplaySafe }

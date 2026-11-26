@@ -161,6 +161,9 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 		if j.Tools != nil {
 			judge["tools"] = j.Tools
 		}
+		if j.Returns != 0 {
+			judge["max_returns"] = j.Returns
+		}
 		set("judge", true, judge)
 	}
 	return m, errors.Join(errs...)

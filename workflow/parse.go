@@ -129,6 +129,7 @@ type settings struct {
 		Criteria string   `yaml:"criteria"`
 		Outcomes []string `yaml:"outcomes"`
 		Tools    []string `yaml:"tools"`
+		Returns  int      `yaml:"max_returns"`
 	} `yaml:"judge"`
 	Outcomes   []string  `yaml:"outcomes"`
 	Unattended yaml.Node `yaml:"unattended"`
@@ -388,7 +389,7 @@ func node(n *agentflow.Node, s section) error {
 	}
 	n.Context = set.Context
 	if j := set.Judge; j != nil {
-		n.Judge = &agentflow.Judge{Criteria: strings.TrimSpace(j.Criteria), Outcomes: j.Outcomes, Tools: j.Tools}
+		n.Judge = &agentflow.Judge{Criteria: strings.TrimSpace(j.Criteria), Outcomes: j.Outcomes, Tools: j.Tools, Returns: j.Returns}
 	}
 	if n.Kind != agentflow.Agent && n.Tools != nil {
 		return errors.New("only a model node has tools")

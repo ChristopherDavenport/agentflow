@@ -233,6 +233,8 @@ func (g *Graph) Validate() error {
 				bad("node %q: a judge needs criteria", n.ID)
 			case len(j.Outcomes) == 0:
 				bad("node %q: a judge needs the outcomes it may choose", n.ID)
+			case j.Returns < 0 || j.Returns > 99:
+				bad("node %q: a judge's returns must be 0 to 99", n.ID)
 			case slices.Contains(n.outcomes(), HandBack):
 				bad("node %q: a judged node cannot declare the outcome %q", n.ID, HandBack)
 			}

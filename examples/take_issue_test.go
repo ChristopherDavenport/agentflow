@@ -259,8 +259,15 @@ func TestTakeIssueWillNotStartDirty(t *testing.T) {
 
 func TestTakeIssueCanBeRewritten(t *testing.T) {
 	w := loadFrom(t, "skills/take-issue")
-	if _, err := workflow.Format(w.Graph, "Take an issue"); err != nil {
-		t.Fatal(err)
+	// A limit on a judge's send-backs is written too.
+	for i := range w.Graph.Nodes {
+		if j := w.Graph.Nodes[i].Judge; j != nil {
+			j.Returns = 3
+		}
+	}
+	out, err := workflow.Format(w.Graph, "Take an issue")
+	if err != nil || !strings.Contains(string(out), "max_returns: 3") {
+		t.Fatalf("%v\n%s", err, out)
 	}
 }
 

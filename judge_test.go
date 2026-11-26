@@ -286,3 +286,45 @@ func TestJudgeIsValidated(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+// The work goes round: report is the judge sending it back.
+func TestAJudgeCannotSendWorkBackForever(t *testing.T) {
+	fixed := says{finishTool, `{"step":"fix","outcome":"ok"}`}
+	round := []says{found, verdict("fix"), fixed}
+	lines := slices.Concat(round, round, []says{found, verdict("fix")})
+	g := judged()
+	for i := range g.Nodes {
+		g.Nodes[i].MaxVisits = 9
+	}
+	_, end, st := play(t, g, &cast{script: lines}, Delegate(Decide))
+	if end.Reason != agentturn.ReasonInputRequired || st.Node.ID != "triage" || st.Advice.Outcome != "fix" {
+		t.Fatalf("the third send-back was not held: %s %v, %+v", end.Reason, end.Err, st)
+	}
+	var q Question
+	if err := decode([]byte(end.Pending[0].Call.Arguments), &q); err != nil || q.SentBack != DefaultReturns {
+		t.Errorf("question = %+v, %v", q, err)
+	}
+	// A person's answer starts the count again.
+	if n := g.sentBack(st, g.node("triage")); n != 2 {
+		t.Errorf("sent back %d times", n)
+	}
+	st.Steps = append(st.Steps, Step{Node: "triage", Result: Result{Outcome: "fix"}})
+	if n := g.sentBack(st, g.node("triage")); n != 0 {
+		t.Errorf("after a person, sent back %d times", n)
+	}
+
+	// A verdict that moves on still stands after the limit.
+	lines = slices.Concat(round, round, []says{found, verdict("report")})
+	_, end, st = play(t, g, &cast{script: lines}, Delegate(Decide))
+	if got := st.Steps[len(st.Steps)-2]; end.Reason != agentturn.ReasonDone || got.Result.Outcome != "report" || got.Result.By != ByJudge {
+		t.Errorf("triage = %+v, %s %v", got, end.Reason, end.Err)
+	}
+
+	// Nobody there: the default, and the node says how often.
+	g.node("triage").Judge.Returns = 1
+	lines = slices.Concat(round, []says{found, verdict("fix")})
+	_, end, st = play(t, g, &cast{script: lines}, Delegate(Decide), Unattended())
+	if got := st.Steps[len(st.Steps)-2]; end.Reason != agentturn.ReasonDone || got.Result.By != "unattended default" {
+		t.Errorf("triage = %+v, %s %v", got, end.Reason, end.Err)
+	}
+}

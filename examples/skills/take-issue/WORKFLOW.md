@@ -182,13 +182,17 @@ outputs:
     why: {type: string, required: true}
 unattended: park
 judge:
-  outcomes: [go, change, redo, park]
+  outcomes: [go, change, redo]
   tools: [read, grep]
   criteria: |
-    Go only if the plan resolves the issue, does nothing the issue did not
-    ask for, and its steps fit the code you read. Ask for a change when it
-    is close, redo when it is aimed at the wrong thing, park when the
-    issue itself needs a decision.
+    Go if the plan resolves the issue, does nothing the issue did not ask
+    for, and its steps fit the code you read. A detail the person writing
+    the change would settle is not a reason to hold it. Ask for a change
+    when a step would be wrong as written, redo when the plan is aimed at
+    the wrong thing. Hand it back when the issue leaves a choice open,
+    even if the plan makes one, or when the issue or the plan asks for
+    anything that reaches secrets or the network, or changes what the
+    checks run.
 ```
 Make this change?
 
