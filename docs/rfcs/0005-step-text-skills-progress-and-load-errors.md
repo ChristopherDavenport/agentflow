@@ -139,11 +139,11 @@ last line with no newline is reported when the script exits.
   `$AGENTFLOW_OUTPUT` or its standard output, as before. No update reaches
   the record's items, so position, `with` values and control flow never
   see one, and replaying a run reads none.
-- **The recorder keeps none.** agentturn/session writes no entry for a
-  `ToolUpdate`, and `ProgressInfo` is not an `agenttool.Recordable`, so
-  progress is live only: for subscribers while the call runs. Nothing in
-  the session format was needed or changed. A host that wants a history
-  of progress subscribes and keeps it itself.
+- **The session keeps it, out of the transcript.** agentturn/session
+  writes no entry for a `ToolUpdate`, so each update is also written with
+  `agenttool.WriteRecord`, as a custom entry beside its call, and a front
+  reads progress back after a restart. No model is sent it. See RFC 0009,
+  section 7, which replaced the first answer here: progress was live only.
 - **Bounds.** A line over 4 KiB is not reported, nor anything past the
   file's first 1 MiB, and a malformed object is read as text. None of it
   fails the step.

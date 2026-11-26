@@ -77,7 +77,9 @@ pr-review/
 An aware host offers two ways in. **Explicit**: a command such as
 `/pr-review`, or a call from code. **Dynamic**: the model asks for a
 workflow skill, which ends its turn and starts the workflow instead of
-returning the body.
+returning the body (spiked: `workflow.SkillTool`, RFC 0009). The model
+asks and the program invokes, only for workflows the host names
+(`workflow.ModelInvokes`), and only between runs.
 
 ## WORKFLOW.md
 

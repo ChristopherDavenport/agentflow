@@ -10,8 +10,11 @@
 // A script reports progress while it runs by appending lines to the file
 // named by $AGENTFLOW_PROGRESS: {"progress": 3, "total": 10, "message":
 // "..."}, or a line of plain text, which is a message alone. Each is a
-// progress update of the call, as any long-running tool reports one. It
-// changes nothing of the result.
+// progress update of the call, as any long-running tool reports one, and
+// the first [MaxKeptProgress] are also written to the session as
+// [ProgressRecord]s under [ProgressNS], through the recorder on the
+// call's context, so a front can read them back after a restart. They
+// change nothing of the result, and no model is sent them.
 //
 // A script runs in its step's dir, a directory below the workspace's
 // root the call names, and at the root when it names none. Paths in the
