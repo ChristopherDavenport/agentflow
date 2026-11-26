@@ -208,6 +208,7 @@ and be none. Unknown keys are errors.
 | `text` | person | the outcome an answer in the person's own words takes, the words in its data (RFC 0004, section 25) |
 | `policy` | model, call | `allow` and `deny` rules in agentpolicy's grammar, which can only narrow what the host permits; on a call, for every model step it calls (RFC 0003, section 17) |
 | `child` | fresh model | a child kept across the visits and steps that name it (RFC 0002, section 11) |
+| `on_abort` | frontmatter | the step a cleanup path starts at, run when the run is abandoned (RFC 0006, section 30) |
 | `documents` | model; script, tool | on a model step, the documents it may `read` and `edit`; on a script or tool step, those it `write`s from members of its result. The frontmatter's `documents` declares them (RFC 0006, section 29) |
 | `outcomes` | all | ways the node can end; `[ok]` if absent |
 | `unattended` | person | outcome, and data, taken when nobody can be asked |
@@ -403,7 +404,7 @@ with the instance, a status, a reason, the path taken and the outputs:
 |---|---|
 | `done` | the last step finished; the report follows |
 | `failed` | a step failed with nobody to retry it, a person chose `stop`, a bound was reached with nobody to grant more (the ending's `limit` names it), or the outputs could not be made. The run then ends in the same error as before |
-| `abandoned` | another instance was asked for over an unfinished one; written before the new `flow_start` |
+| `abandoned` | another instance was asked for over an unfinished one; written before the new `flow_start`, after the run's cleanup path, if it has one (RFC 0006, section 30) |
 
 An instance with no `flow_end` is `running`: waiting, stalled,
 interrupted, or left by a host that never prompted again. A run stopped

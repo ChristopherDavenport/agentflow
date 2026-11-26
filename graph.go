@@ -338,6 +338,10 @@ type Graph struct {
 	// enter, across every run it calls. 0 means [DefaultMaxSteps]; a
 	// host's [MaxSteps] may lower it.
 	MaxSteps int `json:",omitempty"`
+	// OnAbort names the step a cleanup path starts at, which runs when a
+	// run is abandoned, before its end is written. Its steps are script,
+	// tool and person steps that no other path reaches, and it has no loop.
+	OnAbort string `json:",omitempty"`
 	// Documents are the workflow's named markdown documents, by name.
 	Documents map[string]Document `json:",omitempty"`
 	// Model and Thinking are what the workflow's model steps ask for when
@@ -364,8 +368,8 @@ func (g *Graph) outputs(outcome string) map[string]Value {
 // Outcomes are the ways the workflow can end: the ends its steps reach.
 func (g *Graph) Outcomes() []string {
 	var out []string
-	for i := range g.Nodes {
-		n := &g.Nodes[i]
+	// A cleanup path's ends end no workflow: the run is abandoned.
+	for _, n := range g.mainNodes() {
 		for _, outcome := range n.outcomes() {
 			if n.Next[outcome] != "" {
 				continue
@@ -564,6 +568,7 @@ func (g *Graph) Validate() error {
 	}
 	errs = append(errs, g.checkKept()...)
 	errs = append(errs, g.checkDocuments()...)
+	errs = append(errs, g.checkCleanup()...)
 	if len(g.Nodes) > 0 {
 		errs = append(errs, g.checkRefs()...)
 	}

@@ -412,8 +412,23 @@ func (f *flow) abandon(ctx context.Context, a *agentturn.Agent) (openresponses.I
 				if err != nil {
 					return nil, err
 				}
-				if end, err := child.Prompt(cctx, append(inner, openresponses.DeveloperText(abandonText))...); end == nil {
+				end, err := child.Prompt(cctx, append(inner, openresponses.DeveloperText(abandonText))...)
+				if end == nil {
 					return nil, err
+				}
+				// A cleanup that waits on a question in the child is cut
+				// short: the person is asked nothing in a session abandoned
+				// from above, and the child's runs end.
+				if end.Reason == agentturn.ReasonInputRequired {
+					var refused openresponses.Items
+					for _, p := range end.Pending {
+						if p.Call != nil {
+							refused = append(refused, openresponses.NewFunctionCallOutput(p.Call.CallID, "agentflow: abandoned"))
+						}
+					}
+					if end, err := child.Prompt(cctx, append(refused, openresponses.DeveloperText(abandonText))...); end == nil {
+						return nil, err
+					}
 				}
 			}
 		}

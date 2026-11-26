@@ -358,8 +358,8 @@ func (f *flow) begin(ctx context.Context, info agentturn.TurnStartInfo) (openres
 // overdue is the ending that has yet to be written, nil when none has.
 func (f *flow) overdue(st State, failed error) *Ending {
 	switch {
-	case len(st.abandoned) > 0 && !st.Started:
-		return st.abandoned[0]
+	case st.endNow:
+		return ending(st, failed)
 	case !st.Started || st.Ended || errors.Is(failed, ErrChanged):
 		return nil
 	case failed != nil || st.Done:

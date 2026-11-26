@@ -57,6 +57,9 @@ type Ending struct {
 	// Limit names the bound across the tree of runs the run failed on,
 	// such as depth, so every run it is nested in fails with it.
 	Limit string `json:"limit,omitempty"`
+	// Cleanup says how an abandoned run's cleanup path went: done, or why
+	// it stopped. It is empty for a run with none.
+	Cleanup string `json:"cleanup,omitempty"`
 
 	// id is the ID of the call that writes it.
 	id string
@@ -73,7 +76,7 @@ func pathOf(steps []Step) []PathStep {
 // ending is how the run st stands would be ended: what it came to, or
 // abandoned if it came to nothing.
 func ending(st State, failed error) *Ending {
-	e := &Ending{Instance: st.Instance, Status: Abandoned, Path: pathOf(st.Steps), id: st.endID()}
+	e := &Ending{Instance: st.Instance, Status: Abandoned, Path: pathOf(st.Steps), Cleanup: st.Cleanup, id: st.endID()}
 	if st.Done {
 		e.Outcome = st.Outcome
 	}
@@ -188,20 +191,11 @@ func (run *Instance) At(t agentturn.Transcript, i int) (State, error) {
 	return State{Workflow: run.Workflow, Instance: run.ID, Parent: run.Parent, Caller: run.Caller, Depth: run.Depth}, nil
 }
 
-// spanOf is t's items from from to to, without the invocations of the
-// root's workflow: a request for the next run is not part of this one.
-func spanOf(g *Graph, t agentturn.Transcript, from, to int) agentturn.Transcript {
-	var out agentturn.Transcript
-	for _, item := range t[from:to] {
-		if m, ok := item.(*openresponses.Message); ok && m.Role == openresponses.RoleDeveloper {
-			if _, invoked := g.invoked(m.Text()); invoked {
-				// Kept out by position: the span stops at the first.
-				continue
-			}
-		}
-		out = append(out, item)
-	}
-	return out
+// spanOf is t's items from from to to. An invocation in it abandons the
+// run, whose cleanup and end come after it; the next run is not part of
+// the span, which stops at its start.
+func spanOf(_ *Graph, t agentturn.Transcript, from, to int) agentturn.Transcript {
+	return slices.Clone(t[from:to])
 }
 
 // rootRun reads the run nobody called whose flow_start is item at, nil
@@ -231,18 +225,12 @@ func rootRun(t agentturn.Transcript, at int, c *openresponses.FunctionCall, out 
 		return run, nil
 	}
 	run.Graph, run.root = g, g
-	// The run stops where another of its workflow is asked for or
-	// started; its ending, and its calls', for an abandoned run, come
-	// after that.
+	// The run stops where another of its workflow starts. Where another
+	// is asked for, the run is abandoned: its cleanup and its ending, and
+	// its calls', come after that, before the next start.
 	ends := map[string]int{}
 	for i := at + 1; i < len(t); i++ {
 		switch it := t[i].(type) {
-		case *openresponses.Message:
-			if it.Role == openresponses.RoleDeveloper {
-				if _, invoked := g.invoked(it.Text()); invoked {
-					run.stop = min(run.stop, i)
-				}
-			}
 		case *openresponses.FunctionCall:
 			if it.Name == startTool && strings.HasPrefix(it.CallID, reserved) && i < run.stop {
 				var q startPayload

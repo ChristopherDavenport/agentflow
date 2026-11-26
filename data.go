@@ -230,6 +230,11 @@ func (f facts) after(n *Node, outcome string) facts {
 func (g *Graph) checkRefs() []error {
 	// A node with no entry has not been reached by the analysis.
 	in := map[string]facts{g.Nodes[0].ID: {}}
+	// A cleanup path starts with nothing certain but the inputs: a run may
+	// be abandoned anywhere.
+	if c := g.node(g.OnAbort); c != nil && c != &g.Nodes[0] {
+		in[c.ID] = facts{}
+	}
 	for changed := true; changed; {
 		changed = false
 		for i := range g.Nodes {
@@ -307,7 +312,7 @@ func (g *Graph) checkRefs() []error {
 			}
 		}
 		for _, outcome := range n.outcomes() {
-			if n.Next[outcome] != "" {
+			if n.Next[outcome] != "" || g.cleans(n.ID) {
 				continue
 			}
 			outputs := g.outputs(n.ending(outcome))
@@ -386,7 +391,7 @@ func (g *Graph) checkAlternatives() []error {
 				for i := range g.Nodes {
 					n := &g.Nodes[i]
 					for _, outcome := range n.outcomes() {
-						if n.Next[outcome] != "" || end != "" && n.ending(outcome) != end {
+						if n.Next[outcome] != "" || end != "" && n.ending(outcome) != end || g.cleans(n.ID) {
 							continue
 						}
 						for have := range at[n.ID] {
@@ -468,6 +473,9 @@ func (g *Graph) reached(refs []ref) map[string]map[uint]bool {
 		}
 	}
 	at := map[string]map[uint]bool{g.Nodes[0].ID: {first: true}}
+	if c := g.node(g.OnAbort); c != nil {
+		at[c.ID] = map[uint]bool{first: true}
+	}
 	for changed := true; changed; {
 		changed = false
 		for i := range g.Nodes {

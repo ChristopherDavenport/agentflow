@@ -58,3 +58,26 @@ func TestDocumentSettingsAreChecked(t *testing.T) {
 		}
 	}
 }
+
+const cleaning = "---\non_abort: undo\n---\n# t\n\n```mermaid\nflowchart TD\n  work[[work]]\n  undo[[undo]] --> tell([tell])\n```\n\n" +
+	"## work\n```yaml\nrun: scripts/work.sh\n```\n\n## undo\n```yaml\nrun: scripts/undo.sh\n```\n\n## tell\nUndone; anything else?\n"
+
+func TestACleanupPathReadsBack(t *testing.T) {
+	g, err := workflow.Parse("t", []byte(cleaning))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.OnAbort != "undo" || len(g.Outcomes()) != 1 {
+		t.Errorf("on abort %q, outcomes %v", g.OnAbort, g.Outcomes())
+	}
+	out, err := workflow.Format(g, "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back, err := workflow.Parse("t", out); err != nil || back.OnAbort != "undo" {
+		t.Errorf("read back: %v\n%s", err, out)
+	}
+	if _, err := workflow.Parse("t", []byte(strings.Replace(cleaning, "on_abort: undo", "on_abort: und", 1))); err == nil || !strings.Contains(err.Error(), `did you mean "undo"?`) {
+		t.Errorf("err = %v", err)
+	}
+}

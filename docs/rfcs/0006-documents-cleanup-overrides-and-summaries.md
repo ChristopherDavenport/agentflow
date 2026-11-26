@@ -101,3 +101,76 @@ model step, and `write` on anything but a script or tool step; a `from`
 that is not a clean path in the skill, or not in it; an `input` that is
 not an input of the workflow, or not text; and a written member that no
 outcome declares, or that is not text.
+
+## 30. Cleanup on abort
+
+A workflow may name, in its frontmatter, the step a cleanup path starts
+at:
+
+````markdown
+---
+on_abort: undo
+---
+```mermaid
+flowchart TD
+  work[[work]] --> review[review]
+  undo[[undo]] --> tell([tell])
+```
+````
+
+The path is the steps reachable from `on_abort`. It runs when the run is
+**abandoned**, before the run's end is written: by a person's new
+invocation, by `agentflow: abandon` from the run that called a child, or
+by an operator's abandon ([section 31](#31-operator-overrides)). A
+cancelled context writes nothing, so it abandons nothing and runs no
+cleanup: the run is still under way, and resumes.
+
+**It can never prevent the abort.**
+
+- Its steps are script, tool and person steps only. It calls no
+  workflow, has no model step and no judge, and has no loop. A cleanup is
+  bounded by its length, so no bound is checked on it, and it never asks
+  for more allowance.
+- Nothing on the workflow's own path reaches it, and it reaches nothing
+  on that path. Where it ends, the cleanup is over; its ends are no
+  outcomes of the workflow.
+- A cleanup step that fails is not asked about: the cleanup ends there.
+- Whatever the cleanup comes to, the end is written next: `abandoned`,
+  with `cleanup` saying `done`, `failed at <step>: <why>`, or
+  `cut short: abandoned again`.
+
+**Across a stack, innermost first.** An abandon reaches every run under
+way (or, from an operator, the runs out to the one it names). The
+innermost runs its cleanup under its own key and writes its end; then the
+run that called it does the same; and so on out. Only then does the run
+asked for start. A run that had already failed or finished writes its end
+as it stands, with no cleanup.
+
+**Through children.** A run in a child session is abandoned in its own
+session, as before: its caller's held call is refused, and the child is
+told `agentflow: abandon`. The child's runs clean up there, innermost
+first. A cleanup question in a child is not put to anybody: the person
+is in the session the abandon came from, so the question is refused, the
+child is told again, and the cleanup ends there.
+
+**A person step in cleanup.**
+
+- **Attended:** it is asked and waits, like any question, and the run's
+  end waits with it. A person who wants out answers it, or abandons
+  again: the host refuses the pending question first, which ends the
+  cleanup.
+- **Unattended:** it takes its `unattended` outcome. Without one, the
+  question cannot be answered, which fails the step, which ends the
+  cleanup.
+
+A cleanup step's `with` reads only what is certain wherever a run may be
+abandoned: the inputs and the documents. A step of the workflow's path is
+read with `optional` or `latest`, since it may not have run.
+
+Checked at load: `on_abort` names a step (with the name that was meant);
+no step of the cleanup is on the workflow's path; no cleanup step is a
+model step, a call or a judged question; and the cleanup has no loop.
+
+**Record.** The cleanup's calls are under the abandoned run's key, after
+the invocation, so `Runs` reads a run's span as reaching past an
+invocation to its end; the next run's span starts at its own start.

@@ -193,9 +193,14 @@ type State struct {
 	// none is to start until an invocation.
 	Left bool
 
-	// abandoned are earlier runs another was asked for over, innermost
-	// first, with nothing yet written of their ends.
-	abandoned []*Ending
+	// Aborting says the run has been abandoned and is ending, and Cleaning
+	// that its cleanup path runs first. Cleanup says how that went, once
+	// over: done, or why it stopped.
+	Aborting, Cleaning bool
+	Cleanup            string
+	// endNow says the run's end is due: it was abandoned, and has no
+	// cleanup to run, or its cleanup is over.
+	endNow bool
 	// refused counts the verdicts a judge gave that it may not give.
 	refused int
 	// kept are the children the run keeps, by name, each with its spawn.
@@ -375,6 +380,24 @@ type frame struct {
 	repeating      string
 	// came says how the current node was reached, for a bound to say.
 	came string
+	// aborting says the run was abandoned and is ending; cleaning that its
+	// cleanup path has begun, and cleaned how it went once over; cut that
+	// a second abandon cut it short.
+	aborting, cleaning, cut bool
+	cleaned                 string
+}
+
+// abortPlan is an abandon under way.
+type abortPlan struct {
+	// until is the outermost run it reaches, nil for every run under way,
+	// and next the run asked for once they have ended, nil for none.
+	until, next *frame
+}
+
+// canClean says f has a cleanup path to run as it is abandoned: one it
+// has not begun, for a run that has neither failed nor finished.
+func (f *frame) canClean() bool {
+	return f.st.Started && f.st.g.OnAbort != "" && f.failed == nil && !f.st.Done && !f.cut && !f.cleaning
 }
 
 // freshCall is a call a run made into a child session.
@@ -395,8 +418,9 @@ type replay struct {
 	stack   []*frame
 	frames  []*frame
 	entries int
-	// abandoned outlives a root: it is written before the next starts.
-	abandoned []*Ending
+	// abort is an abandon under way: the runs it reaches end, innermost
+	// first, each after its cleanup, before the run asked for starts.
+	abort *abortPlan
 	// prefixes are those of every run started, of any workflow, so a
 	// call none of them made is known to have lost its start.
 	prefixes []string
@@ -432,6 +456,7 @@ func (g *Graph) replay(t agentturn.Transcript) *replay {
 		case *openresponses.FunctionCallOutput:
 			r.output(i, it)
 		}
+		r.settle()
 	}
 	return r
 }
@@ -457,7 +482,8 @@ func (r *replay) top() *frame {
 func (r *replay) state(f *frame) State {
 	st := f.st
 	st.Documents = maps.Clone(f.st.Documents)
-	st.abandoned = r.abandoned
+	st.Aborting, st.Cleaning, st.Cleanup = f.aborting, f.cleaning && f.cleaned == "", f.cleaned
+	st.endNow = f.aborting && f.ending == nil && f.st.Started && (f.cleaned != "" || !f.cleaning)
 	st.Entries, st.Granted, st.maxSteps = r.entries, r.granted, r.maxSteps
 	st.Path = slices.Clone(r.root.path)
 	st.callers = nil
@@ -499,12 +525,11 @@ func (r *replay) known(text string) bool {
 func (r *replay) message(i int, m *openresponses.Message) {
 	if m.Role == openresponses.RoleDeveloper {
 		if inputs, ok := r.g.invoked(m.Text()); ok {
-			r.invoke(i, inputs)
+			r.invoke(i, inputs, false)
 			return
 		}
 		if m.Text() == abandonText {
-			r.invoke(i, nil)
-			r.root.st.Left = true
+			r.invoke(i, nil, true)
 			return
 		}
 	}
@@ -528,18 +553,90 @@ func (r *replay) message(i int, m *openresponses.Message) {
 }
 
 // invoke asks for a new run, abandoning every one under way, innermost
-// first.
-func (r *replay) invoke(i int, inputs any) {
-	var left []*Ending
-	for _, f := range slices.Backward(r.stack) {
-		if f.ending == nil {
-			e := ending(f.st, f.failed)
-			left = append(left, e)
+// first. left says none is to start: the runs here were abandoned with
+// the run that called them.
+func (r *replay) invoke(i int, inputs any, left bool) {
+	next := r.newRoot(inputs)
+	next.st.Left = left
+	r.abandon(i, nil, next)
+}
+
+// abandon abandons the runs under way, innermost first, out to until or,
+// for nil, all of them, and then starts next, if any. Each run it reaches
+// runs its cleanup path, if it has one, before its end. A second abandon
+// over the first cuts any cleanup under way short and reaches the runs of
+// both.
+func (r *replay) abandon(i int, until, next *frame) {
+	if old := r.abort; old != nil {
+		for _, f := range r.stack {
+			if f.cleaning && f.cleaned == "" {
+				f.cleaned = "cut short: abandoned again"
+			}
+			f.cut = f.cut || f.aborting
+		}
+		if old.until == nil {
+			until = nil
+		}
+		if next == nil {
+			next = old.next
 		}
 	}
-	r.abandoned = append(left, r.abandoned...)
-	r.stack, r.entries, r.orphaned = nil, 0, false
-	r.root = r.newRoot(inputs)
+	r.abort = &abortPlan{until: until, next: next}
+	for _, f := range slices.Backward(r.stack) {
+		f.aborting = true
+		if f == until {
+			break
+		}
+	}
+	r.advance(i)
+}
+
+// advance moves an abandon on: the innermost run it reaches begins its
+// cleanup, or waits for its end to be written. Once every run it reaches
+// has ended, the run asked for is next.
+func (r *replay) advance(i int) {
+	p := r.abort
+	if p == nil {
+		return
+	}
+	if f := r.top(); len(r.stack) > 0 && f.aborting {
+		if f.canClean() {
+			r.clean(f, i)
+		}
+		return
+	}
+	r.abort = nil
+	if p.next != nil {
+		r.stack, r.entries, r.orphaned = nil, 0, false
+		r.root = p.next
+	}
+}
+
+// clean begins f's cleanup path, at item i. Whatever the run was waiting
+// on is no longer its business.
+func (r *replay) clean(f *frame, i int) {
+	st := &f.st
+	f.cleaning = true
+	st.Failure, st.Reached, st.Callee, st.Returned, st.calleeInputs, st.Held, st.Advice = "", nil, "", nil, nil, nil, nil
+	f.came = "the run was abandoned"
+	r.enter(f, i, st.g.node(st.g.OnAbort))
+}
+
+// settle ends a cleanup that failed: a cleanup step that fails is not
+// asked about again, and the run's end is written.
+func (r *replay) settle() {
+	f := r.top()
+	if !f.cleaning || f.cleaned != "" {
+		return
+	}
+	switch {
+	case f.st.Failure != "":
+		f.cleaned = fmt.Sprintf("failed at %s: %s", f.st.Node.ID, f.st.Failure)
+		f.st.Failure = ""
+	case f.failed != nil:
+		f.cleaned = "failed: " + f.failed.Error()
+		f.failed = nil
+	}
 }
 
 func (r *replay) call(i int, c *openresponses.FunctionCall) {
@@ -579,7 +676,7 @@ func (r *replay) call(i int, c *openresponses.FunctionCall) {
 func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 	c := r.calls[out.CallID]
 	if c != nil && c.Name == endTool {
-		r.ended(c, out)
+		r.ended(i, c, out)
 		return
 	}
 	f := r.top()
@@ -889,11 +986,7 @@ func cmpDepth(d int) int {
 
 // ended reads a flow_end. An ending counts however the call went: it is
 // what was found, and asking again would not make it more so.
-func (r *replay) ended(c *openresponses.FunctionCall, out *openresponses.FunctionCallOutput) {
-	if k := slices.IndexFunc(r.abandoned, func(e *Ending) bool { return e.id == out.CallID }); k >= 0 {
-		r.abandoned = slices.Delete(slices.Clone(r.abandoned), k, k+1)
-		return
-	}
+func (r *replay) ended(i int, c *openresponses.FunctionCall, out *openresponses.FunctionCallOutput) {
 	f := r.top()
 	if !f.st.Started || f.ending != nil || out.CallID != f.st.endID() {
 		return
@@ -911,17 +1004,14 @@ func (r *replay) ended(c *openresponses.FunctionCall, out *openresponses.Functio
 		f.failed = fmt.Errorf("%w: %s", ErrStepFailed, e.Reason)
 	}
 	r.stack = r.stack[:len(r.stack)-1]
-	p := f.parent
-	if p == nil {
-		return
-	}
 	// The caller learns what came of the call.
-	if p.st.Callee == f.st.Instance {
+	if p := f.parent; p != nil && p.st.Callee == f.st.Instance {
 		p.st.Returned = &e
 		if treeWide(e.Limit) && p.failed == nil {
 			p.failed, p.st.limit = &limitError{limits[e.Limit], e.Reason}, e.Limit
 		}
 	}
+	r.advance(i)
 }
 
 // finish ends f's current node with step, at item i.
@@ -933,6 +1023,11 @@ func (r *replay) finish(f *frame, i int, step Step) {
 	f.since, st.Nudges, st.Begun, st.Advice, st.Held, st.refused = i, 0, false, nil, nil, 0
 	st.Callee, st.Returned, st.calleeInputs = "", nil, nil
 	next := n.Next[step.Result.Outcome]
+	if next == "" && f.cleaning {
+		// The cleanup is over; the run's end is written next.
+		st.Node, f.cleaned = nil, "done"
+		return
+	}
 	if next == "" {
 		st.Node, st.Visit, st.Attempt, st.Done = nil, 0, 0, true
 		st.Outcome = n.ending(step.Result.Outcome)
@@ -981,7 +1076,9 @@ func repeated(steps []Step, id string) int {
 func (r *replay) bounds(f *frame) {
 	st := &f.st
 	n := st.Node
-	if n == nil || st.Reached != nil || f.failed != nil || st.Done {
+	// A cleanup path has no loop, so it is bounded by its length, and no
+	// bound stops it.
+	if n == nil || st.Reached != nil || f.failed != nil || st.Done || f.cleaning {
 		return
 	}
 	g := st.g

@@ -35,7 +35,7 @@ func probeTool(replay agenttool.Replay, fn func(string)) agenttool.Tool {
 }
 
 // runAndDie records a session and lets cfg kill the process.
-func runAndDie(t *testing.T, dir string, cfg agentturn.Config) {
+func runAndDie(t *testing.T, dir string, cfg agentturn.Config, run ...func(*testing.T, *agentturn.Agent)) {
 	ctx := context.Background()
 	store, err := jsonl.Open(dir)
 	if err != nil {
@@ -50,6 +50,10 @@ func runAndDie(t *testing.T, dir string, cfg agentturn.Config) {
 	}
 	a := agentturn.New(cfg)
 	rec.Attach(a)
+	if len(run) > 0 {
+		run[0](t, a)
+		t.Fatal("not killed")
+	}
 	end := start(t, a)
 	t.Fatalf("not killed: %+v", end)
 }
@@ -63,10 +67,10 @@ func killed(t *testing.T, childCfg func() agentturn.Config, cfg agentturn.Config
 
 // killedRecord is [killed] with a config made for the resumed session,
 // which may read it as its record.
-func killedRecord(t *testing.T, childCfg func() agentturn.Config, makeCfg func(*jsonl.Store, string) agentturn.Config) *agentturn.Agent {
+func killedRecord(t *testing.T, childCfg func() agentturn.Config, makeCfg func(*jsonl.Store, string) agentturn.Config, run ...func(*testing.T, *agentturn.Agent)) *agentturn.Agent {
 	t.Helper()
 	if dir := os.Getenv(childEnv); dir != "" {
-		runAndDie(t, dir, childCfg())
+		runAndDie(t, dir, childCfg(), run...)
 	}
 	ctx := context.Background()
 	dir := t.TempDir()

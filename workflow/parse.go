@@ -125,6 +125,8 @@ type frontmatter struct {
 	Thinking    string    `yaml:"thinking"`
 	// Documents are the workflow's named markdown documents.
 	Documents map[string]*documentSpec `yaml:"documents"`
+	// OnAbort names the step the cleanup path starts at.
+	OnAbort string `yaml:"on_abort"`
 }
 
 // documentSpec is how a document starts: from a file of the skill, or as
@@ -220,7 +222,7 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 			return nil, fmt.Errorf("workflow: inputs: %w", err)
 		}
 		outputs, g.MaxDepth, g.MaxSteps, g.Model, g.Thinking = fm.Outputs, fm.MaxDepth, fm.MaxSteps, fm.Model, fm.Thinking
-		g.Description = strings.TrimSpace(fm.Description)
+		g.Description, g.OnAbort = strings.TrimSpace(fm.Description), fm.OnAbort
 		for name, d := range fm.Documents {
 			if g.Documents == nil {
 				g.Documents = map[string]agentflow.Document{}
