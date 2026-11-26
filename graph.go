@@ -21,7 +21,7 @@ import (
 // Names are part of call IDs, which providers hold to 64 characters of
 // this set.
 var (
-	graphName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,16}$`)
+	graphName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 	nodeID    = regexp.MustCompile(`^[A-Za-z0-9_-]{1,20}$`)
 )
 
@@ -39,6 +39,44 @@ const (
 
 // OK is the outcome of a node that declares none.
 const OK = "ok"
+
+// DefaultLoopVisits is how often a node on a loop runs when it sets no
+// bound of its own.
+const DefaultLoopVisits = 5
+
+// onLoop reports whether some path leads from the node back to it.
+func (g *Graph) onLoop(id string) bool {
+	seen := map[string]bool{}
+	queue := []string{id}
+	for len(queue) > 0 {
+		n := g.node(queue[0])
+		queue = queue[1:]
+		if n == nil {
+			continue
+		}
+		for _, next := range n.Next {
+			if next == id {
+				return true
+			}
+			if !seen[next] {
+				seen[next] = true
+				queue = append(queue, next)
+			}
+		}
+	}
+	return false
+}
+
+// visits is the node's bound.
+func (g *Graph) visits(n *Node) int {
+	switch {
+	case n.MaxVisits > 0:
+		return n.MaxVisits
+	case g.onLoop(n.ID):
+		return DefaultLoopVisits
+	}
+	return 1
+}
 
 // ScriptTool is the tool a script step calls; package script makes one.
 // Only the program calls it.
@@ -86,7 +124,9 @@ type Node struct {
 	Unattended string
 	// UnattendedData is the data that goes with it.
 	UnattendedData any
-	// MaxVisits bounds how often the node runs. 0 means once.
+	// MaxVisits bounds how often the node runs. 0 means
+	// [DefaultLoopVisits] for a node a loop can come back to, and once
+	// for any other.
 	MaxVisits int
 }
 
@@ -105,6 +145,9 @@ type Graph struct {
 	Inputs *agenttool.Schema
 	// Outputs is what the finished workflow gives back.
 	Outputs map[string]Value
+	// Sources is the digest of the files the graph was loaded from,
+	// scripts among them, so a change to any is a change to the graph.
+	Sources string
 }
 
 func (g *Graph) node(id string) *Node {
@@ -121,7 +164,7 @@ func (g *Graph) Validate() error {
 	var errs []error
 	bad := func(format string, args ...any) { errs = append(errs, fmt.Errorf("agentflow: "+format, args...)) }
 	if !graphName.MatchString(g.Name) {
-		bad("invalid graph name %q: want 1 to 16 letters, digits, _ or -", g.Name)
+		bad("invalid graph name %q: want 1 to 64 letters, digits, _ or -", g.Name)
 	}
 	if len(g.Nodes) == 0 {
 		bad("graph has no nodes")

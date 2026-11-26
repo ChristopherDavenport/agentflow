@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -347,7 +348,7 @@ func TestDriveRemindsOnce(t *testing.T) {
 }
 
 func TestCallIDsFitProviders(t *testing.T) {
-	g := &Graph{Name: strings.Repeat("n", 16), Nodes: []Node{{ID: strings.Repeat("i", 20), Kind: Run, Tool: "script", MaxVisits: 99}}}
+	g := &Graph{Name: strings.Repeat("n", 64), Nodes: []Node{{ID: strings.Repeat("i", 20), Kind: Run, Tool: "script", MaxVisits: 99}}}
 	if err := g.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -408,5 +409,65 @@ func TestValidate(t *testing.T) {
 	g.node("review").Next["maybe"] = "nowhere"
 	if err := g.Validate(); err == nil {
 		t.Fatal("want an error")
+	}
+}
+
+func TestLoopBounds(t *testing.T) {
+	loop := func(maxVisits int) *Graph {
+		return &Graph{Name: "l", Nodes: []Node{
+			{ID: "once", Kind: Run, Tool: "script", Args: json.RawMessage(`{"name":"once"}`), Next: map[string]string{OK: "again"}},
+			{ID: "again", Kind: Run, Tool: "script", Args: json.RawMessage(`{"name":"again"}`), Next: map[string]string{OK: "again"}, MaxVisits: maxVisits},
+		}}
+	}
+	for name, tc := range map[string]struct {
+		max, runs int
+		says      string
+	}{
+		"default": {0, DefaultLoopVisits, "the default for a step on a loop"},
+		"its own": {2, 2, "its max_visits"},
+		"higher":  {8, 8, "its max_visits"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var ran []string
+			g := loop(tc.max)
+			cfg := apply(t, g, &fakeModel{}, scriptTool(&ran))
+			cfg.MaxTurns = 40
+			end, _ := agentturn.New(cfg).Prompt(context.Background(), openresponses.UserText("go"))
+			if end == nil || !errors.Is(end.Err, ErrVisits) {
+				t.Fatalf("end = %+v", end)
+			}
+			if len(ran) != tc.runs+1 {
+				t.Errorf("ran %d times, want %d and the step before", len(ran), tc.runs)
+			}
+			for _, want := range []string{`step "again"`, tc.says, "set max_visits"} {
+				if !strings.Contains(end.Err.Error(), want) {
+					t.Errorf("error lacks %q: %v", want, end.Err)
+				}
+			}
+			if g.visits(&g.Nodes[0]) != 1 {
+				t.Error("a step off the loop may run more than once")
+			}
+		})
+	}
+}
+
+func TestDataSentAsAStringIsRead(t *testing.T) {
+	object := &agenttool.Schema{Type: "object", Required: []string{"n"}, Properties: []agenttool.Property{{Name: "n", Schema: &agenttool.Schema{Type: "integer"}}}}
+	for _, tc := range []struct {
+		schema   *agenttool.Schema
+		in, want any
+	}{
+		{object, `{"n":9007199254740993}`, map[string]any{"n": json.Number("9007199254740993")}},
+		{&agenttool.Schema{Type: "array"}, `[true]`, []any{true}},
+		// Left alone: not JSON, more than one value, a step that wants a
+		// string, and one with no schema.
+		{object, `n is 1`, `n is 1`},
+		{object, `{} {}`, `{} {}`},
+		{&agenttool.Schema{Type: "string"}, `{"n":1}`, `{"n":1}`},
+		{nil, `{"n":1}`, `{"n":1}`},
+	} {
+		if got := unquote(tc.schema, tc.in); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("unquote(%v) = %#v, want %#v", tc.in, got, tc.want)
+		}
 	}
 }

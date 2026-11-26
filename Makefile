@@ -10,7 +10,8 @@ build:
 # go list -deps without -test leaves the test dependencies out.
 deps:
 	@deps=$$($(GO) list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./... \
-	  | grep -Ev '^github.com/ChristopherDavenport/(agentflow|agenttool|agentturn|agentworkspace|openresponses)(/|$$)' || true); \
+	  | grep -v '^go.yaml.in/yaml/v3$$' \
+	  | grep -Ev '^github.com/ChristopherDavenport/(agentflow|agentskill|agenttool|agentturn|agentworkspace|openresponses)(/|$$)' || true); \
 	  test -z "$$deps" || { echo "module depends on: $$deps"; exit 1; }
 
 test:

@@ -10,4 +10,8 @@ require (
 	github.com/ChristopherDavenport/openresponses v0.0.20
 )
 
-require github.com/ChristopherDavenport/agentworkspace v0.0.12
+require (
+	github.com/ChristopherDavenport/agentskill v0.0.12
+	github.com/ChristopherDavenport/agentworkspace v0.0.12
+	go.yaml.in/yaml/v3 v3.0.5
+)

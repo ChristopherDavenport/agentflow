@@ -67,6 +67,12 @@ pr-review/
   the body. Authors SHOULD write the body so that works.
 - A marker naming a missing or invalid file is an error. An aware host
   MUST NOT fall back to the body on an explicit invocation.
+- The workflow is named for the skill. A script path is within the skill.
+- Loading (package `workflow`, spiked) takes a snapshot of the skill's
+  files. The graph's digest covers all of them, and scripts run from the
+  snapshot, written to a new directory of the workspace for each run and
+  removed after it. `$AGENTFLOW_SKILL_DIR` names it; the script starts at
+  the workspace's root.
 
 An aware host offers two ways in. **Explicit**: a command such as
 `/pr-review`, or a call from code. **Dynamic**: the model asks for a
@@ -102,7 +108,6 @@ max_visits: 3
 ```yaml
 with:
   files: ${{ steps.gather.outputs.files }}
-context: session
 tools: [read, grep]
 outcomes: [clean, findings]
 outputs:
@@ -113,10 +118,25 @@ Review the diff against what the session set out to do.
 
 ## triage
 ```yaml
+with:
+  findings: ${{ steps.review.outputs.findings }}
 outcomes: [fix, report]
 unattended: report
 ```
 These are the findings. Fix them now, or just report them?
+
+## fix
+```yaml
+with:
+  findings: ${{ steps.review.outputs.findings }}
+tools: [read, grep]
+```
+Fix each finding.
+
+## report
+```yaml
+run: scripts/report.sh
+```
 ````
 
 ### Accepted Mermaid
@@ -132,9 +152,30 @@ so the picture cannot disagree with what runs.
 | `id([label])` | a person decides |
 | `a --> b` | `a` ends with `ok`, then `b` |
 | `a -->\|outcome\| b` | `a` ends with `outcome`, then `b` |
+| `%% text` | a comment |
 
-The first node mentioned is the start. An outcome with no edge ends the
-workflow. `end` is reserved by Mermaid and cannot be an ID.
+One node or one edge to a line; edges do not chain. A node has one shape,
+given at least once. A label is free text, quoted if it likes, and means
+nothing. The first node mentioned is the start. An outcome with no edge
+ends the workflow. Mermaid's keywords (`end`, `graph`, `subgraph`,
+`flowchart`, `direction`, `style`, `linkStyle`, `classDef`, `class`,
+`click`, `default`) cannot be IDs. That Mermaid itself draws every file
+this accepts has not been verified.
+
+### Loops
+
+A node a path can come back to may run 5 times unless it says otherwise,
+so a loop is bounded without every step saying so. To tighten or loosen
+it, set `max_visits` on any one node of the loop. Reaching a bound fails
+the workflow with an error naming the step, the bound, where it came
+from and the edge taken.
+
+### Sections
+
+A section may open with one `yaml` block of settings. The rest is prose,
+which may hold headings below `##` and fenced blocks. A `yaml` block
+anywhere else in a section is an error, since it would look like settings
+and be none. Unknown keys are errors.
 
 ### Node settings
 
@@ -145,14 +186,14 @@ workflow. `end` is reserved by Mermaid and cannot be an ID.
 | `with` | all | the step's inputs, by name |
 | `outputs` | all | schema of the step's data, by outcome |
 | `tools` | model | tools the model may call; none if absent |
-| `context` | model | `session`, `fresh`, or a list of node IDs (proposed) |
+| `context` | model | `session`, `fresh`, or a list of node IDs (proposed; refused today) |
 | `outcomes` | all | ways the node can end; `[ok]` if absent |
 | `unattended` | person | outcome, and data, taken when nobody can be asked |
-| `max_visits` | all | bound on loops; 1 if absent |
+| `max_visits` | all | how often the node may run; if absent, 5 for a node on a loop and 1 for any other |
 
 The text under a model or person node is its prompt.
 
-## Data (spiked, in Go)
+## Data (spiked)
 
 The vocabulary follows GitHub Actions, so it reads as familiar. It is not
 compatible with it.
@@ -216,7 +257,9 @@ nested one, are refused.
 
 ### Schemas and forms
 
-A step's `outputs` schema is checked where the data is made. A script or
+A step's `outputs` schema is checked where the data is made. A model
+often sends nested `data` as a string holding JSON; where the schema
+wants an object or an array, the string is read first. A script or
 tool that breaks it fails the step. A model is given the schema as the
 parameters of `flow_finish` and sees the error. A person's answer that
 breaks it is refused and the question stays pending; the question carries
@@ -351,15 +394,14 @@ it sees: `session` (the invoking conversation), `fresh` (only its
 inputs) or named node results. A reviewer that inherits a session also
 inherits its blind spots, so both have uses.
 
-## Determinism and trust (proposed)
+## Determinism and trust
 
-- `flow_start` records a digest of the graph (spiked). Loaded from a
-  skill, it must cover the whole tree, scripts included.
+- `flow_start` records a digest of the graph, which for a skill covers
+  every file in it (spiked). Approving a workflow is approving a digest.
 - Branches use only recorded outcomes. Time, randomness and anything
   clever belong in a script whose result is recorded.
 - A workflow from a repository is repository code that runs at fixed
-  points. It needs approval by tree digest before its first run.
-- Skill files must be materialised in the workspace where scripts run.
+  points. It needs approval by digest before its first run (proposed).
 
 ## Spike findings
 
@@ -406,6 +448,30 @@ schema, reaching the person's question, one reminder allowed:
 
 The two rows for the small model are too few to credit the schema.
 
+A headless PR review, `examples/skills/pr-review`, qwen3.5:9b, against a
+real merged pull request, 2026-11-25. The machinery held: every
+completed run's request hashes reproduced and nobody was needed. The
+review did not hold. With one bug planted that contradicts the
+description (an exact comparison where it claims to ignore case):
+
+| Review shape | Bug found by the step meant to | In the final report |
+|---|---|---|
+| one review step | 0/3 | 0/3 |
+| claims, check each with a quote, script branches | 1/4 | 0/4 |
+
+Two further runs of the second shape timed out before the fix for string
+data. In the one detection, the next step read the function, saw the
+comparison was exact, argued it was right anyway and dropped the finding.
+The other checks quoted a call site or a comment as their evidence. What
+this says about workflows:
+
+- A schema makes a model fill in a field, not look. A script can branch
+  on what is reported and cannot know it is true.
+- A step that can discard a finding is a silent single point of failure
+  unattended. The example now reports what is dismissed.
+- A step reached from two branches cannot use what only one of them
+  produced, so the example needs three report steps (open question 9).
+
 The role of the reminder, qwen3:1.7b, one reminder, 40 trials a row:
 
 | Reminder role | Stalls recovered |
@@ -431,5 +497,9 @@ and the `context` modes.
    default asks about them. A host must allow them.
 6. **Cost and eval tools** see `agentflow/` responses with no usage.
    They should skip them, not report an unpriced model.
-7. **Gates.** A `check` script that rejects a model's result before the
+7. **Run directories** show in a repository's status while a script runs.
+8. **Gates.** A `check` script that rejects a model's result before the
    step finishes.
+9. **Joins.** A reference needs a value on every path, so a step where
+   branches meet cannot take what one branch alone made. An optional
+   reference is the obvious answer.

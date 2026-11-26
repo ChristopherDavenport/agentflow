@@ -395,7 +395,7 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 	case st.Done:
 		return block("the workflow has finished")
 	case !st.Started:
-		if name != startTool || !strings.HasPrefix(id, reserved+f.g.Name+"_") {
+		if name != startTool || !strings.HasPrefix(id, f.g.idPrefix()) {
 			return block("the workflow has not started")
 		}
 	case st.Failure != "":
@@ -500,6 +500,21 @@ func (f *flow) askTool() agenttool.Tool {
 	}, agenttool.WithReplay(safeReplay))
 }
 
+// unquote reads data a model sent as a string holding JSON, a common
+// mistake with nested data, where the schema wants an object or an
+// array. Anything else is returned as it is, to be held to the schema.
+func unquote(s *agenttool.Schema, data any) any {
+	text, ok := data.(string)
+	if !ok || s == nil || s.Type != "object" && s.Type != "array" {
+		return data
+	}
+	var v any
+	if !json.Valid([]byte(text)) || decode([]byte(text), &v) != nil {
+		return data
+	}
+	return v
+}
+
 func (f *flow) finishTool() agenttool.Tool {
 	return agenttool.New(finishTool, "Finish the current workflow step.", func(ctx context.Context, a finishArgs) (Result, error) {
 		if err := exact(ctx, &a); err != nil {
@@ -509,8 +524,11 @@ func (f *flow) finishTool() agenttool.Tool {
 		if n == nil || n.Kind != Agent {
 			return Result{}, fmt.Errorf("agentflow: %q is not a step you can finish", a.Step)
 		}
-		res := Result{Outcome: a.Outcome, Data: a.Data}
+		res := Result{Outcome: a.Outcome, Data: unquote(n.Data[a.Outcome], a.Data)}
 		if err := n.check(res); err != nil {
+			if s, ok := res.Data.(string); ok && n.Data[a.Outcome] != nil && strings.HasPrefix(strings.TrimSpace(s), "{") {
+				return Result{}, errors.New("agentflow: data is a string that is not valid JSON; send data as a JSON object, not as a string")
+			}
 			return Result{}, fmt.Errorf("agentflow: %w", err)
 		}
 		return res, nil

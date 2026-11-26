@@ -18,8 +18,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,9 +36,28 @@ const OutputEnv = "AGENTFLOW_OUTPUT"
 // maxResult bounds a result. A larger one fails rather than being cut.
 const maxResult = 1 << 20
 
+// SkillDirEnv names the variable holding the directory the script's own
+// files are in, when [Files] gave them.
+const SkillDirEnv = "AGENTFLOW_SKILL_DIR"
+
+// Option configures [New].
+type Option func(*options)
+
+type options struct{ files map[string][]byte }
+
+// Files gives the files scripts are run from, by slash path. They are
+// written to a new directory of the workspace for each run and removed
+// after it, so what runs is what was loaded and not what the workspace
+// holds. The script still starts at the workspace's root.
+func Files(files map[string][]byte) Option { return func(o *options) { o.files = files } }
+
 // New returns the tool a graph's script steps call, running them in ws.
-// A script is a path within the workspace.
-func New(ws agentworkspace.Workspace, timeout time.Duration) agenttool.Tool {
+// A script is a path within the workspace, or within the [Files] given.
+func New(ws agentworkspace.Workspace, timeout time.Duration, opts ...Option) agenttool.Tool {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
 	return agenttool.New(agentflow.ScriptTool, "Run a workflow script.", func(ctx context.Context, a agentflow.ScriptCall) (agentflow.Result, error) {
 		// Read again keeping numbers as written, which the typed
 		// decoding does not.
@@ -49,11 +70,11 @@ func New(ws agentworkspace.Workspace, timeout time.Duration) agenttool.Tool {
 			}
 			a = exact
 		}
-		return run(ctx, ws, timeout, a)
+		return run(ctx, ws, timeout, o.files, a)
 	})
 }
 
-func run(ctx context.Context, ws agentworkspace.Workspace, timeout time.Duration, a agentflow.ScriptCall) (res agentflow.Result, err error) {
+func run(ctx context.Context, ws agentworkspace.Workspace, timeout time.Duration, files map[string][]byte, a agentflow.ScriptCall) (res agentflow.Result, err error) {
 	if !filepath.IsLocal(a.Run) {
 		return res, fmt.Errorf("script %q: not a path within the workspace", a.Run)
 	}
@@ -77,13 +98,25 @@ func run(ctx context.Context, ws agentworkspace.Workspace, timeout time.Duration
 		// The result is read by now, so a leftover file is only litter.
 		_ = ws.Remove(context.WithoutCancel(ctx), name)
 	}()
-	file := name
-	if root := ws.Root(); root != "" {
-		file = path.Join(root, name)
+	absolute := func(p string) string {
+		if root := ws.Root(); root != "" {
+			return path.Join(root, p)
+		}
+		return p
+	}
+	program, env := filepath.ToSlash(filepath.Clean(a.Run)), []string{OutputEnv + "=" + absolute(name)}
+	if files != nil {
+		dir := ".agentflow-run-" + hex.EncodeToString(id[:])
+		remove, err := materialise(ctx, ws, dir, files)
+		defer remove()
+		if err != nil {
+			return res, fmt.Errorf("script %q: its files: %w", a.Run, err)
+		}
+		program, env = path.Join(dir, program), append(env, SkillDirEnv+"="+absolute(dir))
 	}
 	out, err := ws.Exec(ctx, agentworkspace.Command{
-		Args:    []string{"./" + filepath.ToSlash(filepath.Clean(a.Run))},
-		Env:     []string{OutputEnv + "=" + file},
+		Args:    []string{"./" + program},
+		Env:     env,
 		Stdin:   stdin,
 		Timeout: timeout,
 	})
@@ -108,6 +141,42 @@ func run(ctx context.Context, ws agentworkspace.Workspace, timeout time.Duration
 		return res, fmt.Errorf("script %q: %w", a.Run, err)
 	}
 	return res, nil
+}
+
+// materialise writes files under dir. The remove it returns takes away
+// what was written, and is safe to call after a failure.
+func materialise(ctx context.Context, ws agentworkspace.Workspace, dir string, files map[string][]byte) (remove func(), err error) {
+	var made []string
+	dirs := map[string]bool{dir: true}
+	remove = func() {
+		ctx := context.WithoutCancel(ctx)
+		// Files, then directories deepest first. What a script added
+		// stays, and so does its directory: it is litter, not a failure.
+		for _, p := range made {
+			_ = ws.Remove(ctx, p)
+		}
+		for _, d := range slices.Backward(slices.Sorted(maps.Keys(dirs))) {
+			_ = ws.Remove(ctx, d)
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(files)) {
+		if !fs.ValidPath(name) {
+			return remove, fmt.Errorf("%q: not a path within the skill", name)
+		}
+		p := path.Join(dir, name)
+		for d := path.Dir(p); d != dir && d != "."; d = path.Dir(d) {
+			dirs[d] = true
+		}
+		mode := fs.FileMode(0o644)
+		if bytes.HasPrefix(files[name], []byte("#!")) {
+			mode = 0o755
+		}
+		made = append(made, p)
+		if err := ws.WriteFile(ctx, p, files[name], mode); err != nil {
+			return remove, err
+		}
+	}
+	return remove, nil
 }
 
 // readResult reads at most one byte over the limit.

@@ -1,6 +1,8 @@
 package agentflow
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -114,13 +116,22 @@ func (g *Graph) invoked(text string) (inputs any, ok bool) {
 	return inputs, decode([]byte(rest), &inputs) == nil
 }
 
-func (g *Graph) startID(instance string) string {
-	return reserved + g.Name + "_" + instance + "_start"
+// idPrefix starts every call ID. A long name is cut and told apart by
+// its hash, since providers limit call IDs.
+func (g *Graph) idPrefix() string {
+	name := g.Name
+	if len(name) > 16 {
+		sum := sha256.Sum256([]byte(name))
+		name = name[:9] + "-" + hex.EncodeToString(sum[:3])
+	}
+	return reserved + name + "_"
 }
+
+func (g *Graph) startID(instance string) string { return g.idPrefix() + instance + "_start" }
 
 // callID is the ID of the call the program makes for an attempt.
 func (g *Graph) callID(st State) string {
-	id := reserved + g.Name + "_" + st.Instance + "_" + st.Node.ID + "_v" + strconv.Itoa(st.Visit)
+	id := g.idPrefix() + st.Instance + "_" + st.Node.ID + "_v" + strconv.Itoa(st.Visit)
 	if st.Attempt > 1 {
 		id += "-a" + strconv.Itoa(st.Attempt)
 	}
@@ -180,7 +191,7 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 				case p.Digest != digest:
 					failed = ErrChanged
 				default:
-					instance := strings.TrimSuffix(strings.TrimPrefix(it.CallID, reserved+g.Name+"_"), "_start")
+					instance := strings.TrimSuffix(strings.TrimPrefix(it.CallID, g.idPrefix()), "_start")
 					st = State{Started: true, Instance: instance, Inputs: p.Inputs, Node: &g.Nodes[0], Visit: 1, Attempt: 1}
 					visits[st.Node.ID], since = 1, i
 				}
@@ -232,8 +243,13 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 			st.Node = g.node(next)
 			visits[next]++
 			st.Visit, st.Attempt = visits[next], 1
-			if st.Visit > max(1, st.Node.MaxVisits) {
-				failed = fmt.Errorf("%w: %s", ErrVisits, next)
+			if bound := g.visits(st.Node); st.Visit > bound {
+				from := "its max_visits"
+				if st.Node.MaxVisits == 0 {
+					from = "the default for a step on a loop"
+				}
+				failed = fmt.Errorf("%w: step %q of workflow %q has run %d times, %s, and %q came back to it on %q; set max_visits for the step to change it",
+					ErrVisits, next, g.Name, bound, from, n.ID, res.Outcome)
 			}
 		}
 	}

@@ -6,8 +6,8 @@ turn.
 
 **This is a spike.** The design is
 [RFC 0001](docs/rfcs/0001-agentflow.md), which says what is implemented
-and what is only proposed. Graphs are built in Go; the `WORKFLOW.md`
-format is not parsed yet. Needs Go 1.26.
+and what is only proposed. A workflow is a `WORKFLOW.md` in an Agent
+Skill, or a graph built in Go. Needs Go 1.26.
 
 ```go
 cfg, err := agentflow.Apply(graph, agentturn.Config{Model: model, ModelName: name, Tools: tools})
@@ -35,4 +35,13 @@ result, so a program that emits JSON works as a step:
 
 cfg, err := agentflow.Apply(graph, agentturn.Config{ /* ... */
 	Tools: []agenttool.Tool{script.New(workspace, time.Minute)}})
+```
+
+A skill marked `metadata: {agentflow: WORKFLOW.md}` loads as a workflow.
+`workflow/testdata/release` is a whole one.
+
+```go
+w, err := workflow.Load(skill) // skill from agentskill
+cfg, err := agentflow.Apply(w.Graph, agentturn.Config{ /* ... */
+	Tools: []agenttool.Tool{script.New(ws, time.Minute, script.Files(w.Files))}})
 ```
