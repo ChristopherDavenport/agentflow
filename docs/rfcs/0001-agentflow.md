@@ -288,6 +288,10 @@ not share a stream.
 
 Large data belongs in a workspace file, passed as its path and a hash.
 
+A script reports progress while it runs by appending lines to
+`$AGENTFLOW_PROGRESS`; each is a progress update of its call and changes
+nothing of its result (RFC 0005, section 28).
+
 Scripts run in an `agentworkspace.Workspace` (package `script`), as the
 tool `run_script`. Only the program calls it: a model's call, and a tool's
 nested one, are refused.

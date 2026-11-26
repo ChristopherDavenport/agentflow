@@ -113,3 +113,40 @@ Skills for this step, to follow as you do it:
   `skills`, and a person step names none.
 - **Only model steps.** A program step or a person step that names skills
   is a load error.
+
+## 28. Progress from a running script
+
+```sh
+printf '{"progress": 2, "total": 5, "message": "testing"}\n' >> "$AGENTFLOW_PROGRESS"
+echo 'linking' >> "$AGENTFLOW_PROGRESS"
+```
+
+A script is told, in `$AGENTFLOW_PROGRESS`, the path of a file it may
+append progress to, one line for each update:
+
+- a JSON object, `{"progress": …, "total": …, "message": …}`, any member
+  left out, the numbers read as `agenttool.ProgressInfo` reads them;
+- or a line of plain text, which is a message alone.
+
+While the script runs, `run_script` reads the file every 100ms and
+reports each complete line as a progress update of its call,
+`agenttool.Progress` with `ProgressInfo` as the details and the message
+as the text (`2/5 testing`). The loop raises each as a `ToolUpdate`, as it
+does for any long-running tool, so a front shows it beside the step. A
+last line with no newline is reported when the script exits.
+
+- **It changes nothing.** The result is what the script writes to
+  `$AGENTFLOW_OUTPUT` or its standard output, as before. No update reaches
+  the record's items, so position, `with` values and control flow never
+  see one, and replaying a run reads none.
+- **The recorder keeps none.** agentturn/session writes no entry for a
+  `ToolUpdate`, and `ProgressInfo` is not an `agenttool.Recordable`, so
+  progress is live only: for subscribers while the call runs. Nothing in
+  the session format was needed or changed. A host that wants a history
+  of progress subscribes and keeps it itself.
+- **Bounds.** A line over 4 KiB is not reported, nor anything past the
+  file's first 1 MiB, and a malformed object is read as text. None of it
+  fails the step.
+- **Where it lives.** The file is `.agentflow-progress-<id>` at the
+  workspace's root, beside the result file, and is removed when the call
+  ends.

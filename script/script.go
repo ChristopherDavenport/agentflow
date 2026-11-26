@@ -6,6 +6,12 @@
 // outcomes the result is the data itself, so a program that prints JSON
 // works as it is. A step with outcomes prints
 // {"outcome": ..., "data": ...}.
+//
+// A script reports progress while it runs by appending lines to the file
+// named by $AGENTFLOW_PROGRESS: {"progress": 3, "total": 10, "message":
+// "..."}, or a line of plain text, which is a message alone. Each is a
+// progress update of the call, as any long-running tool reports one. It
+// changes nothing of the result.
 package script
 
 import (
@@ -32,6 +38,10 @@ import (
 
 // OutputEnv names the variable holding the result file's path.
 const OutputEnv = "AGENTFLOW_OUTPUT"
+
+// ProgressEnv names the variable holding the path of the file a script
+// appends its progress to, one line for each update.
+const ProgressEnv = "AGENTFLOW_PROGRESS"
 
 // maxResult bounds a result. A larger one fails rather than being cut.
 const maxResult = 1 << 20
@@ -121,7 +131,12 @@ func run(ctx context.Context, ws agentworkspace.Workspace, timeout time.Duration
 		}
 		return p
 	}
-	program, env := filepath.ToSlash(filepath.Clean(a.Run)), []string{OutputEnv + "=" + absolute(name)}
+	progress := ".agentflow-progress-" + hex.EncodeToString(id[:])
+	if err := ws.WriteFile(ctx, progress, nil, 0o600); err != nil {
+		return res, fmt.Errorf("script %q: progress file: %w", a.Run, err)
+	}
+	defer func() { _ = ws.Remove(context.WithoutCancel(ctx), progress) }()
+	program, env := filepath.ToSlash(filepath.Clean(a.Run)), []string{OutputEnv + "=" + absolute(name), ProgressEnv + "=" + absolute(progress)}
 	if files != nil {
 		dir := ".agentflow-run-" + hex.EncodeToString(id[:])
 		remove, err := materialise(ctx, ws, dir, files)
@@ -131,12 +146,14 @@ func run(ctx context.Context, ws agentworkspace.Workspace, timeout time.Duration
 		}
 		program, env = path.Join(dir, program), append(env, SkillDirEnv+"="+absolute(dir))
 	}
+	watch := watchProgress(ctx, ws.FS(), progress)
 	out, err := ws.Exec(ctx, agentworkspace.Command{
 		Args:    []string{"./" + program},
 		Env:     env,
 		Stdin:   stdin,
 		Timeout: timeout,
 	})
+	watch()
 	if err != nil {
 		return res, fmt.Errorf("script %q: %w", a.Run, err)
 	}
