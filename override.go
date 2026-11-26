@@ -153,7 +153,7 @@ func (r *replay) overridden(i int, c *openresponses.FunctionCall, out *openrespo
 			next = r.newRoot(nil)
 			next.st.Left = true
 		}
-		r.abandon(i, f, next)
+		r.abandon(i, f, next, overriddenFor(o.Action))
 		return
 	case OverrideRetry:
 		n := st.Node
@@ -201,6 +201,10 @@ func (r *replay) reask() {
 // overriddenText is the output of a call the host set aside to ask for
 // an override.
 const overriddenText = "agentflow: overridden"
+
+// overriddenFor is the reason the end of a run an override abandoned
+// records, the children set aside for one included.
+func overriddenFor(action string) string { return "overridden: " + action }
 
 // overrideID is the ID of the call that applies the override pending.
 func (r *replay) overrideID() string {
@@ -262,7 +266,7 @@ func (f *flow) overrule(ctx context.Context, a *agentturn.Agent, o Override) (*a
 	}
 	r := f.g.replay(all)
 	if slices.ContainsFunc(r.stack, func(fr *frame) bool { return fr.st.Instance == o.Run }) {
-		outs, err := f.setAside(ctx, a, overriddenText)
+		outs, err := f.setAside(ctx, a, overriddenText, overriddenFor(o.Action))
 		if err != nil {
 			return nil, State{}, err
 		}

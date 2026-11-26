@@ -219,10 +219,21 @@ changes nothing: position is still read from recorded results.
   `OverrideRun` opens the child and asks there, at any depth.
 
 **Setting the run still.** Calls pending when the override is asked for
-are set aside, the children they wait on abandoned as for an invocation.
-A question set aside so is not answered: if the override is refused it is
-put again under a new ID; if applied, the override decides what comes
-next.
+are set aside, the children they wait on abandoned as for an invocation:
+each child's runs clean up, innermost first, and each one's end records
+why, `overridden: retry`, `overridden: jump` or `overridden: abandon`.
+The program tells the child `agentflow: abandon: <why>`, which a model
+cannot write either. A question set aside so is not answered: if the
+override is refused it is put again under a new ID; if applied, the
+override decides what comes next.
+
+**A retry of a fresh step starts its work again.** The step's child is
+abandoned and the new attempt calls a new one: for a fresh step or a
+fresh call, that is the retry's meaning, and the old child's session
+stays, readable, with its end. A **kept child** (`child: <name>`) keeps
+its session: only the run of the visit under way ends, and the next
+attempt continues the same session, as any later visit does, so its
+model reads what the abandoned attempt did.
 
 **Counts and bounds.** A retry is a new attempt and a jump a new visit;
 both count as step entries of the tree, and both are held to every bound.

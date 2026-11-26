@@ -2,6 +2,7 @@ package agentflow
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -226,5 +227,69 @@ func TestOverridesAreCheckedAsAsked(t *testing.T) {
 		if _, err := OverrideRequest(tc.o); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%+v: err = %v, want %q", tc.o, err, tc.want)
 		}
+	}
+}
+
+func TestARetryAbandonsItsChildForTheOverride(t *testing.T) {
+	g := linked(t, &Graph{Name: "careful", Nodes: []Node{{ID: "call", Kind: Run, Flow: "tidyin", Context: ContextFresh}}}, tidyIn())
+	var ran []string
+	m := &fakeModel{}
+	kids := newKin(m, "fake", undoTool(&ran, nil))
+	a := nestedAgent(t, g, m, nil, kids.option())
+	end, _, err := Drive(t.Context(), g, a, start(t, a))
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := question(t, end)
+	if q.Workflow != "tidyin" || len(q.Path) != 2 {
+		t.Fatalf("question = %+v", q)
+	}
+	end, _, err = OverrideRun(t.Context(), g, a, Override{Run: q.Path[0].Run, Action: OverrideRetry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The step runs again, in a new child, whose question is asked.
+	again := question(t, end)
+	if again.Workflow != "tidyin" || again.Run == q.Run {
+		t.Fatalf("question = %+v", again)
+	}
+	// The child set aside cleaned up, and its end says why it ended.
+	ends := endings(kids.agents[q.Run].State().Transcript)
+	if len(ends) != 1 || ends[0].Status != Abandoned || ends[0].Reason != "overridden: retry" || ends[0].Cleanup != "done" || !slices.Equal(ran, []string{"inner"}) {
+		t.Errorf("ends = %+v, ran %v", ends, ran)
+	}
+}
+
+func TestARetryKeepsAKeptChildsSession(t *testing.T) {
+	g := &Graph{Name: "kept", Nodes: []Node{{ID: "draft", Kind: Agent, Prompt: "Draft it.", Context: ContextFresh, Child: "writer"}}}
+	// The first visit only talks, and stalls; the retry finishes.
+	m := &fakeModel{outcomes: []string{"", "", OK}}
+	kids := newKin(m, "fake")
+	a := nestedAgent(t, g, m, nil, kids.option())
+	_, st, err := Drive(t.Context(), g, a, start(t, a))
+	if !errors.Is(err, ErrStalled) {
+		t.Fatalf("err = %v", err)
+	}
+	end, st, err := OverrideRun(t.Context(), g, a, Override{Run: st.Path[0].Run, Action: OverrideRetry})
+	if err != nil || end.Reason != agentturn.ReasonDone || !st.Done {
+		t.Fatalf("end = %+v, %v", end, err)
+	}
+	// One child served both attempts: the first's run ended for the
+	// override, the second's in the same session, whose model read the
+	// first visit.
+	if len(kids.agents) != 1 || len(kids.opened) < 2 || kids.opened[0].Spawn != kids.opened[len(kids.opened)-1].Spawn {
+		t.Fatalf("opened %+v", kids.opened)
+	}
+	var child *agentturn.Agent
+	for _, c := range kids.agents {
+		child = c
+	}
+	ends := endings(child.State().Transcript)
+	if len(ends) != 2 || ends[0].Status != Abandoned || ends[0].Reason != "overridden: retry" || ends[1].Status != Done {
+		t.Fatalf("ends = %+v", ends)
+	}
+	last := m.requests[len(m.requests)-1]
+	if n := strings.Count(strings.Join(texts(last.Input), "\n"), beginPrefix); n != 2 {
+		t.Errorf("the retry read %d openings, want its own and the first visit's", n)
 	}
 }

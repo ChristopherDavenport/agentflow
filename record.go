@@ -91,6 +91,8 @@ func ending(st State, failed error) *Ending {
 		}
 	case st.Done:
 		e.Status, e.Outputs = Done, st.Outputs
+	default:
+		e.Reason = st.abandonedFor
 	}
 	return e
 }

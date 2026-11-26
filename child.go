@@ -125,7 +125,24 @@ func Models(names ...string) Option {
 
 // abandonText is what the program tells a child whose caller has been
 // abandoned: every run under way in it is abandoned too, and none starts.
+// A reason may follow, after ": ", which each run's end records.
 const abandonText = "agentflow: abandon"
+
+// abandonMessage tells a child to abandon its runs, for why, if any.
+func abandonMessage(why string) openresponses.Item {
+	if why == "" {
+		return openresponses.DeveloperText(abandonText)
+	}
+	return openresponses.DeveloperText(abandonText + ": " + why)
+}
+
+// abandonedFor reads an abandon message, and the reason it gives.
+func abandonedFor(text string) (why string, ok bool) {
+	if text == abandonText {
+		return "", true
+	}
+	return strings.CutPrefix(text, abandonText+": ")
+}
 
 // abandonedText is the output a host gives a call pending as it abandons
 // the runs under way, before it asks for the next: agentflow's own words,
@@ -410,7 +427,7 @@ func Invoke(ctx context.Context, g *Graph, a *agentturn.Agent, inputs any, opts 
 	if err != nil {
 		return nil, State{}, err
 	}
-	outs, err := f.abandon(ctx, a)
+	outs, err := f.abandon(ctx, a, "")
 	if err != nil {
 		return nil, State{}, err
 	}
@@ -422,15 +439,19 @@ func Invoke(ctx context.Context, g *Graph, a *agentturn.Agent, inputs any, opts 
 	return f.drive(ctx, a, end)
 }
 
-// abandon abandons the children a's pending calls wait on, and returns
-// outputs refusing every pending call, to open the next prompt with.
-func (f *flow) abandon(ctx context.Context, a *agentturn.Agent) (openresponses.Items, error) {
-	return f.setAside(ctx, a, abandonedText)
+// abandon abandons the children a's pending calls wait on, for why, and
+// returns outputs refusing every pending call, to open the next prompt
+// with.
+func (f *flow) abandon(ctx context.Context, a *agentturn.Agent, why string) (openresponses.Items, error) {
+	return f.setAside(ctx, a, abandonedText, why)
 }
 
 // setAside abandons the children a's pending calls wait on, and returns
 // outputs, of text, for every pending call, to open the next prompt with.
-func (f *flow) setAside(ctx context.Context, a *agentturn.Agent, text string) (openresponses.Items, error) {
+//
+// why is what the children's runs are abandoned for, which their ends
+// record: an operator's override, say; empty for a new invocation.
+func (f *flow) setAside(ctx context.Context, a *agentturn.Agent, text, why string) (openresponses.Items, error) {
 	pending := a.State().Pending
 	if len(pending) == 0 {
 		return nil, nil
@@ -454,11 +475,11 @@ func (f *flow) setAside(ctx context.Context, a *agentturn.Agent, text string) (o
 				return nil, err
 			}
 			if cf.started(cctx, child, args.Run) {
-				inner, err := cf.abandon(cctx, child)
+				inner, err := cf.abandon(cctx, child, why)
 				if err != nil {
 					return nil, err
 				}
-				end, err := child.Prompt(cctx, append(inner, openresponses.DeveloperText(abandonText))...)
+				end, err := child.Prompt(cctx, append(inner, abandonMessage(why))...)
 				if end == nil {
 					return nil, err
 				}
@@ -472,7 +493,7 @@ func (f *flow) setAside(ctx context.Context, a *agentturn.Agent, text string) (o
 							refused = append(refused, openresponses.NewFunctionCallOutput(p.Call.CallID, abandonedText))
 						}
 					}
-					if end, err := child.Prompt(cctx, append(refused, openresponses.DeveloperText(abandonText))...); end == nil {
+					if end, err := child.Prompt(cctx, append(refused, abandonMessage(why))...); end == nil {
 						return nil, err
 					}
 				}

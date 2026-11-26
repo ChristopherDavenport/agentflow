@@ -218,8 +218,10 @@ type State struct {
 	requestID  string
 	requestErr error
 	// endNow says the run's end is due: it was abandoned, and has no
-	// cleanup to run, or its cleanup is over.
-	endNow bool
+	// cleanup to run, or its cleanup is over; abandonedFor is why, which
+	// the end records.
+	endNow       bool
+	abandonedFor string
 	// refused counts the verdicts a judge gave that it may not give.
 	refused int
 	// kept are the children the run keeps, by name, each with its spawn.
@@ -422,6 +424,8 @@ type frame struct {
 	// a second abandon cut it short.
 	aborting, cleaning, cut bool
 	cleaned                 string
+	// why is what the run was abandoned for, empty for a new invocation.
+	why string
 }
 
 // abortPlan is an abandon under way.
@@ -551,7 +555,7 @@ func (r *replay) state(f *frame) State {
 	if f.ending != nil {
 		st.Summary = f.ending.Summary
 	}
-	st.Aborting, st.Cleaning, st.Cleanup = f.aborting, f.cleaning && f.cleaned == "", f.cleaned
+	st.Aborting, st.Cleaning, st.Cleanup, st.abandonedFor = f.aborting, f.cleaning && f.cleaned == "", f.cleaned, f.why
 	st.endNow = f.aborting && f.ending == nil && f.st.Started && (f.cleaned != "" || !f.cleaning)
 	if o := r.request; o != nil {
 		own := *o
@@ -599,7 +603,7 @@ func (r *replay) known(text string) bool {
 func (r *replay) message(i int, m *openresponses.Message) {
 	if m.Role == openresponses.RoleDeveloper {
 		if inputs, ok := r.g.invoked(m.Text()); ok {
-			r.invoke(i, inputs, false)
+			r.invoke(i, inputs, false, "")
 			return
 		}
 		if o, ok := requested(m.Text()); ok {
@@ -610,8 +614,8 @@ func (r *replay) message(i int, m *openresponses.Message) {
 			}
 			return
 		}
-		if m.Text() == abandonText {
-			r.invoke(i, nil, true)
+		if why, ok := abandonedFor(m.Text()); ok {
+			r.invoke(i, nil, true, why)
 			return
 		}
 	}
@@ -637,18 +641,19 @@ func (r *replay) message(i int, m *openresponses.Message) {
 // invoke asks for a new run, abandoning every one under way, innermost
 // first. left says none is to start: the runs here were abandoned with
 // the run that called them.
-func (r *replay) invoke(i int, inputs any, left bool) {
+func (r *replay) invoke(i int, inputs any, left bool, why string) {
 	next := r.newRoot(inputs)
 	next.st.Left = left
-	r.abandon(i, nil, next)
+	r.abandon(i, nil, next, why)
 }
 
 // abandon abandons the runs under way, innermost first, out to until or,
 // for nil, all of them, and then starts next, if any. Each run it reaches
 // runs its cleanup path, if it has one, before its end. A second abandon
 // over the first cuts any cleanup under way short and reaches the runs of
-// both.
-func (r *replay) abandon(i int, until, next *frame) {
+// both. why is what the runs are abandoned for, which each one's end
+// records; the first reason given a run stands.
+func (r *replay) abandon(i int, until, next *frame, why string) {
 	if old := r.abort; old != nil {
 		for _, f := range r.stack {
 			if f.cleaning && f.cleaned == "" {
@@ -666,6 +671,9 @@ func (r *replay) abandon(i int, until, next *frame) {
 	r.abort = &abortPlan{until: until, next: next}
 	for _, f := range slices.Backward(r.stack) {
 		f.aborting = true
+		if f.why == "" {
+			f.why = why
+		}
 		if f == until {
 			break
 		}
