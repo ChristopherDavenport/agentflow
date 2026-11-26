@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	slash "path"
 	"slices"
 	"strings"
 
@@ -22,14 +21,11 @@ func (n *Node) checkChild() []error {
 		for _, s := range []struct {
 			key string
 			set bool
-		}{{"dir", n.Dir != ""}, {"instructions", n.Instructions != "" || n.InstructionsFile != ""}, {"child", n.Child != ""}} {
+		}{{"instructions", n.Instructions != "" || n.InstructionsFile != ""}, {"child", n.Child != ""}} {
 			if s.set {
 				bad("%s is a setting of a child; it needs context: %s", s.key, ContextFresh)
 			}
 		}
-	}
-	if d := n.Dir; d != "" && (slash.IsAbs(d) || slash.Clean(d) != d || d == "." || d == ".." || strings.HasPrefix(d, "../") || strings.Contains(d, `\`)) {
-		bad("dir %q: want a clean path below the workspace's root", d)
 	}
 	if n.Child != "" {
 		switch {
@@ -110,7 +106,8 @@ func (n *Node) checkSettings() []error {
 }
 
 // checkKept holds the steps that keep one child to the same child: one
-// directory, model and instructions.
+// directory, model and instructions. A directory taken from data is
+// checked when the call is made, against the one the child started in.
 func (g *Graph) checkKept() []error {
 	var errs []error
 	first := map[string]*Node{}
@@ -124,7 +121,8 @@ func (g *Graph) checkKept() []error {
 			first[n.Child] = n
 			continue
 		}
-		if f.Dir != n.Dir || f.Model != n.Model || f.Instructions != n.Instructions {
+		literal := f.Dir.From == "" && n.Dir.From == ""
+		if literal && fmt.Sprint(f.Dir.Literal) != fmt.Sprint(n.Dir.Literal) || f.Model != n.Model || f.Instructions != n.Instructions {
 			errs = append(errs, fmt.Errorf("agentflow: nodes %q and %q keep child %q and differ in its dir, model or instructions", f.ID, n.ID, n.Child))
 		}
 	}

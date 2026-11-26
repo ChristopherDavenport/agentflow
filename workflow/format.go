@@ -237,7 +237,7 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 	}
 	set("skills", skills != nil, skills)
 	set("context", n.Context != "", n.Context)
-	set("dir", n.Dir != "", n.Dir)
+	set("dir", n.Dir.From != "" || n.Dir.Literal != nil, written(n.Dir))
 	set("model", n.Model != "", n.Model)
 	set("thinking", n.Thinking != "", n.Thinking)
 	set("timeout", n.Timeout != 0, n.Timeout.String())

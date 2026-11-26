@@ -498,7 +498,8 @@ agent seeded from the child's session, or keeps one in memory.
 ## 10. A child's own settings (spiked)
 
 These keys are allowed only with `context: fresh`, but for `model`, which
-RFC 0003 (section 14) opens to every model step, with `thinking`.
+RFC 0003 (section 14) opens to every model step, with `thinking`, and
+`dir`, which a script step takes too.
 
 ```yaml
 context: fresh
@@ -508,10 +509,41 @@ tools: [read, grep, edit]
 instructions: prompts/api.md   # a file in the skill
 ```
 
-- **`dir`** is the child's working directory.
-  - It must be relative and clean, with no `..`; this is checked at load.
-    Whether it exists is checked when the opener makes the workspace:
-    `script.Sub` refuses a missing one.
+- **`dir`** is the child's working directory: a literal path, or one
+  reference to one (spiked).
+
+  ```yaml
+  dir: ${{ steps.setup.outputs.worktree }}
+  ```
+
+  - A literal must be relative and clean, with no `..`; this is checked
+    at load. A reference is checked at load like any other: it must have
+    a value on every path into the step, and where its schema is known
+    it must be a string. `latest(...)` is allowed; `optional(...)` is a
+    load error, since a step works in one directory.
+  - The value is resolved from the record when the step's call is made,
+    and the call records it in its arguments, as `dir`. A child is
+    opened in the directory its call recorded, so a resume reads it from
+    the record and never resolves it again.
+  - At call time it must still be a clean relative path below the
+    workspace's root. If it is not, or it is not a string, the gate
+    refuses the call with the reason, the step fails and its retry
+    question follows. No child is opened.
+  - Whether the directory exists is checked when the opener makes the
+    workspace: `script.Sub` refuses a missing one.
+  - **A script step takes `dir`** and runs there, through the
+    workspace's `Command.Dir`, so a script can work in a worktree an
+    earlier script made. The workspace's root does not move:
+    `$AGENTFLOW_SKILL_DIR`, `$AGENTFLOW_OUTPUT` and `$AGENTFLOW_PROGRESS`
+    are absolute where the workspace has a root on the host, and lead
+    from the script's directory where it has none. The script tool checks
+    the directory exists before it runs.
+  - **A tool step takes no `dir`.** Its tool is the host's, built on the
+    host's workspace; a step cannot move it.
+  - **A kept child** (section 11) is held to the directory its first
+    call recorded. Steps that keep one child with literal dirs are
+    checked at load, as before; where a dir comes from data, a later call
+    that resolves another directory fails its step, naming both.
   - agentworkspace offers no sub-workspace, so agentflow adds
     `script.Sub(ws, dir)`, a workspace whose root, file system and
     commands are confined to `dir`. A link inside `dir` is followed as
@@ -550,7 +582,8 @@ child: reviewer
   model sees its own earlier visits.
 - At load, steps that share a child must agree on `dir`, `model` and
   `instructions`. Their `tools` may differ, since each request offers
-  its own step's tools.
+  its own step's tools. A `dir` taken from data is held instead, when
+  the call is made, to the directory the child started in (section 10).
 - A fresh call to a workflow does not take `child`, because a workflow
   run is a session of its own. That can be opened up if a workflow needs
   it.
