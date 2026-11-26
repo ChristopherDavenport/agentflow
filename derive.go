@@ -59,8 +59,6 @@ func (n *Node) checkSettings() []error {
 	switch {
 	case n.Timeout < 0 || n.Timeout > MaxTimeout:
 		bad("timeout must be above 0 and at most %s", MaxTimeout)
-	case n.Timeout > 0 && call:
-		bad("a timeout is a script's, a tool's, a model step's or a question's")
 	case n.Timeout > 0 && n.Verdict:
 		bad("a judge's look has the timeout of an unattended model step")
 	}
@@ -183,7 +181,7 @@ func (g *Graph) stepGraph(n *Node) *Graph {
 	}
 	// The step's model is its workflow's, so the step reads its own
 	// child's conversation rather than opening another.
-	return &Graph{Name: g.Name + ":" + n.ID, Description: g.Description, Nodes: []Node{step}, Inputs: inputs, Sources: g.Sources, Model: step.Model, Documents: docs}
+	return &Graph{Name: g.Name + ":" + n.ID, Description: g.Description, Nodes: []Node{step}, Inputs: inputs, Sources: g.Sources, Model: step.Model, Documents: docs, Timeout: g.Timeout}
 }
 
 // judgeGraph is the workflow a judge of n runs in its child: a model step

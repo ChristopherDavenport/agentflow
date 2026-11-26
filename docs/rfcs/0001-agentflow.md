@@ -207,7 +207,7 @@ and be none. Unknown keys are errors.
 | `dir` | fresh model, fresh call, script | the directory below the workspace's root the step works in: a path, or a reference to one, resolved when the call is made and recorded in it (RFC 0002, section 10) |
 | `instructions` | fresh model, fresh call | a file of the skill added to the child's instructions (RFC 0002, section 10) |
 | `model`, `thinking` | model; `model` also a fresh call | the model a step asks and how hard it reasons; the frontmatter's `model` and `thinking` are the workflow's defaults (RFC 0003, section 14) |
-| `timeout` | script, tool, model, person | a duration past which the step fails and asks to be retried (RFC 0003, section 13); on a person step, past which the question takes `on_timeout` (RFC 0004, section 26) |
+| `timeout` | script, tool, model, person, call, frontmatter | a duration past which the step fails and asks to be retried (RFC 0003, section 13); on a person step, past which the question takes `on_timeout` (RFC 0004, section 26); on a call, past which the runs it waits on are abandoned and it fails, routable on `failed`; the frontmatter's is the default of every script, tool and model step (RFC 0008, section 3) |
 | `on_timeout` | person | the outcome, and data, a question takes when its timeout passes unanswered (RFC 0004, section 26) |
 | `choices` | person | values an answer picks from, one or many, resolved from an earlier result into the question (RFC 0004, section 24) |
 | `text` | person | the outcome an answer in the person's own words takes, the words in its data (RFC 0004, section 25) |

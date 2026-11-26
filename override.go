@@ -171,7 +171,7 @@ func (r *replay) overridden(i int, c *openresponses.FunctionCall, out *openrespo
 	}
 	st.Failure, st.Reached, st.Held, st.Advice = "", nil, nil, nil
 	st.Callee, st.Returned, st.calleeInputs = "", nil, nil
-	st.clocked, st.Deadline, st.asked, st.filed = false, time.Time{}, 0, false
+	st.clocked, st.Deadline, st.asked, st.filed, st.timedOut = false, time.Time{}, 0, false, false
 	if o.Action == OverrideJump {
 		r.enter(f, i, st.g.node(o.Step))
 	} else {

@@ -133,6 +133,8 @@ type frontmatter struct {
 	// Hidden that only a workflow that calls it runs it.
 	Context string `yaml:"context"`
 	Hidden  bool   `yaml:"hidden"`
+	// Timeout is the default of each script, tool and model step.
+	Timeout string `yaml:"timeout"`
 }
 
 // documentSpec is how a document starts: from a file of the skill, or as
@@ -237,6 +239,13 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 		outputs, g.MaxDepth, g.MaxSteps, g.Model, g.Thinking = fm.Outputs, fm.MaxDepth, fm.MaxSteps, fm.Model, fm.Thinking
 		g.Description, g.OnAbort, g.ExcludeTools = strings.TrimSpace(fm.Description), fm.OnAbort, fm.ExcludeTools
 		g.Context, g.Hidden = fm.Context, fm.Hidden
+		if fm.Timeout != "" {
+			d, err := time.ParseDuration(fm.Timeout)
+			if err != nil || d <= 0 {
+				return nil, fmt.Errorf("workflow: frontmatter: timeout %q: want a duration such as 90s, 10m or 1h", fm.Timeout)
+			}
+			g.Timeout = d
+		}
 		for name, d := range fm.Documents {
 			if g.Documents == nil {
 				g.Documents = map[string]agentflow.Document{}

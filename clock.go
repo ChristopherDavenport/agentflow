@@ -103,13 +103,21 @@ func (f *flow) timed(tools []agenttool.Tool) []agenttool.Tool {
 			var stop context.CancelFunc
 			var why string
 			n := st.Node
-			switch {
-			case n.Kind == Run && n.Flow == "" && call.ID == st.callID() && n.Timeout > 0:
-				cut, stop = context.WithTimeout(ctx, n.Timeout)
-				why = fmt.Sprintf("agentflow: step %q timed out after %s", n.ID, n.Timeout)
-			case n.Kind == Agent && !strings.HasPrefix(call.ID, reserved) && !st.Deadline.IsZero():
-				cut, stop = context.WithDeadline(ctx, st.Deadline)
-				why = fmt.Sprintf("agentflow: step %q ran out of time, at %s", n.ID, st.Deadline.Format(time.RFC3339))
+			// A call the run is nested in bounds its steps' time too.
+			calls := st.due()
+			if !st.Deadline.IsZero() && calls.Equal(st.Deadline) {
+				calls = time.Time{}
+			}
+			switch own := f.timeout(st); {
+			case n.Kind == Run && n.Flow == "" && call.ID == st.callID() && own > 0 && (calls.IsZero() || time.Now().Add(own).Before(calls)):
+				cut, stop = context.WithTimeout(ctx, own)
+				why = fmt.Sprintf("agentflow: step %q timed out after %s", n.ID, own)
+			case n.Kind == Run && n.Flow == "" && call.ID == st.callID() && !calls.IsZero():
+				cut, stop = context.WithDeadline(ctx, calls)
+				why = fmt.Sprintf("agentflow: step %q ran out of the time of the call its run is in, at %s", n.ID, calls.Format(time.RFC3339))
+			case n.Kind == Agent && !strings.HasPrefix(call.ID, reserved) && !st.due().IsZero():
+				cut, stop = context.WithDeadline(ctx, st.due())
+				why = fmt.Sprintf("agentflow: step %q ran out of time, at %s", n.ID, st.due().Format(time.RFC3339))
 			default:
 				return t.Execute(ctx, call)
 			}

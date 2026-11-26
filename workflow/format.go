@@ -80,7 +80,7 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 		set bool
 		v   any
 	}{{"max_depth", g.MaxDepth != 0, g.MaxDepth}, {"max_steps", g.MaxSteps != 0, g.MaxSteps}, {"model", g.Model != "", g.Model}, {"thinking", g.Thinking != "", g.Thinking}, {"on_abort", g.OnAbort != "", g.OnAbort}, {"exclude_tools", g.ExcludeTools != nil, g.ExcludeTools},
-		{"context", g.Context != "", g.Context}, {"hidden", g.Hidden, true}} {
+		{"context", g.Context != "", g.Context}, {"hidden", g.Hidden, true}, {"timeout", g.Timeout != 0, g.Timeout.String()}} {
 		if !s.set {
 			continue
 		}

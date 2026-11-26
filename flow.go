@@ -455,8 +455,39 @@ func (st State) conversing() bool { return !st.Started && st.released != "" && s
 
 // clockDue says the program reads the clock before st's model step
 // works, and expired that the step's time has run out.
+//
+// A call with a timeout reads the clock before it calls, so the deadline
+// holds the run it calls from its start.
 func (f *flow) clockDue(st State) bool {
+	if n := st.Node; n != nil && n.Flow != "" {
+		return n.Timeout > 0 && !st.clocked && st.Callee == "" && st.Failure == "" && st.Reached == nil && !st.Done
+	}
 	return modelTurn(st) && st.Node != nil && !st.clocked && f.timeout(st) > 0
+}
+
+// callExpired is the outermost call in this context st's run is nested in
+// whose time has run out, nil when none has: the program says so, and the
+// runs it waits on are abandoned.
+func (f *flow) callExpired(st State) *callClock {
+	now := time.Now()
+	for i := range st.callDue {
+		if !now.Before(st.callDue[i].deadline) {
+			return &st.callDue[i]
+		}
+	}
+	return nil
+}
+
+// due is the first time st's step must be done by: its own deadline, or
+// that of a call its run is nested in. Zero for none.
+func (st State) due() time.Time {
+	at := st.Deadline
+	for _, c := range st.callDue {
+		if at.IsZero() || c.deadline.Before(at) {
+			at = c.deadline
+		}
+	}
+	return at
 }
 
 func (f *flow) expired(st State) bool {
@@ -465,6 +496,8 @@ func (f *flow) expired(st State) bool {
 
 // timeout is how long st's step may take: its own timeout, or for a model
 // step with nobody there, the host's default.
+//
+// A script, tool or model step that sets none takes its workflow's.
 func (f *flow) timeout(st State) time.Duration {
 	n := st.Node
 	switch {
@@ -472,6 +505,8 @@ func (f *flow) timeout(st State) time.Duration {
 		return 0
 	case n.Timeout > 0:
 		return n.Timeout
+	case st.g != nil && st.g.Timeout > 0 && (n.Kind == Agent && !n.Verdict || n.Kind == Run && n.Flow == ""):
+		return st.g.Timeout
 	case n.Kind == Agent && f.unattended:
 		if f.idle != nil {
 			return *f.idle
@@ -492,12 +527,12 @@ func (f *flow) prepare(ctx context.Context, req *openresponses.Request) error {
 	if err != nil {
 		return err
 	}
-	if !modelTurn(st) || f.clockDue(st) || f.expired(st) || st.request != nil || f.filesDue(st) || f.limitsDue(st) {
+	if !modelTurn(st) || f.clockDue(st) || f.expired(st) || st.request != nil || f.filesDue(st) || f.limitsDue(st) || f.callExpired(st) != nil {
 		req.Model = programPrefix + f.g.Name
 		return nil
 	}
 	if f.due != nil {
-		f.due.set(st.Deadline, st.Instance)
+		f.due.set(st.due(), st.Instance)
 	}
 	req.Model = f.modelName
 	req.Input = keepFiles(f.visible(req.Input, all, st), all, st)
@@ -824,6 +859,13 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 		// What a model sees of a result comes before anything a model
 		// could read it in.
 		id, name, args = st.show.id(), shownTool, st.show.args()
+	case f.callExpired(st) != nil && over == nil:
+		// A call this run is nested in has run out of time: the program
+		// says so, under the calling run's key, and replay abandons the runs
+		// it waits on.
+		c := f.callExpired(st)
+		at := c.deadline
+		id, name, args = c.id, clockTool, clockArgs{Run: c.run, Step: c.step, Timeout: c.timeout.String(), Deadline: &at, Expired: true}
 	case over != nil:
 		over.Summary = f.summarize(ctx, st, all)
 		id, name, args = over.id, endTool, over
@@ -994,6 +1036,9 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 		}
 		return nil, nil
 	}
+	if c := f.callExpired(st); name == clockTool && c != nil && id == c.id {
+		return nil, nil
+	}
 	n := st.Node
 	switch {
 	case st.Done && st.Reported, st.conversing():
@@ -1016,6 +1061,11 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 			return block(fmt.Sprintf("step %q failed", n.ID))
 		}
 		return f.ask(ctx, info, st)
+	case n.Flow != "" && name == clockTool:
+		if id == st.clockID() && f.clockDue(st) {
+			return nil, nil
+		}
+		return block("only the workflow reads the clock")
 	case f.judging(st):
 		// The judge looks in a child, and the call waits on it.
 		if err := checkJudgeCall(st, info.Call); err != nil {

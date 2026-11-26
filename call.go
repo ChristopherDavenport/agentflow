@@ -304,7 +304,7 @@ func returned(n *Node, workflow string, e *Ending) (Result, error) {
 	switch {
 	case e.Status == Done:
 		return Result{Outcome: e.Outcome, Data: e.Outputs}, nil
-	case e.Status == Failed && !treeWide(e.Limit) && n.routesFailure():
+	case (e.Status == Failed && !treeWide(e.Limit) || e.Status == Abandoned && strings.HasPrefix(e.Reason, timedOutPrefix)) && n.routesFailure():
 		data := map[string]any{"reason": e.Reason, "workflow": workflow}
 		if e.Step != "" {
 			data["step"] = e.Step

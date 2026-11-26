@@ -387,6 +387,9 @@ type Graph struct {
 	// it: neither an invocation nor a model's request for its skill starts
 	// it, and a catalog should leave it out.
 	Hidden bool `json:",omitempty"`
+	// Timeout bounds each script, tool and model step of the workflow that
+	// sets no timeout of its own. A question's and a call's are their own.
+	Timeout time.Duration `json:",omitempty"`
 	// ExcludeTools are tools no model step of the workflow is offered,
 	// whatever it names, and no judge of it may call.
 	ExcludeTools []string `json:",omitempty"`
@@ -470,6 +473,9 @@ func (g *Graph) Validate() error {
 		bad("outputs are either by outcome or for every outcome")
 	}
 	errs = append(errs, g.checkDefaults()...)
+	if g.Timeout < 0 || g.Timeout > MaxTimeout {
+		bad("timeout must be above 0 and at most %s", MaxTimeout)
+	}
 	if g.Context != "" && g.Context != ContextFresh {
 		bad("context %q: a workflow may say only %q, that every call runs it in a child; leave it out to let each call say%s", g.Context, ContextFresh, suggest(g.Context, []string{ContextFresh}))
 	}

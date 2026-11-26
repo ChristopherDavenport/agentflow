@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
@@ -245,6 +246,13 @@ func (f *flow) started(ctx context.Context, a *agentturn.Agent, run string) bool
 // answer that lets the call go, or the child's end and state while it
 // waits.
 func (f *flow) settle(ctx context.Context, st State, p agentturn.PendingCall, a callArgs, answers []agentturn.Answer) (*agentturn.Answer, *agentturn.RunEnd, State, error) {
+	// A call with a timeout holds its child to it: past it, the child's runs
+	// are abandoned and the call fails.
+	due := callDeadline(st, p)
+	if !due.IsZero() && !time.Now().Before(due) {
+		ans, err := f.expireChild(ctx, st, p, a)
+		return ans, nil, st, err
+	}
 	c, err := f.childFor(st, p.Call, a)
 	if err != nil {
 		return nil, nil, st, err
@@ -261,24 +269,38 @@ func (f *flow) settle(ctx context.Context, st State, p agentturn.PendingCall, a 
 	}
 	var end *agentturn.RunEnd
 	var cst State
+	// The child's runs take the call's deadline; reading the child's
+	// record afterwards does not.
+	run := cctx
+	if !due.IsZero() {
+		var stop context.CancelFunc
+		run, stop = context.WithDeadline(cctx, due)
+		defer stop()
+	}
 	switch done, _ := cf.over(cctx, child, a.Run); {
 	case done != nil:
 	case len(answers) > 0:
-		end, cst, err = cf.resume(cctx, child, answers)
+		end, cst, err = cf.resume(run, child, answers)
 	case len(child.State().Pending) > 0:
-		end, cst, err = cf.drive(cctx, child, &agentturn.RunEnd{Reason: agentturn.ReasonInputRequired, Pending: child.State().Pending})
+		end, cst, err = cf.drive(run, child, &agentturn.RunEnd{Reason: agentturn.ReasonInputRequired, Pending: child.State().Pending})
 	case cf.started(cctx, child, a.Run):
 		// Cut off part way: it goes on where it stood.
-		if end, err = child.Continue(cctx); end != nil {
-			end, cst, err = cf.drive(cctx, child, end)
+		if end, err = child.Continue(run); end != nil {
+			end, cst, err = cf.drive(run, child, end)
 		}
 	default:
 		var item openresponses.Item
 		if item, err = cf.g.invocation(inputsOrNil(a.With)); err == nil {
-			trigger := agentturn.ContextWithTrigger(cctx, agentturn.Trigger{Kind: TriggerKind, Ref: c.Caller})
+			trigger := agentturn.ContextWithTrigger(run, agentturn.Trigger{Kind: TriggerKind, Ref: c.Caller})
 			if end, err = child.Prompt(trigger, item); end != nil {
-				end, cst, err = cf.drive(cctx, child, end)
+				end, cst, err = cf.drive(run, child, end)
 			}
+		}
+	}
+	if !due.IsZero() && ctx.Err() == nil && errors.Is(run.Err(), context.DeadlineExceeded) {
+		if done, _ := cf.over(cctx, child, a.Run); done == nil {
+			ans, err := f.expireChild(ctx, st, p, a)
+			return ans, nil, st, err
 		}
 	}
 	done, readErr := cf.over(cctx, child, a.Run)
@@ -474,44 +496,13 @@ func (f *flow) setAside(ctx context.Context, a *agentturn.Agent, text, why strin
 			continue
 		}
 		if _, args, ok := heldChild([]agentturn.PendingCall{p}); ok {
-			c, err := f.childFor(st, p.Call, args)
-			if err != nil {
-				return nil, err
-			}
-			cctx, child, cf, err := f.open(ctx, c)
-			if err != nil {
-				return nil, err
-			}
 			// What the child's run spent counts toward this tree however the
 			// call goes, so the call is answered with it: an override cannot
 			// buy steps by throwing a child's away.
 			let := callFailure{Failure: text}
-			if cf.started(cctx, child, args.Run) {
-				inner, err := cf.abandon(cctx, child, why)
-				if err != nil {
-					return nil, err
-				}
-				end, err := child.Prompt(cctx, append(inner, abandonMessage(why))...)
-				if end == nil {
-					return nil, err
-				}
-				// A cleanup that waits on a question in the child is cut
-				// short: the person is asked nothing in a session abandoned
-				// from above, and the child's runs end.
-				if end.Reason == agentturn.ReasonInputRequired {
-					var refused openresponses.Items
-					for _, p := range end.Pending {
-						if p.Call != nil {
-							refused = append(refused, openresponses.NewFunctionCallOutput(p.Call.CallID, abandonedText))
-						}
-					}
-					if end, err := child.Prompt(cctx, append(refused, abandonMessage(why))...); end == nil {
-						return nil, err
-					}
-				}
-				if let.Entries, let.Granted, let.Summary, err = cf.spentBy(cctx, child, args.Run); err != nil {
-					return nil, err
-				}
+			var err error
+			if let.Entries, let.Granted, let.Summary, err = f.abandonChild(ctx, st, p, args, why); err != nil {
+				return nil, err
 			}
 			b, err := json.Marshal(let)
 			if err != nil {
@@ -523,6 +514,82 @@ func (f *flow) setAside(ctx context.Context, a *agentturn.Agent, text, why strin
 		outs = append(outs, openresponses.NewFunctionCallOutput(p.Call.CallID, text))
 	}
 	return outs, nil
+}
+
+// abandonChild abandons the runs of the child p waits on, for why, each
+// after its cleanup, and says what the child's run spent: its tree's
+// steps, what a person granted there, and its summary. A child that never
+// started spent nothing.
+func (f *flow) abandonChild(ctx context.Context, st State, p agentturn.PendingCall, args callArgs, why string) (entries, granted int, summary *Summary, err error) {
+	c, err := f.childFor(st, p.Call, args)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	cctx, child, cf, err := f.open(ctx, c)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	if !cf.started(cctx, child, args.Run) {
+		return 0, 0, nil, nil
+	}
+	inner, err := cf.abandon(cctx, child, why)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	end, err := child.Prompt(cctx, append(inner, abandonMessage(why))...)
+	if end == nil {
+		return 0, 0, nil, err
+	}
+	// A cleanup that waits on a question in the child is cut short: the
+	// person is asked nothing in a session abandoned from above, and the
+	// child's runs end.
+	if end.Reason == agentturn.ReasonInputRequired {
+		var refused openresponses.Items
+		for _, p := range end.Pending {
+			if p.Call != nil {
+				refused = append(refused, openresponses.NewFunctionCallOutput(p.Call.CallID, abandonedText))
+			}
+		}
+		if end, err := child.Prompt(cctx, append(refused, abandonMessage(why))...); end == nil {
+			return 0, 0, nil, err
+		}
+	}
+	return cf.spentBy(cctx, child, args.Run)
+}
+
+// expireChild lets go a call into a child whose time ran out: the child's
+// runs are abandoned, each after its cleanup, and the call ends with the
+// outcome failed where its step routes on it, or as a failure the step
+// asks to retry. What the child spent still counts toward the caller's
+// tree.
+func (f *flow) expireChild(ctx context.Context, st State, p agentturn.PendingCall, a callArgs) (*agentturn.Answer, error) {
+	n := st.Node
+	c := callClock{run: st.Instance, workflow: st.Workflow, step: n.ID, timeout: n.Timeout, deadline: st.Deadline}
+	why := c.why()
+	var err error
+	if a.Entries, a.Granted, a.Summary, err = f.abandonChild(ctx, st, p, a, why); err != nil {
+		return nil, err
+	}
+	if n.routesFailure() {
+		a.Result = &Result{Outcome: Failed, Data: map[string]any{"reason": why, "workflow": a.Workflow}}
+	} else {
+		a.Failure = "agentflow: " + why
+	}
+	args, err := json.Marshal(a)
+	if err != nil {
+		return nil, err
+	}
+	ans := agentturn.ApproveWith(p.Call.CallID, args).WithBy("policy").WithReason("agentflow: the call ran past its timeout, at " + st.Deadline.Format(time.RFC3339))
+	return &ans, nil
+}
+
+// callDeadline is when the call p of st's step must have come back by,
+// zero for none: a fresh call's to a workflow with a timeout.
+func callDeadline(st State, p agentturn.PendingCall) time.Time {
+	if n := st.Node; n == nil || n.Flow == "" || p.Call == nil || p.Call.Name != callTool {
+		return time.Time{}
+	}
+	return st.Deadline
 }
 
 // spentBy is what run spent in a's session, as its record says once its

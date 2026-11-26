@@ -115,6 +115,96 @@ inputs:
 - A caller is held at load to the callee's required inputs only: a
   defaulted one may be left out of `with`.
 
+## 3. Timeouts on calls, and a workflow's default (spiked)
+
+````markdown
+---
+timeout: 10m       # each script, tool and model step that sets none
+---
+
+## review
+```yaml
+flow: pr-review
+timeout: 1h        # the run it calls, and all it calls, within an hour
+```
+````
+
+**A workflow's default.** The frontmatter's `timeout` holds every
+script, tool and model step of the workflow that sets no timeout of its
+own, as if it had said it; a step's own wins. A person step keeps its
+own `timeout` and `on_timeout`, which are the question's, a call keeps
+its own, and a judge keeps the timeout of an unattended model step. The
+order for a model step is its own, then its workflow's, then, with
+nobody there, `UnattendedTimeout`. A fresh step's child is held to the
+same: the workflow made for the step carries its workflow's default.
+
+**A call's timeout.**
+
+- Before a call with a timeout starts the run it calls, the program calls
+  `flow_clock` under the calling run's key (`…_v<n>-clock`), and its
+  result is the call's deadline, recorded as a model step's is. Replay
+  reads the deadline from it, never from the clock.
+- **In the current context**, every run the call waits on, at any depth,
+  is held to it: a model step's stream and tools are cut off at the
+  earlier of its own deadline and its callers', and a script's or tool's
+  run at the earlier of its own timeout and theirs. When the time has
+  run out, the program's next turn, whoever's turn it would have been,
+  calls `flow_clock` with `expired` under the calling run's key
+  (`…-timeout`). Replay reads that call as the word that the call ran
+  out of time: every run the call waits on is abandoned, innermost first,
+  each after its cleanup path, and each one's end records the reason
+  `timeout: call "<step>" of <workflow> ran past its timeout of <d>`.
+  The call is then made as any call is once its callee has ended, and its
+  result reads the abandoned ending as a failure.
+- **A question waiting** in a run the call waits on cannot stop it: when
+  `Drive` finds the run waiting and the call's time run out, it sets the
+  pending calls aside with `agentflow: timed out`, which replay does not
+  read as an answer, and the program's turn follows as above.
+- **In a child**, `Drive` holds the child's runs to the deadline: they run
+  with a context that ends there, and a child that has not ended by then,
+  or that is waiting when `Drive` comes back to it later, is abandoned,
+  each run after its cleanup, in its own session. The held call is then
+  approved with the failure, and with what the child spent, as any held
+  call is.
+- **The failure is `failed`**, as any callee's is: a call that draws an edge
+  for `failed` goes on there with `{reason, workflow}` as data, and one that
+  does not has failed and asks to be retried, which reads the clock again
+  for a new deadline.
+- The clock decides when the program takes the turn that says the time ran
+  out, but what happened is the call and its result, so a resume from the
+  store reads the deadline and the timeout from the record. A run resumed
+  after its call's deadline has passed is timed out on its first turn.
+
+## 4. What a callee says of itself (spiked)
+
+```yaml
+---
+context: fresh     # every call runs this workflow in a child of its own
+hidden: true       # only a workflow that calls it runs it
+---
+```
+
+- **`context: fresh`** in a workflow's frontmatter makes every call to it
+  run in a child, as if the call said `context: fresh`: a workflow that
+  must not read, or write into, its caller's conversation says so once,
+  where it is defined. A call that says nothing runs it in a child, and
+  may then take a child's settings (`dir`, `model`, `instructions`). A
+  call that says `context: session` is a load error, raised by `Link`:
+  the callee's word is the one that holds, and it is not overridden in
+  silence. `fresh` is the only value a workflow may give; leaving the key
+  out leaves it to each call.
+- Which calls run fresh is known only once the workflows are linked, so a
+  child's settings on a call are checked again then, as a call's outcomes
+  already are. The record is unchanged: the call is an ordinary fresh
+  `flow_call`, held while its child runs.
+- **`hidden: true`** says the workflow is a part, run only by workflows
+  that call it. `Graph.Invocation` refuses it, `Apply` refuses it as a
+  root, and a model's request for its skill is to be refused too
+  (`Graph.Hidden` is what that reads). A call starts it, in its caller's
+  context or in a child. A catalog that lists workflows, or offers them to
+  a model, should leave hidden ones out; agentflow has no catalog of its
+  own, so that is the host's.
+
 ## 5. Tools a step is not offered (spiked)
 
 ````markdown
@@ -151,33 +241,3 @@ exclude_tools: [fetch]
   step carries `tools: all` and the step's exclusions with its
   workflow's, and `ChildSettings` gives the opener `AllTools` and
   `ExcludeTools` to build the child's tools from.
-
-## 4. What a callee says of itself (spiked)
-
-```yaml
----
-context: fresh     # every call runs this workflow in a child of its own
-hidden: true       # only a workflow that calls it runs it
----
-```
-
-- **`context: fresh`** in a workflow's frontmatter makes every call to it
-  run in a child, as if the call said `context: fresh`: a workflow that
-  must not read, or write into, its caller's conversation says so once,
-  where it is defined. A call that says nothing runs it in a child, and
-  may then take a child's settings (`dir`, `model`, `instructions`). A
-  call that says `context: session` is a load error, raised by `Link`:
-  the callee's word is the one that holds, and it is not overridden in
-  silence. `fresh` is the only value a workflow may give; leaving the key
-  out leaves it to each call.
-- Which calls run fresh is known only once the workflows are linked, so a
-  child's settings on a call are checked again then, as a call's outcomes
-  already are. The record is unchanged: the call is an ordinary fresh
-  `flow_call`, held while its child runs.
-- **`hidden: true`** says the workflow is a part, run only by workflows
-  that call it. `Graph.Invocation` refuses it, `Apply` refuses it as a
-  root, and a model's request for its skill is to be refused too
-  (`Graph.Hidden` is what that reads). A call starts it, in its caller's
-  context or in a child. A catalog that lists workflows, or offers them to
-  a model, should leave hidden ones out; agentflow has no catalog of its
-  own, so that is the host's.

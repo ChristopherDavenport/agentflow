@@ -243,9 +243,14 @@ type State struct {
 	// outermost first.
 	callers []caller
 	// clocked says the program has read the clock for this attempt, and
-	// asked counts the bounds asked about in it.
-	clocked bool
-	asked   int
+	// asked counts the bounds asked about in it. timedOut says, for a call,
+	// that the program has recorded its time ran out.
+	clocked  bool
+	timedOut bool
+	asked    int
+	// callDue are the deadlines of the calls in this context the run is
+	// nested in, outermost first: a run is held to its callers' time too.
+	callDue []callClock
 	// filed says the program has given the attempt's model step its
 	// files, and passedFiles are, for the step of a run in a child, the
 	// files its call passed in.
@@ -622,8 +627,14 @@ func (r *replay) state(f *frame) State {
 		st.Entries, st.Granted = f.entries, f.granted
 	}
 	st.Path = slices.Clone(r.root.path)
-	st.callers = nil
+	st.callers, st.callDue = nil, nil
 	for _, s := range r.stack {
+		// A call's time holds the runs it called in this context, until the
+		// program has said it ran out; while runs are being abandoned there
+		// is nothing more to stop.
+		if s != f && r.abort == nil && s.st.Node != nil && s.st.Node.Flow != "" && !s.st.Node.fresh() && !s.st.Deadline.IsZero() && !s.st.timedOut && s.st.Callee != "" {
+			st.callDue = append(st.callDue, callClock{run: s.st.Instance, workflow: s.st.Workflow, step: s.st.Node.ID, id: s.st.timeoutID(), timeout: s.st.Node.Timeout, deadline: s.st.Deadline})
+		}
 		p := Place{Workflow: s.st.Workflow, Run: s.st.Instance}
 		if s.st.Node != nil {
 			p.Step = s.st.Node.ID
@@ -851,6 +862,9 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 		r.overridden(i, c, out)
 		return
 	}
+	if c != nil && c.Name == clockTool && strings.HasPrefix(c.CallID, reserved) && r.timesOut(i, out) {
+		return
+	}
 	f := r.top()
 	if c != nil && c.Name == startTool && strings.HasPrefix(c.CallID, reserved) {
 		r.started(i, f, c, out)
@@ -858,6 +872,11 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 	}
 	st := &f.st
 	if f.failed != nil || st.Done || !st.Started || c == nil {
+		return
+	}
+	// A question the host set aside because a call it is nested in ran out
+	// of time is not answered: the runs are abandoned next.
+	if out.Output.String() == timedOutText && c.Name == askTool && strings.HasPrefix(c.CallID, reserved) {
 		return
 	}
 	// What is not the run's is not its progress.
@@ -904,7 +923,7 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 		if answer.Outcome == retryOutcome {
 			st.Attempt, st.Failure = st.Attempt+1, ""
 			st.Callee, st.Returned, st.calleeInputs = "", nil, nil
-			st.clocked, st.Deadline, st.asked, st.reasked, st.reask, st.filed = false, time.Time{}, 0, 0, false, false
+			st.clocked, st.Deadline, st.asked, st.reasked, st.reask, st.filed, st.timedOut = false, time.Time{}, 0, 0, false, false, false
 			if n.Kind == Agent {
 				// The step opens again, and what came before is not about
 				// this attempt.
@@ -1384,7 +1403,7 @@ func (r *replay) enter(f *frame, i int, n *Node) {
 	f.mark[n.ID] = len(st.Steps)
 	st.Visit, st.Attempt, st.Paced = f.visits[n.ID], 1, f.paced[n.ID]
 	f.since = i
-	st.clocked, st.Deadline, st.asked, st.reasked, st.reask, st.filed = false, time.Time{}, 0, 0, false, false
+	st.clocked, st.Deadline, st.asked, st.reasked, st.reask, st.filed, st.timedOut = false, time.Time{}, 0, 0, false, false, false
 	if !paced {
 		r.entries++
 	}
@@ -1447,4 +1466,46 @@ func runOf(args string) string {
 	}
 	_ = json.Unmarshal([]byte(args), &a)
 	return a.Run
+}
+
+// callClock is the deadline of a call in the current context that a run
+// is nested in.
+type callClock struct {
+	run, workflow, step, id string
+	timeout                 time.Duration
+	deadline                time.Time
+}
+
+// why is what the runs a call abandons as its time runs out record.
+func (c callClock) why() string {
+	return fmt.Sprintf("%scall %q of %s ran past its timeout of %s", timedOutPrefix, c.step, c.workflow, c.timeout)
+}
+
+// timedOutPrefix starts the reason of a run a call abandoned as its time
+// ran out, so the call reads it as its failure.
+const timedOutPrefix = "timeout: "
+
+// timedOutText is the output a host gives a question it sets aside as a
+// call the question's run is nested in runs out of time.
+const timedOutText = "agentflow: timed out"
+
+// timesOut reads the program's word that a call's time ran out, at item
+// i: every run the call is waiting on is abandoned, innermost first, each
+// after its cleanup, and the call is left to say what came of it. It says
+// whether out was that word.
+func (r *replay) timesOut(i int, out *openresponses.FunctionCallOutput) bool {
+	if r.abort != nil {
+		return false
+	}
+	for k, s := range r.stack {
+		st := &s.st
+		if k+1 >= len(r.stack) || st.Node == nil || st.Node.Flow == "" || st.Node.fresh() || st.timedOut || out.CallID != st.timeoutID() {
+			continue
+		}
+		st.timedOut = true
+		c := callClock{run: st.Instance, workflow: st.Workflow, step: st.Node.ID, timeout: st.Node.Timeout}
+		r.abandon(i, r.stack[k+1], nil, c.why())
+		return true
+	}
+	return false
 }
