@@ -628,7 +628,7 @@ func (r *replay) abandon(i int, until, next *frame) {
 	if old := r.abort; old != nil {
 		for _, f := range r.stack {
 			if f.cleaning && f.cleaned == "" {
-				f.cleaned = "cut short: abandoned again"
+				f.cleaned = cutShort
 			}
 			f.cut = f.cut || f.aborting
 		}
@@ -680,6 +680,9 @@ func (r *replay) clean(f *frame, i int) {
 	r.enter(f, i, st.g.node(st.g.OnAbort))
 }
 
+// cutShort is how a cleanup a second abandon stopped went.
+const cutShort = "cut short: abandoned again"
+
 // settle ends a cleanup that failed: a cleanup step that fails is not
 // asked about again, and the run's end is written.
 func (r *replay) settle() {
@@ -688,6 +691,11 @@ func (r *replay) settle() {
 		return
 	}
 	switch {
+	case f.st.Failure == abandonedText:
+		// The host refused the question the cleanup waited on as it
+		// abandoned the runs again: cut short, not failed.
+		f.cleaned = cutShort
+		f.st.Failure = ""
 	case f.st.Failure != "":
 		f.cleaned = fmt.Sprintf("failed at %s: %s", f.st.Node.ID, f.st.Failure)
 		f.st.Failure = ""

@@ -122,6 +122,11 @@ func Models(names ...string) Option {
 // abandoned: every run under way in it is abandoned too, and none starts.
 const abandonText = "agentflow: abandon"
 
+// abandonedText is the output a host gives a call pending as it abandons
+// the runs under way, before it asks for the next: agentflow's own words,
+// so replay knows a cleanup question refused so was cut short, not failed.
+const abandonedText = "agentflow: abandoned"
+
 // heldChild is the call of pending that waits on a child, if one does.
 func heldChild(pending []agentturn.PendingCall) (agentturn.PendingCall, callArgs, bool) {
 	for _, p := range pending {
@@ -391,7 +396,7 @@ func Invoke(ctx context.Context, g *Graph, a *agentturn.Agent, inputs any, opts 
 // abandon abandons the children a's pending calls wait on, and returns
 // outputs refusing every pending call, to open the next prompt with.
 func (f *flow) abandon(ctx context.Context, a *agentturn.Agent) (openresponses.Items, error) {
-	return f.setAside(ctx, a, "agentflow: abandoned")
+	return f.setAside(ctx, a, abandonedText)
 }
 
 // setAside abandons the children a's pending calls wait on, and returns
@@ -435,7 +440,7 @@ func (f *flow) setAside(ctx context.Context, a *agentturn.Agent, text string) (o
 					var refused openresponses.Items
 					for _, p := range end.Pending {
 						if p.Call != nil {
-							refused = append(refused, openresponses.NewFunctionCallOutput(p.Call.CallID, "agentflow: abandoned"))
+							refused = append(refused, openresponses.NewFunctionCallOutput(p.Call.CallID, abandonedText))
 						}
 					}
 					if end, err := child.Prompt(cctx, append(refused, openresponses.DeveloperText(abandonText))...); end == nil {

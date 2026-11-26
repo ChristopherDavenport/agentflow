@@ -158,8 +158,9 @@ child is told again, and the cleanup ends there.
 
 - **Attended:** it is asked and waits, like any question, and the run's
   end waits with it. A person who wants out answers it, or abandons
-  again: the host refuses the pending question first, which ends the
-  cleanup.
+  again: the host refuses the pending question first, with agentflow's
+  own words (`agentflow: abandoned`), which replay reads as the cleanup
+  cut short, not failed: the end says `cut short: abandoned again`.
 - **Unattended:** it takes its `unattended` outcome. Without one, the
   question cannot be answered, which fails the step, which ends the
   cleanup.

@@ -51,7 +51,7 @@ func abandoned(t *testing.T, g *Graph, a *agentturn.Agent, end *agentturn.RunEnd
 	t.Helper()
 	var outs openresponses.Items
 	for _, p := range end.Pending {
-		outs = append(outs, openresponses.NewFunctionCallOutput(p.Call.CallID, "agentflow: abandoned"))
+		outs = append(outs, openresponses.NewFunctionCallOutput(p.Call.CallID, abandonedText))
 	}
 	inv, err := g.Invocation(nil)
 	if err != nil {
@@ -149,8 +149,8 @@ func TestASecondAbandonEndsACleanup(t *testing.T) {
 	}
 	ends := endings(a.State().Transcript)
 	// The question the cleanup waited on was refused as the host abandoned
-	// the run again, which ends the cleanup there.
-	if len(ends) != 2 || ends[1].Cleanup != "failed at confirm: agentflow: abandoned" || !slices.Equal(ran, []string{"inner", "outer"}) {
+	// the run again, which cuts the cleanup short there: it did not fail.
+	if len(ends) != 2 || ends[1].Cleanup != cutShort || ends[0].Cleanup != "done" || !slices.Equal(ran, []string{"inner", "outer"}) {
 		t.Fatalf("ends = %+v, ran %v", ends, ran)
 	}
 }
