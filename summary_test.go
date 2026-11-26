@@ -7,8 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ChristopherDavenport/agentsession"
+	"github.com/ChristopherDavenport/agentsession/jsonl"
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
+	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
 
@@ -66,11 +69,29 @@ func TestASummaryTakesInWhatTheRunCalled(t *testing.T) {
 	}
 	ends := endings(a.State().Transcript)
 	root := ends[len(ends)-1].Summary
-	if root == nil || len(root.Calls) != 1 || root.Calls[0].Workflow != "middle" || !root.Calls[0].Summed {
+	key := ends[len(ends)-1].Instance
+	if root == nil || len(root.Calls) != 4 || root.Calls[0].Workflow != "middle" || root.Calls[0].Parent != key || !root.Calls[0].Summed {
 		t.Fatalf("root summary = %+v", root)
 	}
+	// The whole tree is listed, each run under the one that called it:
+	// middle, and the countdown from 2, 1 and 0 below it.
+	parents := map[string]string{}
+	for _, c := range root.Calls {
+		parents[c.Run] = c.Parent
+	}
+	depth := func(run string) (d int) {
+		for ; run != key; run = parents[run] {
+			d++
+		}
+		return d
+	}
+	for i, want := range []int{1, 2, 3, 4} {
+		if c := root.Calls[i]; depth(c.Run) != want || i > 0 && c.Workflow != "countdown" {
+			t.Errorf("call %d = %+v, depth %d", i, c, depth(c.Run))
+		}
+	}
 	// middle's model request is counted in middle, and in top through it;
-	// so are the countdown's steps.
+	// so are the countdown's steps, which middle's totals already hold.
 	middle := root.Calls[0]
 	if middle.Usage.Requests != 1 || root.Usage.Requests != 1 || root.Usage.Unpriced == nil || root.Usage.Unpriced[0] != "fake" {
 		t.Errorf("middle %+v, root %+v", middle.Usage, root.Usage)
@@ -94,8 +115,12 @@ func TestASummaryTakesInAChild(t *testing.T) {
 	}
 	ends := endings(a.State().Transcript)
 	root := ends[len(ends)-1].Summary
-	if root == nil || len(root.Calls) != 1 || root.Calls[0].Workflow != "thinker" || !root.Calls[0].Summed || root.Usage.Requests != 1 {
+	if root == nil || len(root.Calls) != 2 || root.Calls[0].Workflow != "thinker" || !root.Calls[0].Summed || root.Usage.Requests != 1 {
 		t.Fatalf("root summary = %+v", root)
+	}
+	// The run two children down is listed too, under the one that called it.
+	if c := root.Calls[1]; c.Workflow != "asker" || c.Parent != root.Calls[0].Run || c.Parent == ends[len(ends)-1].Instance {
+		t.Errorf("grandchild = %+v", c)
 	}
 }
 
@@ -115,5 +140,112 @@ func TestASummaryAfterAResumeSaysItIsPartial(t *testing.T) {
 	s := ends[0].Summary
 	if s == nil || s.Usage.Requests != 1 || !strings.Contains(s.Usage.Partial, "started before this process") || !slices.Equal(s.Usage.Unpriced, []string{"fake"}) {
 		t.Errorf("summary = %+v", s)
+	}
+}
+
+// recordedResponses reads a session's responses back as a host does for
+// Responses: each with the items on the path before its own.
+func recordedResponses(store *jsonl.Store, id string) Option {
+	return Responses(func(ctx context.Context) ([]ResponseUsage, error) {
+		s, err := store.Open(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		path := s.Path(s.Leaf())
+		first, n := map[string]int{}, 0
+		for _, e := range path {
+			if it, ok := e.(*agentsession.ItemEntry); ok {
+				if _, seen := first[it.ResponseID]; it.ResponseID != "" && !seen {
+					first[it.ResponseID] = n
+				}
+				n++
+			}
+		}
+		var out []ResponseUsage
+		n = 0
+		for _, e := range path {
+			switch e := e.(type) {
+			case *agentsession.ItemEntry:
+				n++
+			case *agentsession.ResponseEntry:
+				at, ok := first[e.ResponseID]
+				if !ok {
+					at = n
+				}
+				r := ResponseUsage{Model: e.Model, At: at}
+				if e.Usage != nil {
+					r.Usage = *e.Usage
+				}
+				out = append(out, r)
+			}
+		}
+		return out, nil
+	})
+}
+
+func TestASummaryFromTheRecordedResponsesIsWhole(t *testing.T) {
+	var ran []string
+	tool := func() agenttool.Tool { return scriptTool(&ran) }
+	a := killedRecord(t,
+		func() agentturn.Config {
+			return apply(t, release(), metered{&fakeModel{outcomes: []string{"findings"}}}, tool())
+		},
+		func(store *jsonl.Store, id string) agentturn.Config {
+			cfg, err := Apply(release(), agentturn.Config{Model: metered{&fakeModel{outcomes: []string{OK, "clean"}}}, ModelName: "fake", Tools: []agenttool.Tool{tool()}},
+				recordOf(store, id), recordedResponses(store, id), Prices(halfCent))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return cfg
+		},
+		// One model request, then the process dies at the question.
+		func(t *testing.T, a *agentturn.Agent) {
+			question(t, start(t, a))
+			die()
+		})
+	g := release()
+	end := reply(t, g, a, &agentturn.RunEnd{Reason: agentturn.ReasonInputRequired, Pending: a.State().Pending}, "fix")
+	if end.Reason != agentturn.ReasonDone {
+		t.Fatalf("end = %+v", end)
+	}
+	ends := endings(a.State().Transcript)
+	s := ends[len(ends)-1].Summary
+	// The review before the kill is counted, with the fix and the review
+	// after it, and nothing is partial.
+	if s == nil || !reflect.DeepEqual(s.Usage, Usage{Requests: 3, InputTokens: 30, OutputTokens: 6, Cost: 0.015}) {
+		t.Errorf("summary = %+v", s)
+	}
+}
+
+func TestRecordedResponsesCountForTheRunTheyServed(t *testing.T) {
+	ctx := context.Background()
+	store, err := jsonl.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, s, err := session.Start(ctx, store, agentsession.Header{CWD: "/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := linked(t, top(), middle(), countdown())
+	var counts []int
+	var ran []string
+	a := nestedAgent(t, g, metered{&fakeModel{outcomes: []string{OK}}}, []agenttool.Tool{countTool(&counts), scriptTool(&ran)},
+		Unattended(), recordOf(store, s.ID()), recordedResponses(store, s.ID()))
+	rec.Attach(a)
+	if end := start(t, a); end.Reason != agentturn.ReasonDone {
+		t.Fatalf("end = %+v", end)
+	}
+	ends := endings(a.State().Transcript)
+	root := ends[len(ends)-1].Summary
+	// The one request was middle's, counted there, and in top only through
+	// middle; nothing is partial.
+	if root == nil || root.Usage.Requests != 1 || root.Usage.Partial != "" || root.Calls[0].Workflow != "middle" || root.Calls[0].Usage.Requests != 1 {
+		t.Fatalf("root summary = %+v", root)
+	}
+	for _, c := range root.Calls[1:] {
+		if c.Usage.Requests != 0 || c.Usage.Partial != "" {
+			t.Errorf("countdown %s = %+v", c.Run, c.Usage)
+		}
 	}
 }

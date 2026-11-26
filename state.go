@@ -486,20 +486,44 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 }
 
 func (g *Graph) replay(t agentturn.Transcript) *replay {
-	r := &replay{g: g, closure: g.closure(), calls: map[string]*openresponses.FunctionCall{}, at: map[string]int{}}
-	r.root = r.newRoot(nil)
+	r := g.newReplay()
 	for i, item := range t {
-		switch it := item.(type) {
-		case *openresponses.Message:
-			r.message(i, it)
-		case *openresponses.FunctionCall:
-			r.call(i, it)
-		case *openresponses.FunctionCallOutput:
-			r.output(i, it)
-		}
-		r.settle()
+		r.step(i, item)
 	}
 	return r
+}
+
+func (g *Graph) newReplay() *replay {
+	r := &replay{g: g, closure: g.closure(), calls: map[string]*openresponses.FunctionCall{}, at: map[string]int{}}
+	r.root = r.newRoot(nil)
+	return r
+}
+
+// step reads item i.
+func (r *replay) step(i int, item openresponses.Item) {
+	switch it := item.(type) {
+	case *openresponses.Message:
+		r.message(i, it)
+	case *openresponses.FunctionCall:
+		r.call(i, it)
+	case *openresponses.FunctionCallOutput:
+		r.output(i, it)
+	}
+	r.settle()
+}
+
+// owners says whose turn each point of t was: owners[k] is the key of the
+// run current once the first k items had happened, so a model request
+// made there was that run's.
+func (g *Graph) owners(t agentturn.Transcript) []string {
+	r := g.newReplay()
+	out := make([]string, len(t)+1)
+	out[0] = r.top().st.Instance
+	for i, item := range t {
+		r.step(i, item)
+		out[i+1] = r.top().st.Instance
+	}
+	return out
 }
 
 func (r *replay) newRoot(inputs any) *frame {
@@ -853,7 +877,7 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 		r.entries += entries
 		r.granted += granted
 		st.treeSteps += entries
-		st.called = append(st.called, calledFresh(argsOf(c), out.Output.String()))
+		st.called = append(st.called, calledFresh(st.Instance, argsOf(c), out.Output.String())...)
 		v, ok := verdictOf(n, out)
 		switch {
 		case st.Held != nil:
@@ -923,7 +947,7 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 			r.entries += entries
 			r.granted += granted
 			st.treeSteps += entries
-			st.called = append(st.called, calledFresh(argsOf(c), out.Output.String()))
+			st.called = append(st.called, calledFresh(st.Instance, argsOf(c), out.Output.String())...)
 			var said Result
 			if decode([]byte(out.Output.String()), &said) == nil && said.Limit != "" {
 				f.failed, st.limit = &limitError{limits[said.Limit], said.Reason}, said.Limit
@@ -1103,7 +1127,7 @@ func (r *replay) ended(i int, c *openresponses.FunctionCall, out *openresponses.
 	if p := f.parent; p != nil && p.st.Callee == f.st.Instance {
 		p.st.Returned = &e
 		p.st.treeSteps += f.st.treeSteps
-		p.st.called = append(p.st.called, calledOf(f.st.Workflow, f.st.Instance, e.Status, e.Outcome, e.Summary))
+		p.st.called = append(p.st.called, calledOf(p.st.Instance, f.st.Workflow, f.st.Instance, e.Status, e.Outcome, e.Summary)...)
 		if treeWide(e.Limit) && p.failed == nil {
 			p.failed, p.st.limit = &limitError{limits[e.Limit], e.Reason}, e.Limit
 		}

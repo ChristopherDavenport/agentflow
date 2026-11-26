@@ -144,6 +144,9 @@ type flow struct {
 	// it, for the summary a run's end records.
 	book   *usageBook
 	prices func(model string, u openresponses.Usage) (float64, bool)
+	// responses reads what the session's responses used, when the host
+	// gives it; without, the book counts them as they are served.
+	responses func(ctx context.Context) ([]ResponseUsage, error)
 	// due is the deadline of the model step the last request was shaped
 	// for, so the model's stream is cut there.
 	due *deadline
@@ -782,7 +785,7 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 	if !strings.HasPrefix(req.Model, programPrefix) {
 		return f.serve(ctx, req, sink)
 	}
-	st, _, err := f.read(ctx, req.Input)
+	st, all, err := f.read(ctx, req.Input)
 	over := f.overdue(st, err)
 	if err != nil && over == nil {
 		return err
@@ -792,7 +795,7 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 	var args any
 	switch {
 	case over != nil:
-		over.Summary = f.summarize(st)
+		over.Summary = f.summarize(ctx, st, all)
 		id, name, args = over.id, endTool, over
 	case st.request != nil:
 		id, name, args = st.requestID, overrideTool, *st.request

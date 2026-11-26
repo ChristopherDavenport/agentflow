@@ -251,8 +251,10 @@ reason it already holds:
    "started": "2026-11-26T10:00:00Z", "ended": "2026-11-26T10:04:12Z",
    "steps": 9,
    "usage": {"requests": 6, "input_tokens": 52000, "output_tokens": 4100, "cost": 0.21},
-   "calls": [{"workflow": "pr-review", "run": "77b01c4a9e", "status": "done", "outcome": "clean",
-              "summed": true, "steps": 5, "usage": {"requests": 4, "input_tokens": 30000, "output_tokens": 2600, "cost": 0.12}}]}}
+   "calls": [{"workflow": "pr-review", "run": "77b01c4a9e", "parent": "3fa9c2d1e0", "status": "done", "outcome": "clean",
+              "summed": true, "steps": 5, "usage": {"requests": 4, "input_tokens": 30000, "output_tokens": 2600, "cost": 0.12}},
+             {"workflow": "pr-review/flows/triage", "run": "c41d7e09b2", "parent": "77b01c4a9e", "status": "done", "outcome": "ok",
+              "summed": true, "steps": 2, "usage": {"requests": 1, "input_tokens": 9000, "output_tokens": 700, "cost": 0.03}}]}}
 ```
 
 - **Time** comes from what is recorded. `flow_start`'s result now holds
@@ -263,11 +265,13 @@ reason it already holds:
 - **Steps** are the step entries of the run, attempts and jumps
   included, and of every run it called, in context or in a child.
 - **Usage** is what the run's model requests used, and the requests of
-  every run it called. `calls` lists the runs it called directly, each
-  with its own totals; each of those has its own summary, with its own
-  calls, in its own end, in this session or its child's. A child's end
-  goes back to its caller with the call's result, so the caller's
-  summary needs no other session.
+  every run it called. `calls` lists every run below it, at any depth,
+  each before the runs it called and with the key of the run that called
+  it (`parent`), so a reader rebuilds the tree by `parent`; each entry's
+  totals take in those below it, and the run's own add those of the runs
+  it called itself. The list is flat, so the summary's type is not
+  recursive. A child's end goes back to its caller with the call's
+  result, so the caller's summary needs no other session.
 - **Cost** is the host's to price: `Prices(func(model, usage) (cost,
   ok))`. agentflow does not import agenteval, and knows no prices.
   Requests of a model it has no price for are counted, left out of
@@ -276,15 +280,30 @@ reason it already holds:
 
 **Where the counts come from, and what is partial.** Usage is not in the
 record's items: it is on the session's response entries, which agentflow
-does not read. So the program counts each model request as it serves it,
-by the run the request was for, and writes the sum into the end, where it
-is in the record from then on. Counting lives as long as the process:
+does not read, since it does not import agentsession.
+
+**With the host's responses, the counts are whole.** A host gives
+`Responses(read)`, which returns the session's responses as its response
+entries record them: the model, what it used, and how many of the
+record's items come before the response's own. The program attributes
+each response to the run that was current at that point of the record,
+the same replay that reads position, leaves out its own turns, prices
+what is left, and writes the sum into the end. A run started before a
+restart counts every request it made, so nothing is partial; a run is
+partial only if a run it called is. A child's opener gives the child's
+own `Responses` with `Child.Apply`, as it gives its `History`. The test
+`recordedResponses` shows a host reading agentturn/session's entries.
+
+**Without them, requests are counted as they are served.** The program
+counts each model request as it serves it, by the run the request was
+for, and writes the sum into the end, where it is in the record from then
+on. Counting lives as long as the process:
 
 - A run whose start this process wrote counts every request it made.
 - A run that started before a restart counts only the requests since,
   and says so: `partial` gives the reason. A summary is never padded or
-  guessed; the requests before are in the session's responses, which a
-  host can add up with agentsession's `DelegatedWork` and its own reader.
+  guessed; the requests before are in the session's responses, which
+  `Responses` reads.
 - A run is partial if a run it called is: `partial` keeps the first
   reason it meets, and a call whose end wrote no summary makes it partial
   too.
