@@ -52,7 +52,12 @@ type Child struct {
 	// nested in, which hold its tools too.
 	maxSteps int
 	policies []ruled
-	made     **flow
+	// documents are the texts the call passed in of the documents its step
+	// reads.
+	documents map[string]string
+	// files are what the call passed in for its step to be given.
+	files []fileRef
+	made  **flow
 }
 
 // ChildSettings are what a step says of the child it runs in.
@@ -80,7 +85,8 @@ func (c Child) Apply(cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 	}
 	p := c.parent
 	f := &flow{g: c.g, maxDepth: p.maxDepth, maxSteps: p.maxSteps, unattended: p.unattended, reply: p.reply, delegations: p.delegations,
-		modes: p.modes, judgeName: p.judgeName, children: p.children, models: p.models, idle: p.idle, matchers: p.matchers, policyOpts: p.policyOpts}
+		modes: p.modes, judgeName: p.judgeName, children: p.children, models: p.models, idle: p.idle, matchers: p.matchers, policyOpts: p.policyOpts,
+		book: p.book, prices: p.prices, fileTool: p.fileTool, fileField: p.fileField}
 	own := c
 	f.child = &own
 	for _, opt := range opts {
@@ -102,6 +108,11 @@ func (c Child) Apply(cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 // an agent seeded with what the child's session holds. A kept child's
 // session holds its earlier runs. A graph with a fresh step, a fresh call
 // or a step the host lets a judge answer needs it.
+//
+// c.Apply checks the child's tools against its steps, as Apply does a
+// root's: an opener returns its error as it is, or wrapped with %w, and a
+// child whose config does not offer what its steps call, or not as they
+// call it, fails the call that waits on it, which the step asks to retry.
 func Children(open func(ctx context.Context, c Child) (context.Context, *agentturn.Agent, error)) Option {
 	return func(f *flow) { f.children = open }
 }
@@ -114,7 +125,29 @@ func Models(names ...string) Option {
 
 // abandonText is what the program tells a child whose caller has been
 // abandoned: every run under way in it is abandoned too, and none starts.
+// A reason may follow, after ": ", which each run's end records.
 const abandonText = "agentflow: abandon"
+
+// abandonMessage tells a child to abandon its runs, for why, if any.
+func abandonMessage(why string) openresponses.Item {
+	if why == "" {
+		return openresponses.DeveloperText(abandonText)
+	}
+	return openresponses.DeveloperText(abandonText + ": " + why)
+}
+
+// abandonedFor reads an abandon message, and the reason it gives.
+func abandonedFor(text string) (why string, ok bool) {
+	if text == abandonText {
+		return "", true
+	}
+	return strings.CutPrefix(text, abandonText+": ")
+}
+
+// abandonedText is the output a host gives a call pending as it abandons
+// the runs under way, before it asks for the next: agentflow's own words,
+// so replay knows a cleanup question refused so was cut short, not failed.
+const abandonedText = "agentflow: abandoned"
 
 // heldChild is the call of pending that waits on a child, if one does.
 func heldChild(pending []agentturn.PendingCall) (agentturn.PendingCall, callArgs, bool) {
@@ -142,7 +175,7 @@ func (f *flow) childFor(st State, call *openresponses.FunctionCall, a callArgs) 
 		return Child{}, err
 	}
 	c := Child{Run: a.Run, Spawn: a.Spawn, Caller: call.CallID, Parent: st.Instance, Workflow: g.Name, Kept: a.Child,
-		Depth: st.Depth + 1, Path: slices.Clone(st.Path), parent: f, g: g, maxDepth: st.maxDepth, maxSteps: a.MaxSteps}
+		Depth: st.Depth + 1, Path: slices.Clone(st.Path), parent: f, g: g, maxDepth: st.maxDepth, maxSteps: a.MaxSteps, documents: a.Documents, files: a.Files}
 	switch {
 	case call.Name == judgeTool:
 		c.Step, c.Judge = n.ID, true
@@ -154,6 +187,9 @@ func (f *flow) childFor(st State, call *openresponses.FunctionCall, a callArgs) 
 	case n.Kind == Agent:
 		c.Step = n.ID
 		c.Settings = ChildSettings{Dir: n.Dir, Model: n.Model, Thinking: cmp.Or(n.Thinking, st.g.Thinking), Instructions: n.Instructions, Tools: n.Tools}
+		if st.Note != "" {
+			c.Settings.Instructions = strings.TrimSpace(c.Settings.Instructions + "\n\nNote from the operator: " + st.Note)
+		}
 		// The step's own policy is its node's in the child.
 		c.policies = f.chain(st)
 	default:
@@ -206,6 +242,12 @@ func (f *flow) settle(ctx context.Context, st State, p agentturn.PendingCall, a 
 		return nil, nil, st, err
 	}
 	cctx, child, cf, err := f.open(ctx, c)
+	if unfit := (*unfitChild)(nil); errors.As(err, &unfit) {
+		// The child cannot run its steps on the tools it was given: the call
+		// that waits on it fails, as the step's own call would.
+		ans, err := unfitCall(p, a, unfit)
+		return ans, nil, st, err
+	}
 	if err != nil {
 		return nil, nil, st, err
 	}
@@ -284,6 +326,7 @@ func letGo(st State, p agentturn.PendingCall, a callArgs, done State, failed err
 			a.Failure = "agentflow: the model reported it is stuck: " + done.Steps[last].Result.Reason
 		default:
 			r := done.Steps[last].Result
+			r.Documents = editedDocuments(n, done.Documents)
 			a.Result = &r
 		}
 	default:
@@ -296,12 +339,30 @@ func letGo(st State, p agentturn.PendingCall, a callArgs, done State, failed err
 	}
 	// What the child's runs spent counts toward the caller's tree, however
 	// they came out: a failed child's steps and a judge's look included.
-	a.Entries, a.Granted = done.Entries, done.Granted
+	a.Entries, a.Granted, a.Summary = done.Entries, done.Granted, done.Summary
 	args, err := json.Marshal(a)
 	if err != nil {
 		return nil, err
 	}
 	ans := agentturn.ApproveWith(p.Call.CallID, args).WithBy("policy").WithReason("agentflow: the child's run has ended")
+	return &ans, nil
+}
+
+// unfitCall is the answer that lets a held call go when its child's config
+// does not fit the child's steps: a failure the step asks to retry, or for
+// a judge's look no verdict, so the person is asked.
+func unfitCall(p agentturn.PendingCall, a callArgs, unfit *unfitChild) (*agentturn.Answer, error) {
+	why := "agentflow: the child cannot run on the tools it was given: " + strings.TrimPrefix(unfit.Error(), "agentflow: ")
+	if p.Call.Name == judgeTool {
+		a.Verdict = &Verdict{Outcome: HandBack, Reason: why, None: true}
+	} else {
+		a.Failure = why
+	}
+	args, err := json.Marshal(a)
+	if err != nil {
+		return nil, err
+	}
+	ans := agentturn.ApproveWith(p.Call.CallID, args).WithBy("policy").WithReason("agentflow: the child's config does not fit its steps")
 	return &ans, nil
 }
 
@@ -366,7 +427,7 @@ func Invoke(ctx context.Context, g *Graph, a *agentturn.Agent, inputs any, opts 
 	if err != nil {
 		return nil, State{}, err
 	}
-	outs, err := f.abandon(ctx, a)
+	outs, err := f.abandon(ctx, a, "")
 	if err != nil {
 		return nil, State{}, err
 	}
@@ -378,9 +439,19 @@ func Invoke(ctx context.Context, g *Graph, a *agentturn.Agent, inputs any, opts 
 	return f.drive(ctx, a, end)
 }
 
-// abandon abandons the children a's pending calls wait on, and returns
-// outputs refusing every pending call, to open the next prompt with.
-func (f *flow) abandon(ctx context.Context, a *agentturn.Agent) (openresponses.Items, error) {
+// abandon abandons the children a's pending calls wait on, for why, and
+// returns outputs refusing every pending call, to open the next prompt
+// with.
+func (f *flow) abandon(ctx context.Context, a *agentturn.Agent, why string) (openresponses.Items, error) {
+	return f.setAside(ctx, a, abandonedText, why)
+}
+
+// setAside abandons the children a's pending calls wait on, and returns
+// outputs, of text, for every pending call, to open the next prompt with.
+//
+// why is what the children's runs are abandoned for, which their ends
+// record: an operator's override, say; empty for a new invocation.
+func (f *flow) setAside(ctx context.Context, a *agentturn.Agent, text, why string) (openresponses.Items, error) {
 	pending := a.State().Pending
 	if len(pending) == 0 {
 		return nil, nil
@@ -403,17 +474,66 @@ func (f *flow) abandon(ctx context.Context, a *agentturn.Agent) (openresponses.I
 			if err != nil {
 				return nil, err
 			}
+			// What the child's run spent counts toward this tree however the
+			// call goes, so the call is answered with it: an override cannot
+			// buy steps by throwing a child's away.
+			let := callFailure{Failure: text}
 			if cf.started(cctx, child, args.Run) {
-				inner, err := cf.abandon(cctx, child)
+				inner, err := cf.abandon(cctx, child, why)
 				if err != nil {
 					return nil, err
 				}
-				if end, err := child.Prompt(cctx, append(inner, openresponses.DeveloperText(abandonText))...); end == nil {
+				end, err := child.Prompt(cctx, append(inner, abandonMessage(why))...)
+				if end == nil {
+					return nil, err
+				}
+				// A cleanup that waits on a question in the child is cut
+				// short: the person is asked nothing in a session abandoned
+				// from above, and the child's runs end.
+				if end.Reason == agentturn.ReasonInputRequired {
+					var refused openresponses.Items
+					for _, p := range end.Pending {
+						if p.Call != nil {
+							refused = append(refused, openresponses.NewFunctionCallOutput(p.Call.CallID, abandonedText))
+						}
+					}
+					if end, err := child.Prompt(cctx, append(refused, abandonMessage(why))...); end == nil {
+						return nil, err
+					}
+				}
+				if let.Entries, let.Granted, let.Summary, err = cf.spentBy(cctx, child, args.Run); err != nil {
 					return nil, err
 				}
 			}
+			b, err := json.Marshal(let)
+			if err != nil {
+				return nil, err
+			}
+			outs = append(outs, openresponses.NewFunctionCallOutput(p.Call.CallID, string(b)))
+			continue
 		}
-		outs = append(outs, openresponses.NewFunctionCallOutput(p.Call.CallID, "agentflow: abandoned"))
+		outs = append(outs, openresponses.NewFunctionCallOutput(p.Call.CallID, text))
 	}
 	return outs, nil
+}
+
+// spentBy is what run spent in a's session, as its record says once its
+// end is written: the steps its tree entered, what a person granted there,
+// and its summary. A kept child's session holds a run for each visit, and
+// only run's are counted.
+func (f *flow) spentBy(ctx context.Context, a *agentturn.Agent, run string) (entries, granted int, summary *Summary, err error) {
+	all, err := f.record(ctx, a.State().Transcript)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	runs, err := Runs(all, nil)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	for _, in := range runs {
+		if in.ID == run {
+			return in.State.Entries, in.State.Granted, in.Summary, nil
+		}
+	}
+	return 0, 0, nil, nil
 }

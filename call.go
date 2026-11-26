@@ -39,6 +39,12 @@ type callArgs struct {
 	// host lets it answer.
 	Step string `json:"step,omitempty"`
 	Mode string `json:"mode,omitempty"`
+	// Files are the files a fresh model step is given, passed into its
+	// child, which reads them there.
+	Files []fileRef `json:"files,omitempty"`
+	// Documents are the texts of the documents a fresh model step reads,
+	// passed into its child.
+	Documents map[string]string `json:"documents,omitempty"`
 	// Result, Failure and Verdict are what came of the child.
 	Result  *Result  `json:"result,omitempty"`
 	Failure string   `json:"failure,omitempty"`
@@ -47,15 +53,18 @@ type callArgs struct {
 	// steps, and what a person granted there, whatever came of it.
 	Entries int `json:"entries,omitempty"`
 	Granted int `json:"granted,omitempty"`
+	// Summary is what the child's end summed up.
+	Summary *Summary `json:"summary,omitempty"`
 }
 
 // callFailure is the output of a child's call that failed: the failure,
 // and what the child spent, so its caller counts the steps a failed child
 // entered. It is no [Result], so the step has failed.
 type callFailure struct {
-	Failure string `json:"failure"`
-	Entries int    `json:"entries,omitempty"`
-	Granted int    `json:"granted,omitempty"`
+	Failure string   `json:"failure"`
+	Entries int      `json:"entries,omitempty"`
+	Granted int      `json:"granted,omitempty"`
+	Summary *Summary `json:"summary,omitempty"`
 }
 
 // spent reads what the output of a child's call says the child spent:
@@ -94,7 +103,7 @@ func (f *flow) rootStart(inputs any) (startPayload, error) {
 		Definition: json.RawMessage(definition), MaxDepth: f.depth(), MaxSteps: f.steps()}
 	if c := f.child; c != nil {
 		p.Run, p.Parent, p.Caller, p.Depth, p.Path, p.Context = c.Run, c.Parent, c.Caller, c.Depth, c.Path, ContextFresh
-		p.MaxDepth, p.MaxSteps = c.maxDepth, c.maxSteps
+		p.MaxDepth, p.MaxSteps, p.Documents, p.Files = c.maxDepth, c.maxSteps, c.documents, c.files
 	} else if p.Run, err = newKey(); err != nil {
 		return startPayload{}, err
 	}
@@ -181,6 +190,10 @@ func callFresh(st State, c *openresponses.FunctionCall) error {
 		return errors.New("what came of a child is the program's to say, when it has ended")
 	case a.MaxSteps != st.left():
 		return fmt.Errorf("step %q gives its child the %d steps its tree has left", n.ID, st.left())
+	case n.Kind == Agent && !sameJSON(a.Files, st.filesFor(n)):
+		return fmt.Errorf("step %q passes its child the files it is given", n.ID)
+	case n.Kind == Agent && !sameJSON(a.Documents, st.passedDocuments(n)):
+		return fmt.Errorf("step %q passes its child the documents as they stand", n.ID)
 	}
 	with, err := st.resolveAll(n.With)
 	if err != nil {
@@ -258,12 +271,12 @@ func (f *flow) callTool() agenttool.Tool {
 			case a.Failure != "":
 				// The failure says what the child spent, which an error
 				// could not carry.
-				return callFailure{Failure: a.Failure, Entries: a.Entries, Granted: a.Granted}, nil
+				return callFailure{Failure: a.Failure, Entries: a.Entries, Granted: a.Granted, Summary: a.Summary}, nil
 			case a.Result == nil:
 				return nil, fmt.Errorf("agentflow: run %q has not ended", a.Run)
 			}
 			r := *a.Result
-			r.Entries, r.Granted = a.Entries, a.Granted
+			r.Entries, r.Granted, r.Summary = a.Entries, a.Granted, a.Summary
 			return r, nil
 		}
 		e := st.Returned

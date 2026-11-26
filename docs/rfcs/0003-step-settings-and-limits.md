@@ -37,8 +37,9 @@ timeout: 10m
 ````
 
 - `timeout` is a duration from 1ns up to 24h. It may be set on script,
-  tool and model steps. On a person step, a call or a judge it is a load
-  error.
+  tool and model steps. On a person step it is the question's timeout,
+  which takes an outcome rather than failing (RFC 0004, section 26). On
+  a call or a judge it is a load error.
 - **A script or tool step** runs with a context that ends at its
   timeout. The host's tools are wrapped in `Apply` (`agenttool.Wrap`,
   which keeps every property a tool declares). A call cut off there

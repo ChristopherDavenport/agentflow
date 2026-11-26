@@ -28,6 +28,11 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 	}
 	var b strings.Builder
 	front := mapping()
+	if g.Description != "" {
+		if err := front.set("description", g.Description); err != nil {
+			return nil, err
+		}
+	}
 	if g.Inputs != nil {
 		front.add("inputs", fields(g.Inputs))
 	}
@@ -41,11 +46,28 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 		}
 		front.add("outputs", &out.Node)
 	}
+	if g.Documents != nil {
+		docs := mapping()
+		for _, name := range slices.Sorted(maps.Keys(g.Documents)) {
+			d := g.Documents[name]
+			spec := map[string]string{}
+			if d.From != "" {
+				spec["from"] = d.From
+			}
+			if d.Input != "" {
+				spec["input"] = d.Input
+			}
+			if err := docs.set(name, spec); err != nil {
+				return nil, err
+			}
+		}
+		front.add("documents", &docs.Node)
+	}
 	for _, s := range []struct {
 		key string
 		set bool
 		v   any
-	}{{"max_depth", g.MaxDepth != 0, g.MaxDepth}, {"max_steps", g.MaxSteps != 0, g.MaxSteps}, {"model", g.Model != "", g.Model}, {"thinking", g.Thinking != "", g.Thinking}} {
+	}{{"max_depth", g.MaxDepth != 0, g.MaxDepth}, {"max_steps", g.MaxSteps != 0, g.MaxSteps}, {"model", g.Model != "", g.Model}, {"thinking", g.Thinking != "", g.Thinking}, {"on_abort", g.OnAbort != "", g.OnAbort}} {
 		if !s.set {
 			continue
 		}
@@ -127,10 +149,34 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 	written.Sources = ""
 	// The file names a step's instructions, and loading reads them.
 	written.Nodes = slices.Clone(g.Nodes)
+	// And each file of the skill a step is given.
+	for i := range written.Nodes {
+		written.Nodes[i].SkillFiles = nil
+	}
+	// And each document's first text, from its file.
+	if g.Documents != nil {
+		written.Documents = maps.Clone(g.Documents)
+		for name, d := range written.Documents {
+			if d.From != "" {
+				d.Text = ""
+				written.Documents[name] = d
+			}
+		}
+	}
 	for i := range written.Nodes {
 		if written.Nodes[i].InstructionsFile != "" {
 			written.Nodes[i].Instructions = ""
 		}
+		// So does each skill's text.
+		if skills := written.Nodes[i].Skills; skills != nil {
+			written.Nodes[i].Skills = make([]agentflow.StepSkill, len(skills))
+			for j, sk := range skills {
+				written.Nodes[i].Skills[j] = agentflow.StepSkill{Name: sk.Name}
+			}
+		}
+	}
+	for i := range back.Nodes {
+		back.Nodes[i].SkillFiles = nil
 	}
 	if back.OwnDigest() != written.OwnDigest() {
 		return nil, errors.New("workflow: the graph cannot be written as a file without changing it")
@@ -163,6 +209,7 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 			errs = append(errs, m.set(key, v))
 		}
 	}
+	set("description", n.Description != "", n.Description)
 	set("run", n.Script != "", n.Script)
 	set("flow", n.Flow != "", n.Flow)
 	set("tool", n.Tool != "", n.Tool)
@@ -177,6 +224,18 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 		m.add("with", valuesNode(n.With))
 	}
 	set("tools", n.Tools != nil, n.Tools)
+	if n.Files != nil {
+		var files []any
+		for _, v := range n.Files {
+			files = append(files, written(v))
+		}
+		set("files", true, files)
+	}
+	var skills []string
+	for _, sk := range n.Skills {
+		skills = append(skills, sk.Name)
+	}
+	set("skills", skills != nil, skills)
 	set("context", n.Context != "", n.Context)
 	set("dir", n.Dir != "", n.Dir)
 	set("model", n.Model != "", n.Model)
@@ -185,6 +244,19 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 	set("policy", n.Policy != nil, policyOut(n.Policy))
 	set("instructions", n.InstructionsFile != "", n.InstructionsFile)
 	set("child", n.Child != "", n.Child)
+	if n.Reads != nil || n.Edits != nil || n.Writes != nil {
+		docs := map[string]any{}
+		if n.Reads != nil {
+			docs["read"] = n.Reads
+		}
+		if n.Edits != nil {
+			docs["edit"] = n.Edits
+		}
+		if n.Writes != nil {
+			docs["write"] = n.Writes
+		}
+		set("documents", true, docs)
+	}
 	set("outcomes", n.Outcomes != nil, n.Outcomes)
 	if n.Data != nil {
 		out := mapping()
@@ -198,6 +270,30 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 		set("unattended", true, map[string]any{"outcome": n.Unattended, "data": n.UnattendedData})
 	default:
 		set("unattended", n.Unattended != "", n.Unattended)
+	}
+	if c := n.Choices; c != nil {
+		choices := &yamlMap{*valuesNode(map[string]agentflow.Value{"from": c.From})}
+		if c.Many {
+			errs = append(errs, choices.set("select", "many"))
+		}
+		errs = append(errs, choices.set("outcome", c.Outcome))
+		if c.As != "" {
+			errs = append(errs, choices.set("as", c.As))
+		}
+		m.add("choices", &choices.Node)
+	}
+	switch t := n.Text; {
+	case t == nil:
+	case t.As != "":
+		set("text", true, map[string]any{"outcome": t.Outcome, "as": t.As})
+	default:
+		set("text", true, t.Outcome)
+	}
+	switch {
+	case n.OnTimeoutData != nil:
+		set("on_timeout", true, map[string]any{"outcome": n.OnTimeout, "data": n.OnTimeoutData})
+	default:
+		set("on_timeout", n.OnTimeout != "", n.OnTimeout)
 	}
 	set("max_visits", n.MaxVisits != 0, n.MaxVisits)
 	if j := n.Judge; j != nil {
@@ -219,18 +315,7 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 func valuesNode(values map[string]agentflow.Value) *yaml.Node {
 	m := mapping()
 	for _, name := range slices.Sorted(maps.Keys(values)) {
-		v := values[name].Literal
-		if ref := values[name]; ref.From != "" {
-			expr := strings.Join(append([]string{ref.From}, ref.Or...), ", ")
-			switch {
-			case ref.Optional:
-				expr = "optional(" + expr + ")"
-			case len(ref.Or) > 0:
-				expr = "latest(" + expr + ")"
-			}
-			v = "${{ " + expr + " }}"
-		}
-		if err := m.set(name, v); err != nil {
+		if err := m.set(name, written(values[name])); err != nil {
 			// Left out, so the round trip fails and says so.
 			continue
 		}
@@ -294,4 +379,19 @@ func policyOut(p *agentflow.Policy) map[string]any {
 		out["deny"] = list(p.Deny)
 	}
 	return out
+}
+
+// written is a value as a file writes it: a literal, or one expression.
+func written(ref agentflow.Value) any {
+	if ref.From == "" {
+		return ref.Literal
+	}
+	expr := strings.Join(append([]string{ref.From}, ref.Or...), ", ")
+	switch {
+	case ref.Optional:
+		expr = "optional(" + expr + ")"
+	case len(ref.Or) > 0:
+		expr = "latest(" + expr + ")"
+	}
+	return "${{ " + expr + " }}"
 }

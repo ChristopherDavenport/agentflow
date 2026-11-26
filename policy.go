@@ -91,7 +91,7 @@ func (p *Policy) check(tools []string, known bool) error {
 	if known {
 		for _, r := range slices.Concat(parsed.Allow, parsed.Deny) {
 			if !r.Glob() && !slices.Contains(tools, r.Tool) {
-				errs = append(errs, fmt.Errorf("rule %s: the step offers no tool %s", r, r.Tool))
+				errs = append(errs, fmt.Errorf("rule %s: the step offers no tool %s%s", r, r.Tool, suggest(r.Tool, tools)))
 			}
 		}
 	}

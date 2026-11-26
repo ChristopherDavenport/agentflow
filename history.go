@@ -240,7 +240,7 @@ func note(c *openresponses.FunctionCall, result string, answered bool) string {
 		if res.Outcome == "" {
 			return fmt.Sprintf("%sthe workflow, not the assistant, asked %q (step %q): %s", recordPrefix, q.Question, q.Step, result)
 		}
-		who := map[string]string{"": "the person", ByJudge: "a judge model", "rules": "the host's rules", "unattended default": "the unattended default"}[res.By]
+		who := map[string]string{"": "the person", ByJudge: "a judge model", "rules": "the host's rules", "unattended default": "the unattended default", ByTimeout: "nobody, in time, so the question's timeout"}[res.By]
 		said := fmt.Sprintf("%sthe workflow, not the assistant, asked %q (step %q). %s answered %s", recordPrefix, q.Question, q.Step, cmp.Or(who, res.By), res.Outcome)
 		if res.Reason != "" {
 			said += fmt.Sprintf(", giving the reason %q", res.Reason)
@@ -271,7 +271,7 @@ func notice(m *openresponses.Message) bool {
 	prefixes := []string{beginPrefix, nudgePrefix}
 	switch m.Role {
 	case openresponses.RoleDeveloper:
-		prefixes = []string{invocationPrefix, abandonText}
+		prefixes = []string{invocationPrefix, abandonText, overridePrefix}
 	case openresponses.RoleUser:
 	default:
 		return false

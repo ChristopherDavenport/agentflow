@@ -340,7 +340,7 @@ func TestAChildIsTheProgramsToMake(t *testing.T) {
 	g := keeper()
 	m := &fakeModel{outcomes: []string{OK}}
 	kids := newKin(m, "fake")
-	a := nestedAgent(t, g, m, nil, kids.option())
+	a := nestedAgent(t, g, m, []agenttool.Tool{flip(new(int))}, kids.option())
 	end := start(t, a)
 	// The call holding the child cannot be let go with a result of
 	// someone else's making before its child has run.

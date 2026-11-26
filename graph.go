@@ -29,6 +29,7 @@ var (
 	// <workflow>:<step>, and one made to judge a step <workflow>:<step>:judge.
 	derivedName = regexp.MustCompile(`^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*:[A-Za-z0-9_-]{1,20}(:judge)?$`)
 	childName   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,40}$`)
+	skillName   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 	flowName    = regexp.MustCompile(`^([A-Za-z0-9_-]+|\./[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*\.md)$`)
 	nodeID      = regexp.MustCompile(`^[A-Za-z0-9_-]{1,20}$`)
 )
@@ -134,6 +135,10 @@ type ScriptCall struct {
 type Node struct {
 	ID   string
 	Kind Kind
+	// Description says what the step is for, to people and the fronts
+	// that show them a run. No model is sent it: it is in the definition,
+	// which only the program reads, and nowhere else.
+	Description string `json:",omitempty"`
 
 	// A Run node runs Script, or calls Tool with Args, or calls the
 	// workflow Flow names. A nil Args is {}.
@@ -182,6 +187,22 @@ type Node struct {
 	// Policy limits what a model step's tools may touch. On a call, it
 	// limits every model step and judge of the runs it calls.
 	Policy *Policy `json:",omitempty"`
+	// Skills are skills a model step names, whose instructions are added
+	// to the step's. Loading reads each one's text into the definition,
+	// so its digest pins what the model is told.
+	Skills []StepSkill `json:",omitempty"`
+	// Files are what a model step is given as context when it opens, in
+	// order: workspace paths, literal or referred to, and ./<path> files of
+	// the skill, whose texts loading reads into SkillFiles, by path within
+	// the skill, so the digest pins them.
+	Files      []Value           `json:",omitempty"`
+	SkillFiles map[string]string `json:",omitempty"`
+	// Reads and Edits name the documents a model step may read, and read
+	// and edit. Writes, on a script or tool step, sets documents from
+	// members of its result's data, by document.
+	Reads  []string          `json:",omitempty"`
+	Edits  []string          `json:",omitempty"`
+	Writes map[string]string `json:",omitempty"`
 	// Verdict says the node is a judge's: it ends with flow_judge, giving
 	// a reason. Only a workflow agentflow makes to judge a step has one.
 	Verdict bool `json:",omitempty"`
@@ -203,6 +224,14 @@ type Node struct {
 	Unattended string
 	// UnattendedData is the data that goes with it.
 	UnattendedData any
+
+	// A Person node may offer Choices computed from an earlier result,
+	// take an answer in a person's own words as Text, and, with a
+	// Timeout, take OnTimeout and its data when nobody answers in time.
+	Choices       *Choices  `json:",omitempty"`
+	Text          *FreeText `json:",omitempty"`
+	OnTimeout     string    `json:",omitempty"`
+	OnTimeoutData any       `json:",omitempty"`
 	// MaxVisits bounds how often the node runs. 0 means
 	// [DefaultLoopVisits] for a node a loop can come back to, and once
 	// for any other.
@@ -214,6 +243,17 @@ type Node struct {
 	// default to, which [Graph.Validate] works out: with no Context, the
 	// step runs in a child.
 	otherModel bool
+	// pick is the schema of one of a Person node's choices, as the list
+	// they come from declares it, nil when unknown.
+	pick *agenttool.Schema
+}
+
+// StepSkill is a skill a model step names, with the instructions loading
+// read from it. A skill named here grants nothing: its allowed-tools are
+// not the step's, which a workflow cannot widen.
+type StepSkill struct {
+	Name         string
+	Instructions string `json:",omitempty"`
 }
 
 // callee is a Flow node's contract, as [Graph.Link] reads it from the
@@ -270,7 +310,7 @@ func (n *Node) schemas() map[string]*agenttool.Schema {
 		out[Stuck] = stuckSchema
 		return out
 	}
-	return n.Data
+	return n.asked(n.Data)
 }
 
 // ending is the workflow outcome a node's outcome ends with, when the
@@ -284,8 +324,10 @@ func (n *Node) ending(outcome string) string {
 
 // Graph is a workflow. The first node is where it starts.
 type Graph struct {
-	Name  string
-	Nodes []Node
+	Name string
+	// Description says what the workflow is for, as a step's does.
+	Description string `json:",omitempty"`
+	Nodes       []Node
 	// Inputs is the schema of what an invocation carries.
 	Inputs *agenttool.Schema
 	// Outputs is what the finished workflow gives back, whatever its
@@ -302,6 +344,12 @@ type Graph struct {
 	// enter, across every run it calls. 0 means [DefaultMaxSteps]; a
 	// host's [MaxSteps] may lower it.
 	MaxSteps int `json:",omitempty"`
+	// OnAbort names the step a cleanup path starts at, which runs when a
+	// run is abandoned, before its end is written. Its steps are script,
+	// tool and person steps that no other path reaches, and it has no loop.
+	OnAbort string `json:",omitempty"`
+	// Documents are the workflow's named markdown documents, by name.
+	Documents map[string]Document `json:",omitempty"`
 	// Model and Thinking are what the workflow's model steps ask for when
 	// they do not say.
 	Model    string `json:",omitempty"`
@@ -326,8 +374,8 @@ func (g *Graph) outputs(outcome string) map[string]Value {
 // Outcomes are the ways the workflow can end: the ends its steps reach.
 func (g *Graph) Outcomes() []string {
 	var out []string
-	for i := range g.Nodes {
-		n := &g.Nodes[i]
+	// A cleanup path's ends end no workflow: the run is abandoned.
+	for _, n := range g.mainNodes() {
 		for _, outcome := range n.outcomes() {
 			if n.Next[outcome] != "" {
 				continue
@@ -339,6 +387,18 @@ func (g *Graph) Outcomes() []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// Describe is the description of step id, or of the workflow for "".
+// It is for people: no model is sent it.
+func (g *Graph) Describe(id string) string {
+	if id == "" {
+		return g.Description
+	}
+	if n := g.node(id); n != nil {
+		return n.Description
+	}
+	return ""
 }
 
 func (g *Graph) node(id string) *Node {
@@ -371,6 +431,15 @@ func (g *Graph) Validate() error {
 	}
 	if len(g.Nodes) == 0 {
 		bad("graph has no nodes")
+	}
+	// What a pick is, as the list it comes from declares it.
+	for i := range g.Nodes {
+		if n := &g.Nodes[i]; n.Choices != nil {
+			n.pick = nil
+			if s := g.valueSchema(n.Choices.From); s != nil && s.Type == "array" {
+				n.pick = s.Items
+			}
+		}
 	}
 	seen := map[string]bool{}
 	for i := range g.Nodes {
@@ -426,6 +495,12 @@ func (g *Graph) Validate() error {
 		n.otherModel = n.Kind == Agent && n.Model != "" && n.Model != g.Model
 		errs = append(errs, n.checkChild()...)
 		errs = append(errs, n.checkSettings()...)
+		errs = append(errs, n.checkFiles()...)
+		for _, v := range n.Files {
+			if s := g.refSchema(v.From); v.From != "" && s != nil && s.Type != "" && s.Type != "string" && (s.Type != "array" || s.Items != nil && s.Items.Type != "" && s.Items.Type != "string") {
+				bad("node %q: file %s is not a path, nor a list of paths", n.ID, v.From)
+			}
+		}
 		if j := n.Judge; j != nil {
 			switch {
 			case n.Kind != Person:
@@ -441,7 +516,7 @@ func (g *Graph) Validate() error {
 			}
 			for _, outcome := range j.Outcomes {
 				if !slices.Contains(n.outcomes(), outcome) {
-					bad("node %q: judge: undeclared outcome %q", n.ID, outcome)
+					bad("node %q: judge: undeclared outcome %q%s", n.ID, outcome, suggest(outcome, n.outcomes()))
 				}
 			}
 			for _, tool := range j.Tools {
@@ -455,16 +530,16 @@ func (g *Graph) Validate() error {
 		unknown := n.Flow != "" && n.call == nil && len(n.Outcomes) == 0
 		for outcome, next := range n.Next {
 			if !unknown && !slices.Contains(n.outcomes(), outcome) {
-				bad("node %q: edge for undeclared outcome %q", n.ID, outcome)
+				bad("node %q: edge for undeclared outcome %q%s", n.ID, outcome, suggest(outcome, n.outcomes()))
 			}
 			if g.node(next) == nil {
-				bad("node %q: edge to unknown node %q", n.ID, next)
+				bad("node %q: edge to unknown node %q%s", n.ID, next, suggest(next, g.nodeIDs()))
 			}
 		}
 		for outcome, end := range n.Ends {
 			switch {
 			case !unknown && !slices.Contains(n.outcomes(), outcome):
-				bad("node %q: end for undeclared outcome %q", n.ID, outcome)
+				bad("node %q: end for undeclared outcome %q%s", n.ID, outcome, suggest(outcome, n.outcomes()))
 			case n.Next[outcome] != "":
 				bad("node %q: outcome %q both goes on and ends", n.ID, outcome)
 			case !nodeID.MatchString(end) || g.node(end) != nil:
@@ -472,18 +547,19 @@ func (g *Graph) Validate() error {
 			}
 		}
 		if n.Unattended != "" && (n.Kind != Person || !slices.Contains(n.outcomes(), n.Unattended)) {
-			bad("node %q: unattended must be an outcome of a person node", n.ID)
+			bad("node %q: unattended must be an outcome of a person node%s", n.ID, suggest(n.Unattended, n.outcomes()))
 		}
 		for outcome := range n.Data {
 			if !slices.Contains(n.outcomes(), outcome) {
-				bad("node %q: data for undeclared outcome %q", n.ID, outcome)
+				bad("node %q: data for undeclared outcome %q%s", n.ID, outcome, suggest(outcome, n.outcomes()))
 			}
 		}
 		if n.Unattended != "" {
-			if err := checkData(n.Data[n.Unattended], n.UnattendedData); err != nil {
+			if err := checkData(n.schemas()[n.Unattended], n.UnattendedData); err != nil {
 				bad("node %q: unattended data: %v", n.ID, err)
 			}
 		}
+		errs = append(errs, g.checkAsk(n)...)
 		if n.MaxVisits < 0 || n.MaxVisits > 99 {
 			bad("node %q: max visits must be 0 to 99", n.ID)
 		}
@@ -496,13 +572,15 @@ func (g *Graph) Validate() error {
 		for outcome, outputs := range g.OutputsBy {
 			switch {
 			case !slices.Contains(outcomes, outcome):
-				bad("outputs for %q, which is not an outcome of the workflow: want one of %s", outcome, strings.Join(outcomes, ", "))
+				bad("outputs for %q, which is not an outcome of the workflow%s: want one of %s", outcome, suggest(outcome, outcomes), strings.Join(outcomes, ", "))
 			case outcome == Failed && len(outputs) > 0:
 				bad("outputs for %q: a workflow that fails gives nothing back", outcome)
 			}
 		}
 	}
 	errs = append(errs, g.checkKept()...)
+	errs = append(errs, g.checkDocuments()...)
+	errs = append(errs, g.checkCleanup()...)
 	if len(g.Nodes) > 0 {
 		errs = append(errs, g.checkRefs()...)
 	}

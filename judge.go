@@ -146,10 +146,16 @@ func (f *flow) delegate() error {
 			}
 			g := closure[workflow]
 			if g == nil {
-				return fmt.Errorf("agentflow: delegate: step %q: no workflow %q", id, workflow)
+				return fmt.Errorf("agentflow: delegate: step %q: no workflow %q%s", id, workflow, suggest(workflow, slices.Collect(maps.Keys(closure))))
 			}
 			if n := g.node(step); n == nil || n.Judge == nil {
-				return fmt.Errorf("agentflow: delegate: step %q cannot be judged", id)
+				var judged []string
+				for _, m := range g.Nodes {
+					if m.Judge != nil {
+						judged = append(judged, m.ID)
+					}
+				}
+				return fmt.Errorf("agentflow: delegate: step %q cannot be judged%s", id, suggest(step, judged))
 			}
 			f.modes[modeKey(workflow, step)] = d.mode
 		}
@@ -323,9 +329,10 @@ func (f *flow) judgeTool() agenttool.Tool {
 			_ = decode(call.Args, &p)
 			out = struct {
 				Verdict
-				Entries int `json:"entries,omitempty"`
-				Granted int `json:"granted,omitempty"`
-			}{v, p.Entries, p.Granted}
+				Entries int      `json:"entries,omitempty"`
+				Granted int      `json:"granted,omitempty"`
+				Summary *Summary `json:"summary,omitempty"`
+			}{v, p.Entries, p.Granted, p.Summary}
 		}
 		b, err := json.Marshal(out)
 		if err != nil {

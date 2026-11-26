@@ -191,18 +191,26 @@ and be none. Unknown keys are errors.
 
 | Key | Nodes | Meaning |
 |---|---|---|
+| `description` | all | what the step is for, for people and fronts; no model is sent it. The frontmatter's is the workflow's (RFC 0005, section 15) |
 | `run` | program | script path within the skill |
 | `tool`, `args` | program | a tool to call instead, with fixed arguments |
 | `flow` | program | a workflow to call instead: a skill's name, or `./<path>.md` in this skill; see [RFC 0002](0002-nesting-and-children.md) |
 | `with` | all | the step's inputs, by name |
 | `outputs` | all | schema of the step's data, by outcome |
 | `tools` | model | tools the model may call; none if absent |
+| `skills` | model | skills whose instructions are added to the step's, read and pinned at load; they grant no tools (RFC 0005, section 16) |
 | `context` | model, call | `session` or `fresh`, a child session; see [Context](#context-spiked). `session` is the default, except for a model step that asks for another model than its workflow's, which defaults to `fresh` (RFC 0003, section 14) |
 | `dir`, `instructions` | fresh model, fresh call | the child's working directory, and a file of the skill added to its instructions (RFC 0002, section 10) |
 | `model`, `thinking` | model; `model` also a fresh call | the model a step asks and how hard it reasons; the frontmatter's `model` and `thinking` are the workflow's defaults (RFC 0003, section 14) |
-| `timeout` | script, tool, model | a duration past which the step fails and asks to be retried (RFC 0003, section 13) |
+| `timeout` | script, tool, model, person | a duration past which the step fails and asks to be retried (RFC 0003, section 13); on a person step, past which the question takes `on_timeout` (RFC 0004, section 26) |
+| `on_timeout` | person | the outcome, and data, a question takes when its timeout passes unanswered (RFC 0004, section 26) |
+| `choices` | person | values an answer picks from, one or many, resolved from an earlier result into the question (RFC 0004, section 24) |
+| `text` | person | the outcome an answer in the person's own words takes, the words in its data (RFC 0004, section 25) |
 | `policy` | model, call | `allow` and `deny` rules in agentpolicy's grammar, which can only narrow what the host permits; on a call, for every model step it calls (RFC 0003, section 17) |
 | `child` | fresh model | a child kept across the visits and steps that name it (RFC 0002, section 11) |
+| `on_abort` | frontmatter | the step a cleanup path starts at, run when the run is abandoned (RFC 0006, section 30) |
+| `files` | model | files given to the step as context when it opens, in order: workspace paths, literal or referred to, and `./` files of the skill, read and pinned at load (RFC 0006, section 34) |
+| `documents` | model; script, tool | on a model step, the documents it may `read` and `edit`; on a script or tool step, those it `write`s from members of its result. The frontmatter's `documents` declares them (RFC 0006, section 29) |
 | `outcomes` | all | ways the node can end; `[ok]` if absent |
 | `unattended` | person | outcome, and data, taken when nobody can be asked |
 | `judge` | person | that a model may answer: `criteria`, `outcomes` it may choose, `tools`, `max_returns`, `policy` |
@@ -234,7 +242,8 @@ with:
 
 A value is a literal or exactly one `${{ }}` expression: a reference, to
 `inputs.<name>` or `steps.<id>.outputs`, optionally followed by member
-names, or one of two forms over references. There are no operators, no
+names, or to `documents.<name>` (RFC 0006, section 29), or one of two
+forms over references. There are no operators, no
 interpolation, no other functions and no `if:`: a decision is a step with
 a named outcome, so every branch is in the diagram. In Go these are
 `From`, `Latest` and `Optional`.
@@ -283,6 +292,10 @@ not share a stream.
 
 Large data belongs in a workspace file, passed as its path and a hash.
 
+A script reports progress while it runs by appending lines to
+`$AGENTFLOW_PROGRESS`; each is a progress update of its call and changes
+nothing of its result (RFC 0005, section 28).
+
 Scripts run in an `agentworkspace.Workspace` (package `script`), as the
 tool `run_script`. Only the program calls it: a model's call, and a tool's
 nested one, are refused.
@@ -313,8 +326,12 @@ bring at least one of its references. The references of `latest` and
 `optional` must each be able to exist: a declared step or input, and a
 member some outcome declares, so a misspelt name is not read as absent. A loop that can re-run a step
 with another outcome loses the first outcome's members. A workflow's
-`outputs` are checked at every way out. Whether `with` covers what a
-tool requires is not yet checked.
+`outputs` are checked at every way out. `Apply` holds a tool step's
+arguments, its `with` merged over its `args`, to the parameters of the
+tool the config offers (RFC 0006, section 35). A tool a step names must be one the
+config offers, where the config lists its tools, and an error about any
+unknown name suggests the one that was likely meant (RFC 0005, section
+33).
 
 A Go builder constructs the same graph, and the graph can be written
 back out as `WORKFLOW.md`.
@@ -354,8 +371,9 @@ A transcript with no instance starts one. Another begins only at an
 invocation, a developer message reading `agentflow: start <name>`
 (`Graph.Invocation`), which a model cannot write. It also abandons an
 unfinished instance. After an instance has finished and said so, a plain
-prompt is a conversation with the model, with its tools. An instance
-that failed stays failed until an invocation.
+prompt is a conversation with the model, with its tools; so it is after
+an operator abandons the run nobody called (RFC 0006, section 31). An
+instance that failed stays failed until an invocation.
 
 ### Resuming a session (spiked with `History`)
 
@@ -383,13 +401,14 @@ step's input taken from the record.
 ### Leaving, and reading it back (spiked)
 
 An instance's end is written, not inferred. The program calls `flow_end`
-with the instance, a status, a reason, the path taken and the outputs:
+with the instance, a status, a reason, the path taken, the outputs and a
+summary of its time, steps and usage (RFC 0006, section 32):
 
 | Status | When |
 |---|---|
 | `done` | the last step finished; the report follows |
 | `failed` | a step failed with nobody to retry it, a person chose `stop`, a bound was reached with nobody to grant more (the ending's `limit` names it), or the outputs could not be made. The run then ends in the same error as before |
-| `abandoned` | another instance was asked for over an unfinished one; written before the new `flow_start` |
+| `abandoned` | another instance was asked for over an unfinished one; written before the new `flow_start`, after the run's cleanup path, if it has one (RFC 0006, section 30) |
 
 An instance with no `flow_end` is `running`: waiting, stalled,
 interrupted, or left by a host that never prompted again. A run stopped
@@ -531,7 +550,9 @@ ends `input_required`. `Answer` approves it with the answer added to the
 arguments, and the tool returns it. The record reads `hold by policy`,
 then `proceed by human`. Supplying the output directly would be recorded
 as `reject`, which is what the format says of any output a caller writes
-for a call that did not run.
+for a call that did not run. An answer is held to the question as it was
+asked: to the choices it recorded, the words it takes, and its deadline,
+past which `Answer` refuses with `ErrExpired` (RFC 0004).
 
 ### A model that stops (spiked)
 
@@ -552,7 +573,9 @@ When a question is reached, the host tries in order:
 2. a judge the host let decide, marked `by: ai` and decided `by: policy`
    (spiked)
 3. unattended, the node's `unattended` outcome, marked `by` (spiked)
-4. waiting: the run ends `input_required` (spiked)
+4. a question's timeout, once its recorded deadline has passed, marked
+   `by: timeout` and decided `by: policy` (spiked; RFC 0004, section 26)
+5. waiting: the run ends `input_required` (spiked)
 
 The conversation that did the work never answers on a person's behalf.
 
@@ -922,7 +945,8 @@ that competes with the finish instruction.
    so a policy that asks by default asks about them. A host must allow
    them.
 6. **Cost and eval tools** see `agentflow/` responses with no usage.
-   They should skip them, not report an unpriced model.
+   They should skip them, not report an unpriced model. A run's own end
+   now sums up what its model requests used (RFC 0006, section 32).
 7. **Run directories** show in a repository's status while a script runs.
 8. **Gates.** A `check` script that rejects a model's result before the
    step finishes.

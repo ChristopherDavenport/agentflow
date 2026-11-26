@@ -13,6 +13,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -114,23 +116,47 @@ func split(lines []string, offset int) (preamble section, sections []section, er
 }
 
 type frontmatter struct {
-	Inputs   yaml.Node `yaml:"inputs"`
-	Outputs  yaml.Node `yaml:"outputs"`
-	MaxDepth int       `yaml:"max_depth"`
-	MaxSteps int       `yaml:"max_steps"`
-	Model    string    `yaml:"model"`
-	Thinking string    `yaml:"thinking"`
+	Description string    `yaml:"description"`
+	Inputs      yaml.Node `yaml:"inputs"`
+	Outputs     yaml.Node `yaml:"outputs"`
+	MaxDepth    int       `yaml:"max_depth"`
+	MaxSteps    int       `yaml:"max_steps"`
+	Model       string    `yaml:"model"`
+	Thinking    string    `yaml:"thinking"`
+	// Documents are the workflow's named markdown documents.
+	Documents map[string]*documentSpec `yaml:"documents"`
+	// OnAbort names the step the cleanup path starts at.
+	OnAbort string `yaml:"on_abort"`
+}
+
+// documentSpec is how a document starts: from a file of the skill, or as
+// an input; empty with neither.
+type documentSpec struct {
+	From  string `yaml:"from"`
+	Input string `yaml:"input"`
+}
+
+// stepDocuments are the documents a step works with: those a model step
+// reads and edits, and those a script or tool step writes from members of
+// its result.
+type stepDocuments struct {
+	Read  []string          `yaml:"read"`
+	Edit  []string          `yaml:"edit"`
+	Write map[string]string `yaml:"write"`
 }
 
 type settings struct {
-	Run     string         `yaml:"run"`
-	Flow    string         `yaml:"flow"`
-	Tool    string         `yaml:"tool"`
-	Args    map[string]any `yaml:"args"`
-	With    yaml.Node      `yaml:"with"`
-	Outputs yaml.Node      `yaml:"outputs"`
-	Tools   []string       `yaml:"tools"`
-	Context string         `yaml:"context"`
+	// Description is for people, and no model is sent it.
+	Description string         `yaml:"description"`
+	Run         string         `yaml:"run"`
+	Flow        string         `yaml:"flow"`
+	Tool        string         `yaml:"tool"`
+	Args        map[string]any `yaml:"args"`
+	With        yaml.Node      `yaml:"with"`
+	Outputs     yaml.Node      `yaml:"outputs"`
+	Tools       []string       `yaml:"tools"`
+	Skills      []string       `yaml:"skills"`
+	Context     string         `yaml:"context"`
 	// A child's own settings, with context: fresh.
 	Dir          string `yaml:"dir"`
 	Model        string `yaml:"model"`
@@ -150,10 +176,25 @@ type settings struct {
 	Outcomes   []string  `yaml:"outcomes"`
 	Unattended yaml.Node `yaml:"unattended"`
 	MaxVisits  int       `yaml:"max_visits"`
+	// The documents the step works with.
+	Documents *stepDocuments `yaml:"documents"`
+	// The files a model step is given as context.
+	Files yaml.Node `yaml:"files"`
+	// A question's own settings.
+	Choices   yaml.Node `yaml:"choices"`
+	Text      yaml.Node `yaml:"text"`
+	OnTimeout yaml.Node `yaml:"on_timeout"`
 }
 
 // strict decodes one YAML document, refusing keys it does not know.
 func strict(src []byte, v any) error {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(src, &doc); err != nil {
+		return err
+	}
+	if err := knownKeys(&doc, reflect.TypeOf(v)); err != nil {
+		return err
+	}
 	d := yaml.NewDecoder(bytes.NewReader(src))
 	d.KnownFields(true)
 	if err := d.Decode(v); err != nil && !errors.Is(err, io.EOF) {
@@ -183,6 +224,16 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 			return nil, fmt.Errorf("workflow: inputs: %w", err)
 		}
 		outputs, g.MaxDepth, g.MaxSteps, g.Model, g.Thinking = fm.Outputs, fm.MaxDepth, fm.MaxSteps, fm.Model, fm.Thinking
+		g.Description, g.OnAbort = strings.TrimSpace(fm.Description), fm.OnAbort
+		for name, d := range fm.Documents {
+			if g.Documents == nil {
+				g.Documents = map[string]agentflow.Document{}
+			}
+			if d == nil {
+				d = &documentSpec{}
+			}
+			g.Documents[name] = agentflow.Document{From: d.From, Input: d.Input}
+		}
 		offset = end + 2
 		lines = lines[offset:]
 	}
@@ -214,7 +265,7 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 		i, ok := index[s.id]
 		switch {
 		case !ok:
-			return nil, fmt.Errorf("workflow: line %d: section %q is not a node of the diagram", s.line, s.id)
+			return nil, fmt.Errorf("workflow: line %d: section %q is not a node of the diagram%s", s.line, s.id, agentflow.Suggest(s.id, slices.Collect(maps.Keys(index))))
 		case seen[s.id]:
 			return nil, fmt.Errorf("workflow: line %d: section %q appears twice", s.line, s.id)
 		}
@@ -240,7 +291,7 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 			fallthrough
 		default:
 			if !slices.Contains(outcomes, e.outcome) {
-				return nil, fmt.Errorf("workflow: node %q: edge for undeclared outcome %q", e.from, e.outcome)
+				return nil, fmt.Errorf("workflow: node %q: edge for undeclared outcome %q%s", e.from, e.outcome, agentflow.Suggest(e.outcome, outcomes))
 			}
 		}
 		// An end's name is the outcome the workflow ends with. One named
@@ -406,6 +457,7 @@ func node(n *agentflow.Node, s section) error {
 		prose = append(prose, fence)
 	}
 	n.Prompt = strings.TrimSpace(strings.Join(prose, "\n"))
+	n.Description = strings.TrimSpace(set.Description)
 
 	n.Script, n.Tool, n.Tools, n.Outcomes, n.MaxVisits, n.Flow = set.Run, set.Tool, set.Tools, set.Outcomes, set.MaxVisits, set.Flow
 	if set.Args != nil {
@@ -424,6 +476,14 @@ func node(n *agentflow.Node, s section) error {
 	n.Context = set.Context
 	n.Dir, n.Model, n.InstructionsFile, n.Child = set.Dir, set.Model, set.Instructions, set.Child
 	n.Thinking, n.Policy = set.Thinking, set.Policy.policy()
+	files, err := fileValues(&set.Files)
+	if err != nil {
+		return fmt.Errorf("files: %w", err)
+	}
+	n.Files = files
+	if d := set.Documents; d != nil {
+		n.Reads, n.Edits, n.Writes = d.Read, d.Edit, d.Write
+	}
 	if set.Timeout != "" {
 		d, err := time.ParseDuration(set.Timeout)
 		if err != nil || d <= 0 {
@@ -437,7 +497,12 @@ func node(n *agentflow.Node, s section) error {
 	if n.Kind != agentflow.Agent && n.Tools != nil {
 		return errors.New("only a model node has tools")
 	}
-	var err error
+	if set.Skills != nil && n.Kind != agentflow.Agent {
+		return errors.New("only a model node names skills")
+	}
+	for _, name := range set.Skills {
+		n.Skills = append(n.Skills, agentflow.StepSkill{Name: name})
+	}
 	if n.With, err = values(&set.With); err != nil {
 		return fmt.Errorf("with: %w", err)
 	}
@@ -453,7 +518,7 @@ func node(n *agentflow.Node, s section) error {
 		if schema != nil {
 			n.Data[outcome] = schema
 		} else if !slices.Contains(n.Outcomes, outcome) && outcome != agentflow.OK {
-			return fmt.Errorf("outcome %q is not declared", outcome)
+			return fmt.Errorf("outcome %q is not declared%s", outcome, agentflow.Suggest(outcome, n.Outcomes))
 		}
 		return nil
 	}); err != nil {
@@ -461,6 +526,9 @@ func node(n *agentflow.Node, s section) error {
 	}
 	if len(n.Data) == 0 {
 		n.Data = nil
+	}
+	if err := question(n, &set); err != nil {
+		return err
 	}
 	switch u := &set.Unattended; {
 	case u.IsZero():
@@ -476,7 +544,98 @@ func node(n *agentflow.Node, s section) error {
 			case "data":
 				return v.Decode(&n.UnattendedData)
 			}
-			return fmt.Errorf("unattended: unknown key %q", key)
+			return unknownKey("unattended", key, "outcome", "data")
+		})
+	}
+	return nil
+}
+
+// question reads a person node's choices, free text and timeout outcome.
+func question(n *agentflow.Node, set *settings) error {
+	only := func(key string) error { return fmt.Errorf("only a person node has %s", key) }
+	if c := &set.Choices; !c.IsZero() {
+		if n.Kind != agentflow.Person {
+			return only("choices")
+		}
+		if c.Kind != yaml.MappingNode {
+			return errors.New("choices: want from, and select, outcome or as")
+		}
+		n.Choices = &agentflow.Choices{}
+		from := &yaml.Node{Kind: yaml.MappingNode}
+		if err := pairs(c, func(key string, v *yaml.Node) error {
+			switch key {
+			case "from":
+				from.Content = append(from.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "from"}, v)
+				return nil
+			case "select":
+				var sel string
+				if err := v.Decode(&sel); err != nil {
+					return err
+				}
+				switch sel {
+				case "one":
+				case "many":
+					n.Choices.Many = true
+				default:
+					return fmt.Errorf("choices: select %q: want one or many", sel)
+				}
+				return nil
+			case "outcome":
+				return v.Decode(&n.Choices.Outcome)
+			case "as":
+				return v.Decode(&n.Choices.As)
+			}
+			return unknownKey("choices", key, "from", "select", "outcome", "as")
+		}); err != nil {
+			return err
+		}
+		values, err := values(from)
+		if err != nil {
+			return fmt.Errorf("choices: %w", err)
+		}
+		n.Choices.From = values["from"]
+		// A question with one outcome has only that one for a pick to be.
+		if n.Choices.Outcome == "" && len(n.Outcomes) <= 1 {
+			n.Choices.Outcome = agentflow.OK
+			if len(n.Outcomes) == 1 {
+				n.Choices.Outcome = n.Outcomes[0]
+			}
+		}
+	}
+	if t := &set.Text; !t.IsZero() {
+		if n.Kind != agentflow.Person {
+			return only("text")
+		}
+		n.Text = &agentflow.FreeText{}
+		if t.Kind == yaml.ScalarNode {
+			n.Text.Outcome = t.Value
+		} else if err := pairs(t, func(key string, v *yaml.Node) error {
+			switch key {
+			case "outcome":
+				return v.Decode(&n.Text.Outcome)
+			case "as":
+				return v.Decode(&n.Text.As)
+			}
+			return unknownKey("text", key, "outcome", "as")
+		}); err != nil {
+			return err
+		}
+	}
+	switch u := &set.OnTimeout; {
+	case u.IsZero():
+	case n.Kind != agentflow.Person:
+		return only("on_timeout")
+	case u.Kind == yaml.ScalarNode:
+		n.OnTimeout = u.Value
+	default:
+		return pairs(u, func(key string, v *yaml.Node) error {
+			switch key {
+			case "outcome":
+				return v.Decode(&n.OnTimeout)
+			case "data":
+				return v.Decode(&n.OnTimeoutData)
+			}
+			return unknownKey("on_timeout", key, "outcome", "data")
 		})
 	}
 	return nil
@@ -544,7 +703,7 @@ func (r *ruleSpec) UnmarshalYAML(n *yaml.Node) error {
 		case "note":
 			return v.Decode(&r.Note)
 		}
-		return fmt.Errorf("line %d: a rule has no key %q", v.Line, key)
+		return fmt.Errorf("line %d: a rule has no key %q%s", v.Line, key, agentflow.Suggest(key, []string{"rule", "note"}))
 	})
 }
 
@@ -705,9 +864,40 @@ func fieldSchema(n *yaml.Node) (s *agenttool.Schema, required bool, err error) {
 			}
 			return err
 		default:
-			return fmt.Errorf("unknown key %q", key)
+			return unknownKey("", key, "type", "required", "description", "enum", "items", "properties")
 		}
 		return nil
 	})
 	return s, required, err
+}
+
+// fileValues reads a model step's files: each a path, or a reference to
+// one or to a list of them.
+func fileValues(n *yaml.Node) ([]agentflow.Value, error) {
+	if n.IsZero() || n.Tag == "!!null" {
+		return nil, nil
+	}
+	if n.Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("line %d: want a list of paths", n.Line)
+	}
+	var out []agentflow.Value
+	for _, item := range n.Content {
+		var s string
+		if item.Kind != yaml.ScalarNode || item.Decode(&s) != nil || s == "" {
+			return nil, fmt.Errorf("line %d: a file is a path or a reference to one", item.Line)
+		}
+		v := agentflow.Literal(s)
+		if m := reference.FindStringSubmatch(s); m != nil {
+			v = agentflow.From(m[1])
+		} else if m := function.FindStringSubmatch(s); m != nil {
+			var err error
+			if v, err = call(m[1], m[2]); err != nil {
+				return nil, fmt.Errorf("line %d: %w", item.Line, err)
+			}
+		} else if hasReference(s) {
+			return nil, fmt.Errorf("line %d: a reference is the whole value, ${{ ... }}", item.Line)
+		}
+		out = append(out, v)
+	}
+	return out, nil
 }

@@ -276,7 +276,7 @@ func TestReferencesAreCheckedAtLoad(t *testing.T) {
 		{"valid", func(*agentflow.Graph) {}, ""},
 		{"later step", func(g *agentflow.Graph) { g.Nodes[0].With["x"] = agentflow.From("steps.tag.outputs") }, "without running"},
 		{"unknown step", func(g *agentflow.Graph) { g.Nodes[1].With["x"] = agentflow.From("steps.nope.outputs") }, "no step"},
-		{"unknown input", func(g *agentflow.Graph) { g.Nodes[0].With["pr"] = agentflow.From("inputs.repo") }, "not a required input"},
+		{"unknown input", func(g *agentflow.Graph) { g.Nodes[0].With["pr"] = agentflow.From("inputs.repo") }, "not an input of the workflow"},
 		{"field of another outcome", func(g *agentflow.Graph) { g.Nodes[4].Next["abort"] = "tag" }, "does not certainly produce"},
 		{"field never declared", func(g *agentflow.Graph) {
 			g.Nodes[5].With["name"] = agentflow.From("steps.confirm.outputs.tag")
@@ -492,5 +492,74 @@ func TestSubConfinesAWorkspaceToADirectory(t *testing.T) {
 		if _, err := script.Sub(ws, bad); err == nil {
 			t.Errorf("Sub(%q) was allowed", bad)
 		}
+	}
+}
+
+func TestAScriptReportsProgress(t *testing.T) {
+	ws := workspace(t, map[string]string{"long.sh": `printf '{"progress": 1, "total": 3, "message": "fetching"}\n' >> "$AGENTFLOW_PROGRESS"
+sleep 0.3
+printf 'compiling\n' >> "$AGENTFLOW_PROGRESS"
+printf '{"progress": 3, "total": 3}' >> "$AGENTFLOW_PROGRESS"
+echo '{"built": true}'`})
+	tool := script.New(ws, time.Minute)
+	var updates []agenttool.Result
+	res, err := tool.Execute(context.Background(), agenttool.Call{ID: "c1", Args: json.RawMessage(`{"run":"long.sh"}`),
+		OnUpdate: func(r agenttool.Result) { updates = append(updates, r) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []agenttool.ProgressInfo
+	var texts []string
+	for _, u := range updates {
+		got = append(got, u.Details.(agenttool.ProgressInfo))
+		texts = append(texts, u.Output.String())
+	}
+	want := []agenttool.ProgressInfo{{Progress: 1, Total: 3, Message: "fetching"}, {Message: "compiling"}, {Progress: 3, Total: 3}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("updates = %+v, want %+v", got, want)
+	}
+	if !reflect.DeepEqual(texts, []string{"1/3 fetching", "compiling", "3/3"}) {
+		t.Errorf("texts = %q", texts)
+	}
+	// The result is the script's, whatever it reported on the way.
+	if !strings.Contains(res.Output.String(), `"built":true`) {
+		t.Errorf("result = %s", res.Output.String())
+	}
+	// Nothing of it is left behind.
+	entries, err := fs.ReadDir(ws.FS(), ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".agentflow") {
+			t.Errorf("left %s", e.Name())
+		}
+	}
+}
+
+func TestAStepsProgressReachesTheLoop(t *testing.T) {
+	g := &agentflow.Graph{Name: "p", Nodes: []agentflow.Node{{ID: "build", Kind: agentflow.Run, Script: "build.sh"}}}
+	ws := workspace(t, map[string]string{"build.sh": `printf 'half\n' >> "$AGENTFLOW_PROGRESS"; echo '{"ok": true}'`})
+	cfg, err := agentflow.Apply(g, agentturn.Config{Model: &model{}, ModelName: "fake", Tools: []agenttool.Tool{script.New(ws, time.Minute)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := agentturn.New(cfg)
+	var seen []string
+	defer a.Subscribe(func(_ context.Context, ev agentturn.Event) error {
+		if u, ok := ev.(*agentturn.ToolUpdate); ok {
+			seen = append(seen, u.Name+": "+u.Partial.Output.String())
+		}
+		return nil
+	})()
+	if _, err := a.Prompt(context.Background(), openresponses.UserText("go")); err != nil {
+		t.Fatal(err)
+	}
+	st, err := g.Replay(a.State().Transcript)
+	if err != nil || len(st.Steps) != 1 {
+		t.Fatalf("steps = %+v, %v", st.Steps, err)
+	}
+	if !reflect.DeepEqual(seen, []string{agentflow.ScriptTool + ": half"}) {
+		t.Errorf("updates = %q", seen)
 	}
 }

@@ -56,8 +56,10 @@ func (v Value) refs() []string {
 func Literal(v any) Value { return Value{Literal: v} }
 
 type ref struct {
-	// step is empty for a reference to the workflow's inputs.
+	// step is empty for a reference to the workflow's inputs, and doc
+	// names a document for a reference to its text.
 	step string
+	doc  string
 	path []string
 }
 
@@ -69,8 +71,10 @@ func parseRef(s string) (ref, error) {
 		return ref{path: p[1:]}, nil
 	case p[0] == "steps" && len(p) > 2 && p[2] == "outputs":
 		return ref{step: p[1], path: p[3:]}, nil
+	case p[0] == "documents" && len(p) == 2:
+		return ref{doc: p[1]}, nil
 	}
-	return ref{}, fmt.Errorf("invalid reference %q: want inputs.<name> or steps.<id>.outputs", s)
+	return ref{}, fmt.Errorf("invalid reference %q: want inputs.<name>, steps.<id>.outputs or documents.<name>", s)
 }
 
 // decode reads JSON keeping numbers as written.
@@ -151,6 +155,13 @@ func (st State) lookup(path string) (any, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	if r.doc != "" {
+		text, ok := st.Documents[r.doc]
+		if !ok {
+			return nil, 0, fmt.Errorf("%s: no document %q", path, r.doc)
+		}
+		return text, st.docAt[r.doc] - 1, nil
+	}
 	cur, at := st.Inputs, -1
 	if r.step != "" {
 		at = len(st.Steps) - 1
@@ -219,6 +230,11 @@ func (f facts) after(n *Node, outcome string) facts {
 func (g *Graph) checkRefs() []error {
 	// A node with no entry has not been reached by the analysis.
 	in := map[string]facts{g.Nodes[0].ID: {}}
+	// A cleanup path starts with nothing certain but the inputs: a run may
+	// be abandoned anywhere.
+	if c := g.node(g.OnAbort); c != nil && c != &g.Nodes[0] {
+		in[c.ID] = facts{}
+	}
 	for changed := true; changed; {
 		changed = false
 		for i := range g.Nodes {
@@ -256,8 +272,17 @@ func (g *Graph) checkRefs() []error {
 		bad := func(format string, args ...any) {
 			errs = append(errs, fmt.Errorf("agentflow: %s: %s: "+format, append([]any{where, v.From}, args...)...))
 		}
+		if r.doc != "" {
+			if _, ok := g.Documents[r.doc]; !ok {
+				bad("no document %q%s", r.doc, suggest(r.doc, g.documentNames()))
+			}
+			return
+		}
 		if r.step == "" {
-			if g.Inputs == nil || !slices.Contains(g.Inputs.Required, r.path[0]) {
+			switch {
+			case g.Inputs == nil || !declares(g.Inputs, r.path[0]):
+				bad("not an input of the workflow%s", suggest(r.path[0], memberNames(g.Inputs)))
+			case !slices.Contains(g.Inputs.Required, r.path[0]):
 				bad("not a required input of the workflow")
 			}
 			return
@@ -265,7 +290,7 @@ func (g *Graph) checkRefs() []error {
 		from := g.node(r.step)
 		switch {
 		case from == nil:
-			bad("no step %q", r.step)
+			bad("no step %q%s", r.step, suggest(r.step, g.nodeIDs()))
 		case !have[r.step]:
 			bad("some path gets here without running %q", r.step)
 		case len(r.path) > 0 && len(from.schemas()) > 0 && !have[r.step+"."+r.path[0]]:
@@ -278,13 +303,21 @@ func (g *Graph) checkRefs() []error {
 		if !ok {
 			continue
 		}
+		if c := n.Choices; c != nil && plain(c.From) {
+			use("node "+n.ID+": choices", c.From, at)
+		}
 		for _, name := range slices.Sorted(maps.Keys(n.With)) {
 			if v := n.With[name]; plain(v) {
 				use("node "+n.ID, v, at)
 			}
 		}
+		for _, v := range n.Files {
+			if plain(v) {
+				use("node "+n.ID+": files", v, at)
+			}
+		}
 		for _, outcome := range n.outcomes() {
-			if n.Next[outcome] != "" {
+			if n.Next[outcome] != "" || g.cleans(n.ID) {
 				continue
 			}
 			outputs := g.outputs(n.ending(outcome))
@@ -341,6 +374,16 @@ func (g *Graph) checkAlternatives() []error {
 				return !g.reached(refs)[n.ID][0]
 			})
 		}
+		for _, v := range n.Files {
+			check("node "+n.ID+": files", v, func(refs []ref) bool {
+				return !g.reached(refs)[n.ID][0]
+			})
+		}
+		if c := n.Choices; c != nil {
+			check("node "+n.ID+": choices", c.From, func(refs []ref) bool {
+				return !g.reached(refs)[n.ID][0]
+			})
+		}
 	}
 	byOutcome := map[string]map[string]Value{"": g.Outputs}
 	if g.OutputsBy != nil {
@@ -358,7 +401,7 @@ func (g *Graph) checkAlternatives() []error {
 				for i := range g.Nodes {
 					n := &g.Nodes[i]
 					for _, outcome := range n.outcomes() {
-						if n.Next[outcome] != "" || end != "" && n.ending(outcome) != end {
+						if n.Next[outcome] != "" || end != "" && n.ending(outcome) != end || g.cleans(n.ID) {
 							continue
 						}
 						for have := range at[n.ID] {
@@ -378,15 +421,21 @@ func (g *Graph) checkAlternatives() []error {
 // possible says r could have a value at all, which catches a misspelt
 // name that an optional reference would otherwise swallow.
 func (g *Graph) possible(r ref) error {
+	if r.doc != "" {
+		if _, ok := g.Documents[r.doc]; !ok {
+			return fmt.Errorf("no document %q%s", r.doc, suggest(r.doc, g.documentNames()))
+		}
+		return nil
+	}
 	if r.step == "" {
 		if g.Inputs == nil || !declares(g.Inputs, r.path[0]) {
-			return errors.New("not an input of the workflow")
+			return fmt.Errorf("not an input of the workflow%s", suggest(r.path[0], memberNames(g.Inputs)))
 		}
 		return nil
 	}
 	n := g.node(r.step)
 	if n == nil {
-		return fmt.Errorf("no step %q", r.step)
+		return fmt.Errorf("no step %q%s", r.step, suggest(r.step, g.nodeIDs()))
 	}
 	if len(r.path) == 0 {
 		return nil
@@ -396,7 +445,11 @@ func (g *Graph) possible(r ref) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("no outcome of %q declares %q", r.step, r.path[0])
+	var members []string
+	for _, s := range n.schemas() {
+		members = append(members, memberNames(s)...)
+	}
+	return fmt.Errorf("no outcome of %q declares %q%s", r.step, r.path[0], suggest(r.path[0], members))
 }
 
 func declares(s *agenttool.Schema, name string) bool {
@@ -424,11 +477,15 @@ func (n *Node) available(refs []ref, have uint, outcome string) uint {
 func (g *Graph) reached(refs []ref) map[string]map[uint]bool {
 	var first uint
 	for i, r := range refs {
-		if r.step == "" && g.Inputs != nil && slices.Contains(g.Inputs.Required, r.path[0]) {
+		// A document always has a text, empty at first.
+		if r.doc != "" || r.step == "" && g.Inputs != nil && slices.Contains(g.Inputs.Required, r.path[0]) {
 			first |= 1 << i
 		}
 	}
 	at := map[string]map[uint]bool{g.Nodes[0].ID: {first: true}}
+	if c := g.node(g.OnAbort); c != nil {
+		at[c.ID] = map[uint]bool{first: true}
+	}
 	for changed := true; changed; {
 		changed = false
 		for i := range g.Nodes {

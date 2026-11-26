@@ -94,7 +94,7 @@ func runIn(req openresponses.Request) string {
 // withRun adds to a finish or a verdict the run the request names, as a
 // model reads it from its instructions.
 func withRun(req openresponses.Request, tool, args string) string {
-	if tool != finishTool && tool != judgeTool && tool != stuckTool {
+	if tool != finishTool && tool != judgeTool && tool != stuckTool && tool != docReadTool && tool != docWriteTool {
 		return args
 	}
 	var m map[string]any

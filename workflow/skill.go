@@ -8,8 +8,10 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"path"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ChristopherDavenport/agentflow"
 	"github.com/ChristopherDavenport/agentskill"
@@ -51,13 +53,15 @@ type Workflow struct {
 type Find func(name string) (*agentskill.Skill, error)
 
 // Load reads a skill marked as a workflow. It may call workflow files of
-// its own skill; one that calls another skill needs [LoadWith].
+// its own skill; one that calls another skill, or whose steps name
+// skills, needs [LoadWith].
 func Load(s *agentskill.Skill) (*Workflow, error) { return LoadWith(s, nil) }
 
 // LoadWith reads a skill marked as a workflow, with every workflow it
 // can reach: a file of the same skill, named ./<path>.md, or another
 // workflow skill, found by find. It links them and checks every call
-// against what it calls.
+// against what it calls. find also finds the skills model steps name,
+// whose instructions it reads into the definition.
 func LoadWith(s *agentskill.Skill, find Find) (*Workflow, error) {
 	root, files, err := loadSkill(s)
 	if err != nil {
@@ -88,7 +92,13 @@ func LoadWith(s *agentskill.Skill, find Find) (*Workflow, error) {
 			case inSkill:
 				src, ok := w.Skills[skill][rel]
 				if !ok {
-					return nil, fmt.Errorf("workflow: %s: node %q calls %s, which is not in skill %q", g.Name, n.ID, n.Flow, skill)
+					var md []string
+					for p := range w.Skills[skill] {
+						if strings.HasSuffix(p, ".md") && p != "SKILL.md" {
+							md = append(md, "./"+p)
+						}
+					}
+					return nil, fmt.Errorf("workflow: %s: node %q calls %s, which is not in skill %q%s", g.Name, n.ID, n.Flow, skill, agentflow.Suggest(n.Flow, md))
 				}
 				if c, err = Parse(name, src); err != nil {
 					return nil, fmt.Errorf("workflow: skill %q: %s: %w", skill, rel, err)
@@ -118,10 +128,58 @@ func LoadWith(s *agentskill.Skill, find Find) (*Workflow, error) {
 			queue = append(queue, c)
 		}
 	}
+	for _, g := range append([]*agentflow.Graph{root}, w.Flows...) {
+		if err := readSkills(g, find); err != nil {
+			return nil, err
+		}
+	}
 	if err := root.Link(w.Flows...); err != nil {
 		return nil, fmt.Errorf("workflow: skill %q: %w", s.Name, err)
 	}
 	return w, nil
+}
+
+// FromCatalog finds skills, workflows or not, in a catalog.
+func FromCatalog(c *agentskill.Catalog) Find {
+	return func(name string) (*agentskill.Skill, error) {
+		s, ok := c.Lookup(name)
+		if !ok {
+			return nil, fmt.Errorf("no such skill%s", agentflow.Suggest(name, c.Names()))
+		}
+		return s, nil
+	}
+}
+
+// readSkills reads the instructions of each skill a model step of g
+// names, found by find, into the definition: the digest then pins what
+// the step's model is told, whatever becomes of the skill later. A
+// skill's allowed-tools are not read: naming a skill grants nothing.
+func readSkills(g *agentflow.Graph, find Find) error {
+	for i := range g.Nodes {
+		n := &g.Nodes[i]
+		for j := range n.Skills {
+			sk := &n.Skills[j]
+			if find == nil {
+				return fmt.Errorf("workflow: %s: node %q names the skill %s, and nothing was given to find skills", g.Name, n.ID, sk.Name)
+			}
+			s, err := find(sk.Name)
+			if err == nil && (s == nil || s.Name != sk.Name) {
+				err = errors.New("no such skill")
+			}
+			if err != nil {
+				return fmt.Errorf("workflow: %s: node %q names the skill %s: %w", g.Name, n.ID, sk.Name, err)
+			}
+			text, err := s.Instructions()
+			if err != nil {
+				return fmt.Errorf("workflow: %s: node %q names the skill %s: %w", g.Name, n.ID, sk.Name, err)
+			}
+			if strings.TrimSpace(text) == "" {
+				return fmt.Errorf("workflow: %s: node %q names the skill %s, which says nothing", g.Name, n.ID, sk.Name)
+			}
+			sk.Instructions = text
+		}
+	}
+	return nil
 }
 
 // loadSkill reads the workflow a skill marks, from a snapshot of its
@@ -146,6 +204,11 @@ func loadSkill(s *agentskill.Skill) (*agentflow.Graph, map[string][]byte, error)
 	if err != nil {
 		return nil, nil, fmt.Errorf("workflow: skill %q: %s: %w", s.Name, file, err)
 	}
+	// A workflow that says nothing of itself is what its skill says it
+	// is for.
+	if g.Description == "" {
+		g.Description = strings.TrimSpace(s.Description)
+	}
 	if err := scriptsIn(g, s.Name, files); err != nil {
 		return nil, nil, err
 	}
@@ -169,6 +232,20 @@ func scriptsIn(g *agentflow.Graph, skill string, files map[string][]byte) error 
 			}
 			n.Instructions = strings.TrimSpace(string(text))
 		}
+	}
+	if err := skillFiles(g, skill, files); err != nil {
+		return err
+	}
+	for name, d := range g.Documents {
+		if d.From == "" {
+			continue
+		}
+		text, ok := files[d.From]
+		if !ok {
+			return fmt.Errorf("workflow: skill %q: document %q starts from %q, which is not in it", skill, name, d.From)
+		}
+		d.Text = string(text)
+		g.Documents[name] = d
 	}
 	return g.Validate()
 }
@@ -208,4 +285,46 @@ func snapshot(fsys fs.FS) (map[string][]byte, string, error) {
 		fmt.Fprintf(h, "%q %x\n", p, sum)
 	}
 	return files, "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// skillFiles reads the ./ files of the skill each model step of g is
+// given into the definition, so the digest pins them. Anything wrong with
+// one is an error here, never when the step runs.
+func skillFiles(g *agentflow.Graph, skill string, files map[string][]byte) error {
+	paths := slices.Sorted(maps.Keys(files))
+	for i := range g.Nodes {
+		n := &g.Nodes[i]
+		for _, v := range n.Files {
+			p, ok := v.Literal.(string)
+			rel, inSkill := strings.CutPrefix(p, "./")
+			if v.From != "" || !ok || !inSkill {
+				continue
+			}
+			bad := func(format string, args ...any) error {
+				return fmt.Errorf("workflow: skill %q: node %q: file %s: "+format, append([]any{skill, n.ID, p}, args...)...)
+			}
+			text, found := files[rel]
+			switch {
+			case path.Clean(rel) != rel || path.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, "../"):
+				return bad("want a clean path within the skill")
+			case !found && slices.ContainsFunc(paths, func(q string) bool { return strings.HasPrefix(q, rel+"/") }):
+				return bad("is a directory; name the files in it")
+			case !found:
+				var shown []string
+				for _, q := range paths {
+					shown = append(shown, "./"+q)
+				}
+				return bad("not in the skill%s", agentflow.Suggest(p, shown))
+			case len(text) > agentflow.MaxFile:
+				return bad("over %d bytes", agentflow.MaxFile)
+			case !utf8.Valid(text):
+				return bad("not text: it is not valid UTF-8")
+			}
+			if n.SkillFiles == nil {
+				n.SkillFiles = map[string]string{}
+			}
+			n.SkillFiles[rel] = string(text)
+		}
+	}
+	return nil
 }

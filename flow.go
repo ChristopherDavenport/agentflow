@@ -48,8 +48,26 @@ type Question struct {
 	// Limit names the bound the run has reached, when the question is
 	// whether to grant more of it: grant, with the amount, or stop.
 	Limit string `json:"limit,omitempty"`
+	// Choices is what an answer may pick from, as it was resolved when
+	// the question was asked. A pick from anything else is refused.
+	Choices *Offered `json:"choices,omitempty"`
+	// Text says an answer in the person's own words takes its outcome,
+	// the words in its data's member.
+	Text *FreeText `json:"text,omitempty"`
+	// Deadline is when the question takes OnTimeout if nobody has
+	// answered, as the program's clock recorded it; nil for never.
+	Deadline  *time.Time `json:"deadline,omitempty"`
+	OnTimeout string     `json:"on_timeout,omitempty"`
+	// Note is what an operator said with the override that brought the
+	// run here.
+	Note string `json:"note,omitempty"`
 	// Answer is empty as asked. [Answer] fills it in.
 	Answer *Result `json:"answer,omitempty"`
+
+	// Description is the step's, for the person: [Graph.Question] reads
+	// it from the definition. It is never in the question's arguments,
+	// which a model in the same context reads.
+	Description string `json:"-"`
 }
 
 type finishArgs struct {
@@ -119,6 +137,16 @@ type flow struct {
 	// child is set for a flow run in a child: what its start records,
 	// and the instructions its settings add.
 	child *Child
+	// fileTool and fileField name the host's tool that reads a workspace
+	// file for a step's files, and its path argument.
+	fileTool, fileField string
+	// book counts what each run's model requests use, and prices prices
+	// it, for the summary a run's end records.
+	book   *usageBook
+	prices func(model string, u openresponses.Usage) (float64, bool)
+	// responses reads what the session's responses used, when the host
+	// gives it; without, the book counts them as they are served.
+	responses func(ctx context.Context) ([]ResponseUsage, error)
 	// due is the deadline of the model step the last request was shaped
 	// for, so the model's stream is cut there.
 	due *deadline
@@ -154,12 +182,24 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 				return cfg, fmt.Errorf("agentflow: %s: node %q calls %s, and the graph is not linked; call Link", x.Name, n.ID, n.Flow)
 			}
 			needs = needs || n.fresh()
+			for _, v := range n.Files {
+				if p, ok := v.Literal.(string); ok && strings.HasPrefix(p, skillPrefix) {
+					if _, read := n.SkillFiles[strings.TrimPrefix(p, skillPrefix)]; !read {
+						return cfg, fmt.Errorf("agentflow: %s: node %q is given the file %s of the skill, which was never read: load the workflow with workflow.Load", x.Name, n.ID, p)
+					}
+				}
+			}
+			for _, sk := range n.Skills {
+				if strings.TrimSpace(sk.Instructions) == "" {
+					return cfg, fmt.Errorf("agentflow: %s: node %q names the skill %s, whose instructions were never read: load the workflow with workflow.LoadWith", x.Name, n.ID, sk.Name)
+				}
+			}
 			if n.Model != "" && f.models != nil && !slices.Contains(f.models, n.Model) {
-				return cfg, fmt.Errorf("agentflow: %s: node %q asks for model %q, which the host does not serve: want one of %s", x.Name, n.ID, n.Model, strings.Join(f.models, ", "))
+				return cfg, fmt.Errorf("agentflow: %s: node %q asks for model %q, which the host does not serve%s: want one of %s", x.Name, n.ID, n.Model, suggest(n.Model, f.models), strings.Join(f.models, ", "))
 			}
 		}
 		if x.Model != "" && f.models != nil && !slices.Contains(f.models, x.Model) {
-			return cfg, fmt.Errorf("agentflow: %s asks for model %q, which the host does not serve: want one of %s", x.Name, x.Model, strings.Join(f.models, ", "))
+			return cfg, fmt.Errorf("agentflow: %s asks for model %q, which the host does not serve%s: want one of %s", x.Name, x.Model, suggest(x.Model, f.models), strings.Join(f.models, ", "))
 		}
 	}
 	if f.maxSteps < 0 {
@@ -202,7 +242,7 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 	if (needs || len(f.modes) > 0) && f.children == nil {
 		return cfg, errors.New("agentflow: the graph runs work in children, a fresh step or call or a judge, and the host gave no Children to open them")
 	}
-	own := []agenttool.Tool{f.startTool(), f.askTool(), f.finishTool(), f.judgeTool(), f.endTool(), f.callTool(), f.clockTool(), f.stuckTool()}
+	own := append([]agenttool.Tool{f.startTool(), f.askTool(), f.finishTool(), f.judgeTool(), f.endTool(), f.callTool(), f.clockTool(), f.stuckTool(), f.overrideTool(), f.filesTool()}, f.docTools()...)
 	if p := cfg.ToolProvider; p != nil {
 		cfg.ToolProvider = func(ctx context.Context) []agenttool.Tool {
 			return append(f.timed(p(ctx)), own...)
@@ -211,17 +251,33 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 		cfg.Tools = append(f.timed(cfg.Tools), own...)
 	}
 
+	// The tools are checked for what runs on them: the graph and what it
+	// calls in this context. A workflow a fresh call runs works on its
+	// child's tools, which its child's Apply checks.
+	local := g.inContext()
 	scripts := false
-	for _, x := range closure {
+	for _, x := range local {
 		scripts = scripts || slices.ContainsFunc(x.Nodes, func(n Node) bool { return n.Script != "" })
 	}
 	if cfg.ToolProvider == nil && scripts &&
 		!slices.ContainsFunc(cfg.Tools, func(t agenttool.Tool) bool { return t.Name() == ScriptTool }) {
-		return cfg, fmt.Errorf("agentflow: the graph has script steps and the config no %q tool", ScriptTool)
+		return cfg, f.unfit(fmt.Errorf("agentflow: the graph has script steps and the config no %q tool", ScriptTool))
+	}
+	if err := checkTools(local, cfg); err != nil {
+		return cfg, f.unfit(err)
+	}
+	if err := f.checkFileReader(local, cfg); err != nil {
+		return cfg, f.unfit(err)
+	}
+	if err := checkArgs(g, cfg); err != nil {
+		return cfg, f.unfit(err)
 	}
 
 	cfg.Model = f
 	f.due = &deadline{}
+	if f.book == nil {
+		f.book = &usageBook{}
+	}
 	if transform := cfg.Transform; transform != nil {
 		cfg.Transform = f.transform(transform)
 	}
@@ -244,6 +300,63 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 		return userTool(ctx, info)
 	}
 	return cfg, nil
+}
+
+// unfitChild is a child's config that does not offer what the child's
+// steps call, or not as they call it, found as its opener builds it. The
+// call that waits on the child fails with it, as the step's own call
+// would, rather than the host's run.
+type unfitChild struct{ err error }
+
+func (e *unfitChild) Error() string { return e.err.Error() }
+func (e *unfitChild) Unwrap() error { return e.err }
+
+// unfit marks err, a check of the config's tools, as a child's, whose call
+// it fails. A root's is the host's error at Apply.
+func (f *flow) unfit(err error) error {
+	if f.child == nil {
+		return err
+	}
+	return &unfitChild{err}
+}
+
+// checkTools holds the tools steps name to those the config offers,
+// where it says what they are: a tool a program step calls, and those a
+// model step working in this context may. local is the workflows that run
+// on the config, the graph and those it calls in context: a child's tools
+// are its opener's, which the child's own Apply checks, and a config with
+// a ToolProvider names its tools only as it runs.
+func checkTools(local map[string]*Graph, cfg agentturn.Config) error {
+	if cfg.ToolProvider != nil {
+		return nil
+	}
+	var offered []string
+	for _, t := range cfg.Tools {
+		if !strings.HasPrefix(t.Name(), reserved) {
+			offered = append(offered, t.Name())
+		}
+	}
+	var errs []error
+	missing := func(x *Graph, n *Node, tool string) {
+		if !slices.Contains(offered, tool) {
+			errs = append(errs, fmt.Errorf("agentflow: %s: node %q names the tool %s, which the config does not offer%s", x.Name, n.ID, tool, suggest(tool, offered)))
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(local)) {
+		x := local[name]
+		for i := range x.Nodes {
+			n := &x.Nodes[i]
+			switch {
+			case n.Kind == Run && n.Tool != "":
+				missing(x, n, n.Tool)
+			case n.Kind == Agent && !n.fresh():
+				for _, tool := range n.Tools {
+					missing(x, n, tool)
+				}
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // ErrPositionLost is a transcript that no longer says where the workflow
@@ -288,6 +401,7 @@ func (f *flow) begin(ctx context.Context, info agentturn.TurnStartInfo) (openres
 	if st.Node.Verdict {
 		return openresponses.Items{openresponses.UserText(text + " Judge it now." + visitTag(st))}, nil
 	}
+	text += noteText(st)
 	if len(st.Steps) > 0 {
 		text += " The steps before it are finished and their results accepted, the " + finishTool + " calls included."
 	}
@@ -297,8 +411,8 @@ func (f *flow) begin(ctx context.Context, info agentturn.TurnStartInfo) (openres
 // overdue is the ending that has yet to be written, nil when none has.
 func (f *flow) overdue(st State, failed error) *Ending {
 	switch {
-	case len(st.abandoned) > 0 && !st.Started:
-		return st.abandoned[0]
+	case st.endNow:
+		return ending(st, failed)
 	case !st.Started || st.Ended || errors.Is(failed, ErrChanged):
 		return nil
 	case failed != nil || st.Done:
@@ -317,8 +431,12 @@ func (f *flow) overdue(st State, failed error) *Ending {
 
 // modelTurn says the model takes the next turn.
 func modelTurn(st State) bool {
-	return st.Done && st.Reported || st.Node != nil && st.Node.Kind == Agent && !st.Node.fresh() && st.Failure == "" && st.Reached == nil
+	return st.Done && st.Reported || st.conversing() || st.Node != nil && st.Node.Kind == Agent && !st.Node.fresh() && st.Failure == "" && st.Reached == nil
 }
+
+// conversing says an operator abandoned the run nobody called, and the
+// program has said so: the conversation is the model's, with its tools.
+func (st State) conversing() bool { return !st.Started && st.released != "" && st.Reported }
 
 // clockDue says the program reads the clock before st's model step
 // works, and expired that the step's time has run out.
@@ -359,15 +477,15 @@ func (f *flow) prepare(ctx context.Context, req *openresponses.Request) error {
 	if err != nil {
 		return err
 	}
-	if !modelTurn(st) || f.clockDue(st) || f.expired(st) {
+	if !modelTurn(st) || f.clockDue(st) || f.expired(st) || st.request != nil || f.filesDue(st) {
 		req.Model = programPrefix + f.g.Name
 		return nil
 	}
 	if f.due != nil {
-		f.due.set(st.Deadline)
+		f.due.set(st.Deadline, st.Instance)
 	}
 	req.Model = f.modelName
-	req.Input = f.visible(req.Input, all, st)
+	req.Input = keepFiles(f.visible(req.Input, all, st), all, st)
 	if c := f.child; c != nil && c.Settings.Instructions != "" {
 		req.Instructions = strings.TrimSpace(req.Instructions + "\n\n" + c.Settings.Instructions)
 	}
@@ -395,7 +513,8 @@ func (f *flow) prepare(ctx context.Context, req *openresponses.Request) error {
 			finish, more = judgeTool, map[string]any{"reason": map[string]any{"type": "string"}}
 		}
 		keep = func(name string) bool {
-			return name == finish || name == stuckTool && n.canStick() || slices.Contains(n.Tools, name)
+			return name == finish || name == stuckTool && n.canStick() || slices.Contains(n.Tools, name) ||
+				name == docReadTool && n.documented() || name == docWriteTool && len(n.Edits) > 0
 		}
 		if req.Tools, err = stepTools(req.Tools, finish, st, more); err != nil {
 			return err
@@ -453,16 +572,33 @@ func stepTools(tools openresponses.Tools, finish string, st State, more map[stri
 	if err != nil {
 		return nil, err
 	}
+	var read, write json.RawMessage
+	if n.documented() {
+		if read, write, err = docSchemas(st); err != nil {
+			return nil, err
+		}
+	}
 	out := slices.Clone(tools)
 	for i, t := range out {
-		if fn, ok := t.(*openresponses.FunctionTool); ok && (fn.Name == finish || fn.Name == stuckTool) {
-			own := *fn
-			own.Parameters, own.Strict = params, nil
-			if fn.Name == stuckTool {
-				own.Parameters = stuck
-			}
-			out[i] = &own
+		fn, ok := t.(*openresponses.FunctionTool)
+		if !ok {
+			continue
 		}
+		own := *fn
+		own.Strict = nil
+		switch {
+		case fn.Name == finish:
+			own.Parameters = params
+		case fn.Name == stuckTool:
+			own.Parameters = stuck
+		case fn.Name == docReadTool && read != nil:
+			own.Parameters = read
+		case fn.Name == docWriteTool && write != nil:
+			own.Parameters = write
+		default:
+			continue
+		}
+		out[i] = &own
 	}
 	return out, nil
 }
@@ -476,6 +612,11 @@ func (f *flow) instructions(st State) (string, error) {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "You are on step %q of workflow %q.\n%s", n.ID, st.g.Name, n.Prompt)
+	skillsText(&b, n.Skills)
+	documentsText(&b, st)
+	if st.hasFiles() {
+		fmt.Fprintf(&b, "\n\nThe step's files were given to you, in order, in the result of the workflow's %s call.", filesTool)
+	}
 	with, err := st.resolveAll(n.With)
 	if err != nil {
 		return "", fmt.Errorf("agentflow: step %q: %w", n.ID, err)
@@ -502,6 +643,19 @@ func (f *flow) instructions(st State) (string, error) {
 		stuckTool, n.ID, runClause(st))
 	f.limitsText(&b, st)
 	return b.String(), nil
+}
+
+// skillsText adds the instructions of the skills a step names. Their
+// files are not served: a step reads them only with a tool the host
+// offers it.
+func skillsText(b *strings.Builder, skills []StepSkill) {
+	if len(skills) == 0 {
+		return
+	}
+	b.WriteString("\n\nSkills for this step, to follow as you do it:")
+	for _, sk := range skills {
+		fmt.Fprintf(b, "\n<skill name=%q>\n%s\n</skill>", sk.Name, strings.TrimSpace(sk.Instructions))
+	}
 }
 
 // limitsText says what limits st's step works under: its policies and
@@ -533,13 +687,30 @@ func (f *flow) call(st State) (name string, args any, err error) {
 	}
 	switch {
 	case n.Kind == Person:
-		q := Question{Step: n.ID, Question: n.Prompt, Outcomes: n.outcomes(), With: with, Advice: st.Advice, Version: n.version()}
+		q := Question{Step: n.ID, Question: n.Prompt, Outcomes: n.outcomes(), With: with, Advice: st.Advice, Version: n.version(), Note: st.Note}
 		q.where(st)
 		if mode := f.mode(st); mode != 0 {
 			q.SentBack = st.g.sentBack(st, n)
 			q.Mode = mode.String()
 		}
-		for outcome, s := range n.Data {
+		form := n.schemas()
+		o, err := st.offer(n)
+		if err != nil {
+			return "", nil, fmt.Errorf("agentflow: step %q: %w", n.ID, err)
+		}
+		if o != nil {
+			q.Choices = o
+			form = maps.Clone(form)
+			form[o.Outcome] = o.form(n.Data[o.Outcome])
+		}
+		if t := n.Text; t != nil {
+			q.Text = &FreeText{Outcome: t.Outcome, As: t.member()}
+		}
+		if n.OnTimeout != "" && !st.Deadline.IsZero() {
+			due := st.Deadline
+			q.Deadline, q.OnTimeout = &due, n.OnTimeout
+		}
+		for outcome, s := range form {
 			if q.Form == nil {
 				q.Form = map[string]any{}
 			}
@@ -565,6 +736,9 @@ func (f *flow) call(st State) (name string, args any, err error) {
 			return "", nil, err
 		}
 		a := callArgs{Workflow: c.Name, Digest: c.OwnDigest(), Run: key, With: with, Context: ContextFresh, Child: n.Child, Spawn: key, MaxSteps: st.left()}
+		if n.Kind == Agent {
+			a.Documents, a.Files = st.passedDocuments(n), st.filesFor(n)
+		}
 		if spawn := st.kept[n.Child]; n.Child != "" && spawn != "" {
 			a.Spawn = spawn
 		}
@@ -590,6 +764,7 @@ func (f *flow) call(st State) (name string, args any, err error) {
 // its step. A stream cut there ends in [ErrStepTimeout], which no retry
 // mends, and the program records the step's failure on its next turn.
 func (f *flow) serve(ctx context.Context, req openresponses.Request, sink openresponses.EventSink) error {
+	sink = f.counting(sink, req.Model)
 	var due time.Time
 	if f.due != nil {
 		due = f.due.get()
@@ -614,7 +789,7 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 	if !strings.HasPrefix(req.Model, programPrefix) {
 		return f.serve(ctx, req, sink)
 	}
-	st, _, err := f.read(ctx, req.Input)
+	st, all, err := f.read(ctx, req.Input)
 	over := f.overdue(st, err)
 	if err != nil && over == nil {
 		return err
@@ -624,7 +799,10 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 	var args any
 	switch {
 	case over != nil:
+		over.Summary = f.summarize(ctx, st, all)
 		id, name, args = over.id, endTool, over
+	case st.request != nil:
+		id, name, args = st.requestID, overrideTool, *st.request
 	case st.Done:
 		if err := f.report(e, st); err != nil {
 			return err
@@ -635,7 +813,11 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 		if err != nil {
 			return err
 		}
-		if err := msg.Text("The workflow's runs here were abandoned with the run that called them."); err != nil {
+		text := "The workflow's runs here were abandoned, and none starts until it is invoked again."
+		if st.released != "" {
+			text = fmt.Sprintf("Workflow %s: an operator abandoned run %s. Nothing of it is under way, and invoking the workflow starts a new run.", st.g.Name, st.released)
+		}
+		if err := msg.Text(text); err != nil {
 			return err
 		}
 		if err := msg.Close(); err != nil {
@@ -647,6 +829,7 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 		if err != nil {
 			return err
 		}
+		f.book.started(p.Run)
 		id, name, args = keyPrefix(p.Run)+"start", startTool, p
 	case st.Reached != nil:
 		id, name, args = st.limitID(), askTool, limitQuestion(st)
@@ -662,11 +845,16 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 	case f.clockDue(st):
 		name = clockTool
 		id, args = f.clockCall(st, false)
+	case f.filesDue(st):
+		id, name, args = st.filesID(), filesTool, filesArgs{Run: st.Instance, Step: st.Node.ID, Files: st.fileList()}
 	case f.judging(st):
 		id, name = st.judgeID(), judgeTool
 		if args, err = f.judgeCall(st); err != nil {
 			return err
 		}
+	case f.askClockDue(st):
+		name = clockTool
+		id, args = f.clockQuestion(st)
 	case st.Node.Flow != "" && !st.Node.fresh() && st.Callee == "":
 		key, err := newKey()
 		if err != nil {
@@ -677,6 +865,7 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 			return fmt.Errorf("agentflow: step %q: %w", st.Node.ID, err)
 		}
 		c := st.g.Callees[st.Node.Flow]
+		f.book.started(key)
 		id, name = keyPrefix(key)+"start", startTool
 		args = startPayload{Workflow: c.Name, Digest: c.OwnDigest(), Inputs: with, Format: RecordFormat,
 			Run: key, Parent: st.Instance, Caller: st.callID(), Depth: st.Depth + 1}
@@ -739,6 +928,15 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 		if info.Call.Name == ScriptTool || strings.HasPrefix(info.Call.Name, reserved) {
 			return block("only the workflow calls " + info.Call.Name)
 		}
+		// A read the program makes for a step's files is held to the step's
+		// policy, as the step's own would be.
+		if readsFiles(info) {
+			if st, err := f.current(ctx); err == nil && st.Node != nil {
+				if why := f.police(ctx, st, info); why != "" {
+					return block(fmt.Sprintf("step %q may not be given this file: %s", st.Node.ID, why))
+				}
+			}
+		}
 		return nil, nil
 	}
 	t, ok := agentturn.TranscriptFromContext(ctx)
@@ -756,9 +954,15 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 	if err != nil {
 		return nil, err
 	}
+	if name == overrideTool {
+		if st.request == nil || id != st.requestID {
+			return block("only the workflow applies an operator's override, when one asks")
+		}
+		return nil, nil
+	}
 	n := st.Node
 	switch {
-	case st.Done && st.Reported:
+	case st.Done && st.Reported, st.conversing():
 		if strings.HasPrefix(name, reserved) || name == ScriptTool {
 			return block("only a running workflow calls " + name)
 		}
@@ -803,11 +1007,23 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 		if n.Verdict {
 			finish, verb = judgeTool, "judging"
 		}
+		if name == filesTool {
+			if id == st.filesID() && f.filesDue(st) {
+				return nil, nil
+			}
+			return block("only the workflow gives a step its files")
+		}
 		if name == clockTool {
 			if id == st.clockID() && f.clockDue(st) || id == st.timeoutID() && f.expired(st) {
 				return nil, nil
 			}
 			return block("only the workflow reads the clock")
+		}
+		if name == docReadTool || name == docWriteTool {
+			if err := checkDocCall(st, name, info.Args); err != nil {
+				return block(err.Error())
+			}
+			return nil, nil
 		}
 		if name == stuckTool && n.canStick() {
 			name = finish
@@ -827,6 +1043,11 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 		if why := f.police(ctx, st, info); why != "" {
 			return block(fmt.Sprintf("step %q refuses this call: %s", n.ID, why))
 		}
+	case n.Kind == Person && name == clockTool:
+		if id == st.clockID() && f.askClockDue(st) {
+			return nil, nil
+		}
+		return block("only the workflow reads the clock")
 	case id != st.callID():
 		return block(fmt.Sprintf("step %q takes no other calls", n.ID))
 	case n.Kind == Person:
@@ -848,7 +1069,10 @@ func validAnswer(n *Node, q Question, res Result) error {
 		}
 		return nil
 	case !q.Retry:
-		return n.check(res)
+		if err := n.check(res); err != nil {
+			return err
+		}
+		return q.holds(res)
 	}
 	if res.Outcome != retryOutcome && res.Outcome != stopOutcome {
 		return fmt.Errorf("outcome %q: want %s or %s", res.Outcome, retryOutcome, stopOutcome)
@@ -917,6 +1141,14 @@ func (f *flow) ask(ctx context.Context, info agentturn.ToolCallInfo, st State) (
 	if f.unattended && (q.Retry || q.Limit != "" || n.Unattended != "") {
 		return nil, nil
 	}
+	// A question asked after its time ran out, on a resume that came late,
+	// takes its timeout outcome at once.
+	if res, err := f.answerByTimeout(ctx, q); err != nil || res != nil {
+		if err != nil {
+			return nil, err
+		}
+		return answer(q, *res, "the question's time ran out")
+	}
 	return &agentturn.ToolDecision{Action: agentturn.Defer, Reason: "agentflow: " + why}, nil
 }
 
@@ -934,7 +1166,8 @@ func (f *flow) startTool() agenttool.Tool {
 		if err := checkData(g.Inputs, p.Inputs); err != nil {
 			return Result{}, fmt.Errorf("agentflow: inputs of %s: %w", g.Name, err)
 		}
-		return Result{Outcome: OK}, nil
+		// The time it started is a result, so a summary reads it back.
+		return Result{Outcome: OK, Data: map[string]any{"at": time.Now().UTC().Format(time.RFC3339Nano)}}, nil
 	}, agenttool.WithReplay(safeReplay))
 }
 
@@ -1064,22 +1297,15 @@ func (f *flow) finishTool() agenttool.Tool {
 // a call a person let proceed. An output supplied in its place would be
 // recorded as a rejection.
 func (g *Graph) Answer(pending agentturn.PendingCall, res Result) (agentturn.Answer, error) {
-	var q Question
-	if pending.Call == nil || pending.Call.Name != askTool {
-		return agentturn.Answer{}, errors.New("agentflow: not a workflow question")
-	}
-	if err := decode([]byte(pending.Call.Arguments), &q); err != nil {
-		return agentturn.Answer{}, fmt.Errorf("agentflow: question: %w", err)
-	}
-	// The question's run is of a workflow g pinned, so the answer is
-	// held to that one's definition.
-	asker, err := g.find(cmp.Or(q.Workflow, g.Name))
+	q, n, err := g.asked(pending)
 	if err != nil {
 		return agentturn.Answer{}, err
 	}
-	n := asker.node(q.Step)
-	if n == nil {
-		return agentturn.Answer{}, fmt.Errorf("agentflow: no step %q", q.Step)
+	switch {
+	case res.By == ByTimeout:
+		return agentturn.Answer{}, errors.New("agentflow: only the question's timeout answers by its timeout")
+	case q.overdue(time.Now()):
+		return agentturn.Answer{}, fmt.Errorf("%w at %s: drive the run, and it takes %q", ErrExpired, q.Deadline.Format(time.RFC3339), q.OnTimeout)
 	}
 	if err := validAnswer(n, q, res); err != nil {
 		return agentturn.Answer{}, fmt.Errorf("agentflow: %w", err)
@@ -1090,4 +1316,36 @@ func (g *Graph) Answer(pending agentturn.PendingCall, res Result) (agentturn.Ans
 		return agentturn.Answer{}, err
 	}
 	return agentturn.ApproveWith(pending.Call.CallID, args).WithBy("human"), nil
+}
+
+// Question reads a pending question as a front shows it: its arguments,
+// with the step's description from the definition its run pinned.
+func (g *Graph) Question(pending agentturn.PendingCall) (Question, error) {
+	q, n, err := g.asked(pending)
+	if err != nil {
+		return Question{}, err
+	}
+	q.Description = n.Description
+	return q, nil
+}
+
+// asked reads a pending question and the step that asks it, held to the
+// definition of a workflow g pinned.
+func (g *Graph) asked(pending agentturn.PendingCall) (Question, *Node, error) {
+	var q Question
+	if pending.Call == nil || pending.Call.Name != askTool {
+		return Question{}, nil, errors.New("agentflow: not a workflow question")
+	}
+	if err := decode([]byte(pending.Call.Arguments), &q); err != nil {
+		return Question{}, nil, fmt.Errorf("agentflow: question: %w", err)
+	}
+	asker, err := g.find(cmp.Or(q.Workflow, g.Name))
+	if err != nil {
+		return Question{}, nil, err
+	}
+	n := asker.node(q.Step)
+	if n == nil {
+		return Question{}, nil, fmt.Errorf("agentflow: no step %q", q.Step)
+	}
+	return q, n, nil
 }

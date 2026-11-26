@@ -45,7 +45,7 @@ func TestStepSettingsAreChecked(t *testing.T) {
 	for change, want := range map[[2]string]string{
 		{"timeout: 90s", "timeout: soon"}:                                         "timeout \"soon\"",
 		{"thinking: high", "thinking: hard"}:                                      "thinking \"hard\"",
-		{"  allow: [read, edit(src/*)]", "  allows: [read]"}:                      "field allows not found",
+		{"  allow: [read, edit(src/*)]", "  allows: [read]"}:                      `unknown key "allows"; did you mean "allow"?`,
 		{"    - read(.env)", "    - read(.env"}:                                   `rule "read(.env"`,
 		{"    - read(.env)", "    - {rule: read(.env), why: x}"}:                  `no key "why"`,
 		{"  allow: [read, edit(src/*)]", "  allow: [read, fetch]"}:                "the step offers no tool fetch",
