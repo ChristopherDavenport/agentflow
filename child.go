@@ -114,9 +114,21 @@ func (c Child) Apply(cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 // root's: an opener returns its error as it is, or wrapped with %w, and a
 // child whose config does not offer what its steps call, or not as they
 // call it, fails the call that waits on it, which the step asks to retry.
+// So does an error that wraps [ErrChildRefused]. Any other error is the
+// host's, and comes back from [Drive].
 func Children(open func(ctx context.Context, c Child) (context.Context, *agentturn.Agent, error)) Option {
 	return func(f *flow) { f.children = open }
 }
+
+// ErrChildRefused is an opener's error that says the child cannot be
+// opened as its call asks, such as in a directory that does not exist:
+// something the step's inputs or the workspace got wrong, which a person
+// may put right and retry, not a fault of the host's. An opener wraps it
+// with %w; package script's Sub does for a dir it cannot work in. The call that
+// waits on the child fails with the error's words, so its step asks to
+// retry, or goes on where it routes on failed, and a judge's look gives no
+// verdict, so the person is asked.
+var ErrChildRefused = errors.New("agentflow: the child cannot be opened as its call asks")
 
 // Models names the models a host serves to children, so a step that asks
 // for another is refused by [Apply].
@@ -246,7 +258,14 @@ func (f *flow) settle(ctx context.Context, st State, p agentturn.PendingCall, a 
 	if unfit := (*unfitChild)(nil); errors.As(err, &unfit) {
 		// The child cannot run its steps on the tools it was given: the call
 		// that waits on it fails, as the step's own call would.
-		ans, err := unfitCall(p, a, unfit)
+		ans, err := failCall(st.Node, p, a, "agentflow: the child cannot run on the tools it was given: "+strings.TrimPrefix(unfit.Error(), "agentflow: "),
+			"agentflow: the child's config does not fit its steps")
+		return ans, nil, st, err
+	}
+	if errors.Is(err, ErrChildRefused) {
+		// The child cannot be opened where it was asked to be: its step
+		// fails, and may be retried once that is put right.
+		ans, err := failCall(st.Node, p, a, err.Error(), "agentflow: the child cannot be opened as its call asks")
 		return ans, nil, st, err
 	}
 	if err != nil {
@@ -349,21 +368,25 @@ func letGo(st State, p agentturn.PendingCall, a callArgs, done State, failed err
 	return &ans, nil
 }
 
-// unfitCall is the answer that lets a held call go when its child's config
-// does not fit the child's steps: a failure the step asks to retry, or for
-// a judge's look no verdict, so the person is asked.
-func unfitCall(p agentturn.PendingCall, a callArgs, unfit *unfitChild) (*agentturn.Answer, error) {
-	why := "agentflow: the child cannot run on the tools it was given: " + strings.TrimPrefix(unfit.Error(), "agentflow: ")
-	if p.Call.Name == judgeTool {
+// failCall is the answer that lets a held call go when its child cannot
+// run at all, for why: the outcome failed where a call to a workflow
+// routes on it, else a failure the step asks to retry, and for a judge's
+// look no verdict, so the person is asked. No step of the child ran, so
+// there is nothing to count. reason is the decision's.
+func failCall(n *Node, p agentturn.PendingCall, a callArgs, why, reason string) (*agentturn.Answer, error) {
+	switch {
+	case p.Call.Name == judgeTool:
 		a.Verdict = &Verdict{Outcome: HandBack, Reason: why, None: true}
-	} else {
+	case n != nil && n.Flow != "" && n.routesFailure():
+		a.Result = &Result{Outcome: Failed, Data: map[string]any{"reason": why, "workflow": a.Workflow}}
+	default:
 		a.Failure = why
 	}
 	args, err := json.Marshal(a)
 	if err != nil {
 		return nil, err
 	}
-	ans := agentturn.ApproveWith(p.Call.CallID, args).WithBy("policy").WithReason("agentflow: the child's config does not fit its steps")
+	ans := agentturn.ApproveWith(p.Call.CallID, args).WithBy("policy").WithReason(reason)
 	return &ans, nil
 }
 
@@ -472,14 +495,19 @@ func (f *flow) setAside(ctx context.Context, a *agentturn.Agent, text, why strin
 				return nil, err
 			}
 			cctx, child, cf, err := f.open(ctx, c)
-			if err != nil {
+			// A child that cannot be opened as its call asks never ran there,
+			// and nothing in it can be abandoned: setting its call aside must
+			// not fail for that.
+			unfit := (*unfitChild)(nil)
+			closed := errors.Is(err, ErrChildRefused) || errors.As(err, &unfit)
+			if err != nil && !closed {
 				return nil, err
 			}
 			// What the child's run spent counts toward this tree however the
 			// call goes, so the call is answered with it: an override cannot
 			// buy steps by throwing a child's away.
 			let := callFailure{Failure: text}
-			if cf.started(cctx, child, args.Run) {
+			if !closed && cf.started(cctx, child, args.Run) {
 				inner, err := cf.abandon(cctx, child, why)
 				if err != nil {
 					return nil, err
