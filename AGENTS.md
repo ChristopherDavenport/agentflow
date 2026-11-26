@@ -7,16 +7,18 @@ in the same commit as any behaviour it describes.
 ## Module
 
 - Module path: `github.com/ChristopherDavenport/agentflow`.
-- Go 1.25 is the floor.
+- Go 1.26 is the floor, which `agentworkspace` sets.
 - The root package builds from `openresponses`, `agenttool`, `agentturn`
-  and the standard library. `agentsession` and `agentturn/session` are
-  test dependencies only. `make deps` enforces it.
+  and the standard library; `script` adds `agentworkspace`.
+  `agentsession` and `agentturn/session` are test dependencies only.
+  `make deps` enforces the module's list.
 
 ## Rules
 
 - The loop learns nothing about workflows. Build on its public surface.
 - Position is a pure function of the graph and the transcript.
 - The record never passes a program's turn off as a model's.
+- Only the program runs scripts.
 
 ## Checks
 

@@ -93,7 +93,7 @@ func TestResumeAfterKill(t *testing.T) {
 	if err := json.Unmarshal([]byte(pending[0].Call.Arguments), &q); err != nil || q.Step != "triage" {
 		t.Fatalf("question = %+v, %v", q, err)
 	}
-	ans, err := Answer(pending[0], Result{Outcome: "fix"})
+	ans, err := g.Answer(pending[0], Result{Outcome: "fix"})
 	if err != nil {
 		t.Fatal(err)
 	}

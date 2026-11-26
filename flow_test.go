@@ -153,7 +153,7 @@ func TestPersonAnswersAndLoops(t *testing.T) {
 	if end.Reason != agentturn.ReasonInputRequired || len(end.Pending) != 1 {
 		t.Fatalf("reason = %s, pending = %d, err = %v", end.Reason, len(end.Pending), end.Err)
 	}
-	ans, err := Answer(end.Pending[0], Result{Outcome: "fix"})
+	ans, err := g.Answer(end.Pending[0], Result{Outcome: "fix"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func answer(t *testing.T, a *agentturn.Agent, end *agentturn.RunEnd, outcome str
 	if end.Reason != agentturn.ReasonInputRequired || len(end.Pending) != 1 {
 		t.Fatalf("end = %s, err = %v", end.Reason, end.Err)
 	}
-	ans, err := Answer(end.Pending[0], Result{Outcome: outcome})
+	ans, err := release().Answer(end.Pending[0], Result{Outcome: outcome})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +292,11 @@ func TestAfterTheWorkflow(t *testing.T) {
 	}
 
 	// An invocation starts another instance.
-	if end, err := a.Prompt(context.Background(), g.Invocation()); err != nil || end.Reason != agentturn.ReasonDone {
+	again, err := g.Invocation(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if end, err := a.Prompt(context.Background(), again); err != nil || end.Reason != agentturn.ReasonDone {
 		t.Fatalf("end = %+v, %v", end, err)
 	}
 	second, err := g.Replay(a.State().Transcript)
@@ -358,7 +362,7 @@ func TestVisitLimit(t *testing.T) {
 	g.node("gather").MaxVisits = 1
 	a := newAgent(t, g, m, &ran)
 	end := start(t, a)
-	ans, err := Answer(end.Pending[0], Result{Outcome: "fix"})
+	ans, err := g.Answer(end.Pending[0], Result{Outcome: "fix"})
 	if err != nil {
 		t.Fatal(err)
 	}

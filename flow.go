@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -20,6 +21,10 @@ type Question struct {
 	Step     string   `json:"step"`
 	Question string   `json:"question"`
 	Outcomes []string `json:"outcomes"`
+	// With is the node's inputs, to show beside the question.
+	With map[string]any `json:"with,omitempty"`
+	// Form is the schema of the data each outcome wants.
+	Form map[string]any `json:"form,omitempty"`
 	// Retry says the question is whether to run a failed step again.
 	Retry bool `json:"retry,omitempty"`
 	// Answer is empty as asked. [Answer] fills it in.
@@ -27,9 +32,9 @@ type Question struct {
 }
 
 type finishArgs struct {
-	Step    string         `json:"step"`
-	Outcome string         `json:"outcome"`
-	Data    map[string]any `json:"data,omitempty"`
+	Step    string `json:"step"`
+	Outcome string `json:"outcome"`
+	Data    any    `json:"data,omitempty"`
 }
 
 // Option configures [Apply].
@@ -84,6 +89,11 @@ func Apply(g *Graph, cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 		}
 	} else {
 		cfg.Tools = append(slices.Clone(cfg.Tools), own...)
+	}
+
+	if cfg.ToolProvider == nil && slices.ContainsFunc(g.Nodes, func(n Node) bool { return n.Script != "" }) &&
+		!slices.ContainsFunc(cfg.Tools, func(t agenttool.Tool) bool { return t.Name() == ScriptTool }) {
+		return cfg, fmt.Errorf("agentflow: the graph has script steps and the config no %q tool", ScriptTool)
 	}
 
 	cfg.Model = f
@@ -153,18 +163,130 @@ func (f *flow) prepare(req *openresponses.Request) error {
 		return nil
 	}
 	req.Model = f.modelName
-	keep := func(name string) bool { return !strings.HasPrefix(name, reserved) }
+	keep := func(name string) bool { return !strings.HasPrefix(name, reserved) && name != ScriptTool }
 	if n := st.Node; n != nil {
-		req.Instructions = strings.TrimSpace(req.Instructions + "\n\n" + fmt.Sprintf(
-			"You are on step %q of workflow %q.\n%s\n\nWhen the step is done, call %s with step %q and one outcome of: %s.",
-			n.ID, f.g.Name, n.Prompt, finishTool, n.ID, strings.Join(n.outcomes(), ", ")))
+		step, err := f.instructions(st)
+		if err != nil {
+			return err
+		}
+		req.Instructions = strings.TrimSpace(req.Instructions + "\n\n" + step)
 		keep = func(name string) bool { return name == finishTool || slices.Contains(n.Tools, name) }
+		if req.Tools, err = stepTools(req.Tools, n); err != nil {
+			return err
+		}
 	}
 	req.Tools = slices.DeleteFunc(slices.Clone(req.Tools), func(t openresponses.Tool) bool {
 		fn, ok := t.(*openresponses.FunctionTool)
 		return !ok || !keep(fn.Name)
 	})
 	return nil
+}
+
+// stepTools gives flow_finish the shape the step wants, so the model is
+// told by the tool itself and not only in prose. The request is what is
+// recorded, so the record holds what the model was offered.
+func stepTools(tools openresponses.Tools, n *Node) (openresponses.Tools, error) {
+	data := map[string]any{}
+	var shapes []any
+	required := []string{"step", "outcome"}
+	for _, outcome := range n.outcomes() {
+		if s := n.Data[outcome]; s != nil {
+			shapes = append(shapes, s)
+		}
+	}
+	switch {
+	case len(shapes) == 1:
+		data["data"] = shapes[0]
+	case len(shapes) > 1:
+		data["data"] = map[string]any{"anyOf": shapes}
+	default:
+		data["data"] = map[string]any{}
+	}
+	if len(shapes) == len(n.outcomes()) {
+		required = append(required, "data")
+	}
+	data["step"] = map[string]any{"type": "string", "enum": []string{n.ID}}
+	data["outcome"] = map[string]any{"type": "string", "enum": n.outcomes()}
+	params, err := json.Marshal(map[string]any{"type": "object", "properties": data, "required": required})
+	if err != nil {
+		return nil, err
+	}
+	out := slices.Clone(tools)
+	for i, t := range out {
+		if fn, ok := t.(*openresponses.FunctionTool); ok && fn.Name == finishTool {
+			own := *fn
+			own.Parameters, own.Strict = params, nil
+			out[i] = &own
+		}
+	}
+	return out, nil
+}
+
+// instructions tells the model its step, with the step's inputs and the
+// data each outcome wants.
+func (f *flow) instructions(st State) (string, error) {
+	n := st.Node
+	var b strings.Builder
+	fmt.Fprintf(&b, "You are on step %q of workflow %q.\n%s", n.ID, f.g.Name, n.Prompt)
+	with, err := st.resolveAll(n.With)
+	if err != nil {
+		return "", fmt.Errorf("agentflow: step %q: %w", n.ID, err)
+	}
+	if with != nil {
+		j, err := json.Marshal(with)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "\n\nInputs: %s", j)
+	}
+	fmt.Fprintf(&b, "\n\nWhen the step is done, call %s with step %q and one outcome of: %s.",
+		finishTool, n.ID, strings.Join(n.outcomes(), ", "))
+	for _, outcome := range n.outcomes() {
+		if s := n.Data[outcome]; s != nil {
+			j, err := json.Marshal(s)
+			if err != nil {
+				return "", err
+			}
+			fmt.Fprintf(&b, "\nFor outcome %s, data must match this schema: %s", outcome, j)
+		}
+	}
+	return b.String(), nil
+}
+
+// call is the call a program step makes, and what a person is asked.
+func (f *flow) call(st State) (name string, args any, err error) {
+	n := st.Node
+	with, err := st.resolveAll(n.With)
+	if err != nil {
+		return "", nil, fmt.Errorf("agentflow: step %q: %w", n.ID, err)
+	}
+	switch {
+	case n.Kind == Person:
+		q := Question{Step: n.ID, Question: n.Prompt, Outcomes: n.outcomes(), With: with}
+		for outcome, s := range n.Data {
+			if q.Form == nil {
+				q.Form = map[string]any{}
+			}
+			q.Form[outcome] = s
+		}
+		return askTool, q, nil
+	case n.Script != "":
+		return ScriptTool, ScriptCall{Run: n.Script, With: with, Outcomes: n.Outcomes}, nil
+	}
+	merged := map[string]any{}
+	if with == nil {
+		if n.Args != nil {
+			return n.Tool, n.Args, nil
+		}
+		return n.Tool, merged, nil
+	}
+	if n.Args != nil {
+		if err := decode(n.Args, &merged); err != nil {
+			return "", nil, err
+		}
+	}
+	maps.Copy(merged, with)
+	return n.Tool, merged, nil
 }
 
 // CreateStream takes a program turn itself and passes a model's on.
@@ -190,7 +312,7 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 		if _, err := rand.Read(b[:]); err != nil {
 			return err
 		}
-		id, name, args = f.g.startID(hex.EncodeToString(b[:])), startTool, startPayload{Workflow: f.g.Name, Digest: f.g.Digest()}
+		id, name, args = f.g.startID(hex.EncodeToString(b[:])), startTool, startPayload{Workflow: f.g.Name, Digest: f.g.Digest(), Inputs: st.Inputs}
 	case st.Failure != "":
 		if f.unattended && f.reply == nil {
 			return fmt.Errorf("%w: %s: %s", ErrStepFailed, st.Node.ID, st.Failure)
@@ -198,13 +320,10 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 		id, name = f.g.retryID(st), askTool
 		args = Question{Step: st.Node.ID, Retry: true, Outcomes: []string{retryOutcome, stopOutcome},
 			Question: fmt.Sprintf("Step %q failed: %s\nRun it again?", st.Node.ID, st.Failure)}
-	case st.Node.Kind == Person:
-		id, name = f.g.callID(st), askTool
-		args = Question{Step: st.Node.ID, Question: st.Node.Prompt, Outcomes: st.Node.outcomes()}
 	default:
-		id, name, args = f.g.callID(st), st.Node.Tool, st.Node.Args
-		if st.Node.Args == nil {
-			args = json.RawMessage("{}")
+		id = f.g.callID(st)
+		if name, args, err = f.call(st); err != nil {
+			return err
 		}
 	}
 	encoded, err := json.Marshal(args)
@@ -234,6 +353,13 @@ func (f *flow) report(e *openresponses.Emitter, st State) error {
 	for _, s := range st.Steps {
 		fmt.Fprintf(&b, "\n- %s: %s", s.Node, s.Result.Outcome)
 	}
+	if st.Outputs != nil {
+		j, err := json.Marshal(st.Outputs)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&b, "\n\nOutputs: %s", j)
+	}
 	if err := msg.Text(b.String()); err != nil {
 		return err
 	}
@@ -243,11 +369,14 @@ func (f *flow) report(e *openresponses.Emitter, st State) error {
 // gate keeps each turn to what the workflow is at. It returns nil to
 // leave the call to the config's own hook.
 func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
-	if info.Parent != "" {
-		return nil, nil
-	}
 	block := func(reason string) (*agentturn.ToolDecision, error) {
 		return &agentturn.ToolDecision{Action: agentturn.Block, Reason: "agentflow: " + reason}, nil
+	}
+	if info.Parent != "" {
+		if info.Call.Name == ScriptTool || strings.HasPrefix(info.Call.Name, reserved) {
+			return block("only the workflow calls " + info.Call.Name)
+		}
+		return nil, nil
 	}
 	t, ok := agentturn.TranscriptFromContext(ctx)
 	if !ok {
@@ -260,8 +389,8 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 	n, name, id := st.Node, info.Call.Name, info.Call.CallID
 	switch {
 	case st.Done && st.Reported:
-		if strings.HasPrefix(name, reserved) {
-			return block("no workflow is running")
+		if strings.HasPrefix(name, reserved) || name == ScriptTool {
+			return block("only a running workflow calls " + name)
 		}
 	case st.Done:
 		return block("the workflow has finished")
@@ -292,15 +421,26 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 	return nil, nil
 }
 
+// validAnswer holds an answer to what its question may be answered with.
+func validAnswer(n *Node, retry bool, res Result) error {
+	if !retry {
+		return n.check(res)
+	}
+	if res.Outcome != retryOutcome && res.Outcome != stopOutcome {
+		return fmt.Errorf("outcome %q: want %s or %s", res.Outcome, retryOutcome, stopOutcome)
+	}
+	return nil
+}
+
 // ask decides who answers a question: the host's rules, then the node's
 // default when nobody is there, then the person.
 func (f *flow) ask(ctx context.Context, info agentturn.ToolCallInfo, n *Node) (*agentturn.ToolDecision, error) {
 	var q Question
-	if err := json.Unmarshal(info.Args, &q); err != nil {
+	if err := decode(info.Args, &q); err != nil {
 		return nil, fmt.Errorf("agentflow: question: %w", err)
 	}
 	if f.reply != nil {
-		if res, ok := f.reply(ctx, q); ok && slices.Contains(q.Outcomes, res.Outcome) {
+		if res, ok := f.reply(ctx, q); ok && validAnswer(n, q.Retry, res) == nil {
 			res.By = "rules"
 			q.Answer = &res
 			args, err := json.Marshal(q)
@@ -321,7 +461,13 @@ func (f *flow) ask(ctx context.Context, info agentturn.ToolCallInfo, n *Node) (*
 func safeReplay(context.Context, json.RawMessage) agenttool.Replay { return agenttool.ReplaySafe }
 
 func (f *flow) startTool() agenttool.Tool {
-	return agenttool.New(startTool, "Start a workflow.", func(_ context.Context, p startPayload) (Result, error) {
+	return agenttool.New(startTool, "Start a workflow.", func(ctx context.Context, p startPayload) (Result, error) {
+		if err := exact(ctx, &p); err != nil {
+			return Result{}, err
+		}
+		if err := checkData(f.g.Inputs, p.Inputs); err != nil {
+			return Result{}, fmt.Errorf("agentflow: inputs: %w", err)
+		}
 		return Result{Outcome: OK}, nil
 	}, agenttool.WithReplay(safeReplay))
 }
@@ -330,54 +476,67 @@ func (f *flow) startTool() agenttool.Tool {
 // node's default when the question was not deferred because nobody is
 // there to ask.
 func (f *flow) askTool() agenttool.Tool {
-	return agenttool.New(askTool, "Ask the person a workflow question.", func(_ context.Context, q Question) (Result, error) {
+	return agenttool.New(askTool, "Ask the person a workflow question.", func(ctx context.Context, q Question) (Result, error) {
+		if err := exact(ctx, &q); err != nil {
+			return Result{}, err
+		}
 		n := f.g.node(q.Step)
 		if n == nil {
 			return Result{}, fmt.Errorf("agentflow: no step %q", q.Step)
 		}
-		outcomes := n.outcomes()
-		if q.Retry {
-			outcomes = []string{retryOutcome, stopOutcome}
-		} else if n.Kind != Person {
+		if !q.Retry && n.Kind != Person {
 			return Result{}, fmt.Errorf("agentflow: step %q asks nothing", q.Step)
 		}
 		switch {
-		case q.Answer != nil && slices.Contains(outcomes, q.Answer.Outcome):
+		case q.Answer != nil:
+			if err := validAnswer(n, q.Retry, *q.Answer); err != nil {
+				return Result{}, fmt.Errorf("agentflow: %w", err)
+			}
 			return *q.Answer, nil
-		case q.Answer == nil && f.unattended && !q.Retry && n.Unattended != "":
-			return Result{Outcome: n.Unattended, By: "unattended default"}, nil
+		case f.unattended && !q.Retry && n.Unattended != "":
+			return Result{Outcome: n.Unattended, Data: n.UnattendedData, By: "unattended default"}, nil
 		}
-		return Result{}, errors.New("agentflow: this question needs one of its outcomes as an answer")
+		return Result{}, errors.New("agentflow: this question needs an answer")
 	}, agenttool.WithReplay(safeReplay))
 }
 
 func (f *flow) finishTool() agenttool.Tool {
-	return agenttool.New(finishTool, "Finish the current workflow step.", func(_ context.Context, a finishArgs) (Result, error) {
+	return agenttool.New(finishTool, "Finish the current workflow step.", func(ctx context.Context, a finishArgs) (Result, error) {
+		if err := exact(ctx, &a); err != nil {
+			return Result{}, err
+		}
 		n := f.g.node(a.Step)
 		if n == nil || n.Kind != Agent {
 			return Result{}, fmt.Errorf("agentflow: %q is not a step you can finish", a.Step)
 		}
-		if !slices.Contains(n.outcomes(), a.Outcome) {
-			return Result{}, fmt.Errorf("agentflow: outcome must be one of %s", strings.Join(n.outcomes(), ", "))
+		res := Result{Outcome: a.Outcome, Data: a.Data}
+		if err := n.check(res); err != nil {
+			return Result{}, fmt.Errorf("agentflow: %w", err)
 		}
-		return Result{Outcome: a.Outcome, Data: a.Data}, nil
+		return res, nil
 	})
 }
 
-// Answer answers a pending question on a person's behalf. It approves
+// Answer answers a pending question on a person's behalf. An answer the
+// node does not accept is refused here, and the question stays pending.
+// It approves
 // the question with the answer in its arguments, so the record reads as
 // a call a person let proceed. An output supplied in its place would be
 // recorded as a rejection.
-func Answer(pending agentturn.PendingCall, res Result) (agentturn.Answer, error) {
+func (g *Graph) Answer(pending agentturn.PendingCall, res Result) (agentturn.Answer, error) {
 	var q Question
 	if pending.Call == nil || pending.Call.Name != askTool {
 		return agentturn.Answer{}, errors.New("agentflow: not a workflow question")
 	}
-	if err := json.Unmarshal([]byte(pending.Call.Arguments), &q); err != nil {
+	if err := decode([]byte(pending.Call.Arguments), &q); err != nil {
 		return agentturn.Answer{}, fmt.Errorf("agentflow: question: %w", err)
 	}
-	if !slices.Contains(q.Outcomes, res.Outcome) {
-		return agentturn.Answer{}, fmt.Errorf("agentflow: outcome must be one of %s", strings.Join(q.Outcomes, ", "))
+	n := g.node(q.Step)
+	if n == nil {
+		return agentturn.Answer{}, fmt.Errorf("agentflow: no step %q", q.Step)
+	}
+	if err := validAnswer(n, q.Retry, res); err != nil {
+		return agentturn.Answer{}, fmt.Errorf("agentflow: %w", err)
 	}
 	q.Answer = &res
 	args, err := json.Marshal(q)

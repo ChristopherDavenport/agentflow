@@ -76,7 +76,8 @@ returning the body.
 ## WORKFLOW.md
 
 The file holds exactly one `mermaid` block and one `##` section per
-node, headed by the node ID.
+node, headed by the node ID. Frontmatter declares the workflow's inputs
+and outputs.
 
 ````markdown
 # PR review
@@ -99,9 +100,14 @@ max_visits: 3
 
 ## review
 ```yaml
+with:
+  files: ${{ steps.gather.outputs.files }}
 context: session
 tools: [read, grep]
 outcomes: [clean, findings]
+outputs:
+  findings:
+    findings: {type: array, required: true}
 ```
 Review the diff against what the session set out to do.
 
@@ -134,14 +140,103 @@ workflow. `end` is reserved by Mermaid and cannot be an ID.
 
 | Key | Nodes | Meaning |
 |---|---|---|
-| `run` | program | script path within the skill, or a tool name and args |
+| `run` | program | script path within the skill |
+| `tool`, `args` | program | a tool to call instead, with fixed arguments |
+| `with` | all | the step's inputs, by name |
+| `outputs` | all | schema of the step's data, by outcome |
 | `tools` | model | tools the model may call; none if absent |
-| `context` | model | `session`, `fresh`, or a list of node IDs |
+| `context` | model | `session`, `fresh`, or a list of node IDs (proposed) |
 | `outcomes` | all | ways the node can end; `[ok]` if absent |
-| `unattended` | person | outcome taken when nobody can be asked |
+| `unattended` | person | outcome, and data, taken when nobody can be asked |
 | `max_visits` | all | bound on loops; 1 if absent |
 
 The text under a model or person node is its prompt.
+
+## Data (spiked, in Go)
+
+The vocabulary follows GitHub Actions, so it reads as familiar. It is not
+compatible with it.
+
+```yaml
+inputs:                      # frontmatter, as workflow_call has
+  pr: {type: integer, required: true}
+outputs:
+  summary: ${{ steps.score.outputs.summary }}
+```
+
+```yaml
+tool: git_tag
+args: {sign: true}
+with:
+  name: ${{ steps.confirm.outputs.version }}
+```
+
+A value is a literal or exactly one `${{ }}` reference, to `inputs.<name>`
+or `steps.<id>.outputs`, optionally followed by member names. There are
+no operators, functions, interpolation or `if:`: a decision is a step
+with a named outcome, so every branch is in the diagram. In Go a
+reference is `From("steps.confirm.outputs.version")`.
+
+A reference reads the **latest** result of a step, since a graph may loop.
+
+### What each kind does with `with`
+
+| Step | Receives it as | Produces |
+|---|---|---|
+| script | one JSON object on stdin | its result, below |
+| tool | arguments, merged over `args` | a result |
+| model | JSON in its instructions | `data` of `flow_finish` |
+| person | shown beside the question | `data` of the answer |
+
+`with` is what a step is handed, not all it can see. A model step reads
+the whole transcript, earlier results included, until `context` is
+implemented.
+
+The program builds a call's arguments from recorded results, so no model
+retypes a value on its way to a tool, and the call records exactly what
+the step was given. Numbers are kept as written.
+
+### Script results
+
+A script's result is what it writes to `$AGENTFLOW_OUTPUT`, or its
+standard output when it writes nothing there, so logs and results need
+not share a stream.
+
+- A step with no declared outcomes: exit 0 is `ok` and the result **is**
+  the data, so `gh` or `jq` work unwrapped.
+- A step with outcomes: the result is `{"outcome": ..., "data": ...}`.
+- A non-zero exit, a result that is not one JSON value, or one over 1 MiB
+  fails the step. Nothing is truncated.
+
+Large data belongs in a workspace file, passed as its path and a hash.
+
+Scripts run in an `agentworkspace.Workspace` (package `script`), as the
+tool `run_script`. Only the program calls it: a model's call, and a tool's
+nested one, are refused.
+
+### Schemas and forms
+
+A step's `outputs` schema is checked where the data is made. A script or
+tool that breaks it fails the step. A model is given the schema as the
+parameters of `flow_finish` and sees the error. A person's answer that
+breaks it is refused and the question stays pending; the question carries
+the schema so a front can draw a form. The unattended default carries
+data held to the same schema.
+
+The schema is `agenttool.Schema`: types, enums, required members and
+nesting. It has no `pattern` or numeric bounds.
+
+**Secrets are never data.** Everything here is in the transcript and can
+reach a model.
+
+### Checked at load
+
+Every reference must have a value on every path that reaches it: the step
+has certainly run, and where it declares schemas, the member is
+`required` by the outcome that was taken. A loop that can re-run a step
+with another outcome loses the first outcome's members. A workflow's
+`outputs` are checked at every way out. Whether `with` covers what a
+tool requires is not yet checked.
 
 A Go builder constructs the same graph, and the graph can be written
 back out as `WORKFLOW.md`.
@@ -301,6 +396,16 @@ instead of calling `flow_finish`. The providers accepted a history
 holding a call to a tool the request no longer offered. The samples are
 small and the task easy. The hosted figures predate `flow_start`.
 
+The release chain, scripts and `jq` around one model step with a data
+schema, reaching the person's question, one reminder allowed:
+
+| Model (Ollama) | Reached the question |
+|---|---|
+| qwen3.5:9b | 5/5 |
+| qwen3:1.7b | 15/24 with the schema on the tool, 4/8 without |
+
+The two rows for the small model are too few to credit the schema.
+
 The role of the reminder, qwen3:1.7b, one reminder, 40 trials a row:
 
 | Reminder role | Stalls recovered |
@@ -316,9 +421,7 @@ and the `context` modes.
 
 1. **Compaction.** Read position from the session path, or record
    checkpoints that a fold keeps.
-2. **Data between steps.** A model step sees earlier results in the
-   transcript. A script gets none: nothing says how one step's data
-   becomes another's arguments.
+2. **Fan-out.** Running a step once per item of a list, and joining.
 3. **Reminders.** One is the rule. A host may want more for a small
    model.
 4. **A failed instance** answers every later prompt with its error until

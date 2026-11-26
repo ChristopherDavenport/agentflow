@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -41,8 +40,8 @@ var (
 // one. Anything else, an error or a refusal among them, fails the step:
 // a transcript carries no failure flag, so success has to be said.
 type Result struct {
-	Outcome string         `json:"outcome"`
-	Data    map[string]any `json:"data,omitempty"`
+	Outcome string `json:"outcome"`
+	Data    any    `json:"data,omitempty"`
 	// By says who chose, when it was not whoever the node names.
 	By string `json:"by,omitempty"`
 }
@@ -59,6 +58,10 @@ type State struct {
 	// Started says the transcript holds an instance, named by Instance.
 	Started  bool
 	Instance string
+	// Inputs is what the invocation carried, and Outputs what the done
+	// workflow gives back.
+	Inputs  any
+	Outputs map[string]any
 	// Node is the node to run next, nil before the start and when done.
 	Node *Node
 	// Visit counts this arrival at Node and Attempt this try, from 1.
@@ -78,12 +81,37 @@ type State struct {
 type startPayload struct {
 	Workflow string `json:"workflow"`
 	Digest   string `json:"digest"`
+	Inputs   any    `json:"inputs,omitempty"`
 }
 
-// Invocation is the item that asks for a new instance. The first one
-// needs none: a transcript with no instance starts one.
-func (g *Graph) Invocation() openresponses.Item {
-	return openresponses.DeveloperText(invocationPrefix + g.Name)
+// Invocation is the item that asks for a new instance, carrying its
+// inputs, nil for none. A transcript with no instance starts one without
+// it, with no inputs.
+func (g *Graph) Invocation(inputs any) (openresponses.Item, error) {
+	text := invocationPrefix + g.Name
+	if inputs != nil {
+		if err := checkData(g.Inputs, inputs); err != nil {
+			return nil, fmt.Errorf("agentflow: inputs: %w", err)
+		}
+		b, err := json.Marshal(inputs)
+		if err != nil {
+			return nil, err
+		}
+		text += " " + string(b)
+	}
+	return openresponses.DeveloperText(text), nil
+}
+
+// invoked reads an invocation of g and the inputs it carries.
+func (g *Graph) invoked(text string) (inputs any, ok bool) {
+	rest, ok := strings.CutPrefix(text, invocationPrefix+g.Name)
+	switch {
+	case !ok || rest != "" && rest[0] != ' ':
+		return nil, false
+	case rest == "":
+		return nil, true
+	}
+	return inputs, decode([]byte(rest), &inputs) == nil
 }
 
 func (g *Graph) startID(instance string) string {
@@ -120,9 +148,13 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 	for i, item := range t {
 		switch it := item.(type) {
 		case *openresponses.Message:
+			if it.Role == openresponses.RoleDeveloper {
+				if inputs, ok := g.invoked(it.Text()); ok {
+					st, failed, visits = State{Inputs: inputs}, nil, map[string]int{}
+					continue
+				}
+			}
 			switch {
-			case it.Role == openresponses.RoleDeveloper && it.Text() == invocationPrefix+g.Name:
-				st, failed, visits = State{}, nil, map[string]int{}
 			case it.Role == openresponses.RoleUser && strings.HasPrefix(it.Text(), nudgePrefix):
 				st.Nudges++
 			case it.Role == openresponses.RoleAssistant && st.Done:
@@ -138,7 +170,7 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 			c := calls[it.CallID]
 			if !st.Started {
 				var p startPayload
-				if c == nil || c.Name != startTool || json.Unmarshal([]byte(c.Arguments), &p) != nil || p.Workflow != g.Name {
+				if c == nil || c.Name != startTool || decode([]byte(c.Arguments), &p) != nil || p.Workflow != g.Name {
 					continue
 				}
 				var res Result
@@ -149,13 +181,13 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 					failed = ErrChanged
 				default:
 					instance := strings.TrimSuffix(strings.TrimPrefix(it.CallID, reserved+g.Name+"_"), "_start")
-					st = State{Started: true, Instance: instance, Node: &g.Nodes[0], Visit: 1, Attempt: 1}
+					st = State{Started: true, Instance: instance, Inputs: p.Inputs, Node: &g.Nodes[0], Visit: 1, Attempt: 1}
 					visits[st.Node.ID], since = 1, i
 				}
 				continue
 			}
 			n := st.Node
-			res, ok := parseResult(n, it.Output.String())
+			res, invalid := parseResult(n, it.Output.String())
 			switch {
 			case st.Failure != "":
 				if it.CallID != g.retryID(st) {
@@ -172,15 +204,18 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 			case n.Kind == Agent:
 				// A finish that was rejected or is for another node is
 				// not progress; the model saw the error and goes on.
-				if !ok || c == nil || c.Name != finishTool || finishStep(c.Arguments) != n.ID || at[it.CallID] < since {
+				if invalid != nil || c == nil || c.Name != finishTool || finishStep(c.Arguments) != n.ID || at[it.CallID] < since {
 					continue
 				}
 			default:
 				if it.CallID != g.callID(st) {
 					continue
 				}
-				if !ok {
+				if invalid != nil {
 					st.Failure = it.Output.String()
+					if json.Valid([]byte(st.Failure)) {
+						st.Failure = invalid.Error() + ": " + st.Failure
+					}
 					continue
 				}
 			}
@@ -189,6 +224,9 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 			next := n.Next[res.Outcome]
 			if next == "" {
 				st.Node, st.Visit, st.Attempt, st.Done = nil, 0, 0, true
+				if st.Outputs, invalid = st.resolveAll(g.Outputs); invalid != nil {
+					failed = fmt.Errorf("agentflow: outputs: %w", invalid)
+				}
 				continue
 			}
 			st.Node = g.node(next)
@@ -202,12 +240,12 @@ func (g *Graph) Replay(t agentturn.Transcript) (State, error) {
 	return st, failed
 }
 
-func parseResult(n *Node, output string) (Result, bool) {
+func parseResult(n *Node, output string) (Result, error) {
 	var res Result
-	if err := json.Unmarshal([]byte(output), &res); err != nil {
-		return Result{}, false
+	if err := decode([]byte(output), &res); err != nil {
+		return Result{}, err
 	}
-	return res, slices.Contains(n.outcomes(), res.Outcome)
+	return res, n.check(res)
 }
 
 func finishStep(args string) string {

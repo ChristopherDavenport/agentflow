@@ -1,6 +1,6 @@
 module github.com/ChristopherDavenport/agentflow
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/ChristopherDavenport/agentsession v0.0.41
@@ -9,3 +9,5 @@ require (
 	github.com/ChristopherDavenport/agentturn/session v0.0.42
 	github.com/ChristopherDavenport/openresponses v0.0.20
 )
+
+require github.com/ChristopherDavenport/agentworkspace v0.0.12
