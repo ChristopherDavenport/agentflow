@@ -257,7 +257,10 @@ func (g *Graph) checkRefs() []error {
 			errs = append(errs, fmt.Errorf("agentflow: %s: %s: "+format, append([]any{where, v.From}, args...)...))
 		}
 		if r.step == "" {
-			if g.Inputs == nil || !slices.Contains(g.Inputs.Required, r.path[0]) {
+			switch {
+			case g.Inputs == nil || !declares(g.Inputs, r.path[0]):
+				bad("not an input of the workflow%s", suggest(r.path[0], memberNames(g.Inputs)))
+			case !slices.Contains(g.Inputs.Required, r.path[0]):
 				bad("not a required input of the workflow")
 			}
 			return
@@ -265,7 +268,7 @@ func (g *Graph) checkRefs() []error {
 		from := g.node(r.step)
 		switch {
 		case from == nil:
-			bad("no step %q", r.step)
+			bad("no step %q%s", r.step, suggest(r.step, g.nodeIDs()))
 		case !have[r.step]:
 			bad("some path gets here without running %q", r.step)
 		case len(r.path) > 0 && len(from.schemas()) > 0 && !have[r.step+"."+r.path[0]]:
@@ -388,13 +391,13 @@ func (g *Graph) checkAlternatives() []error {
 func (g *Graph) possible(r ref) error {
 	if r.step == "" {
 		if g.Inputs == nil || !declares(g.Inputs, r.path[0]) {
-			return errors.New("not an input of the workflow")
+			return fmt.Errorf("not an input of the workflow%s", suggest(r.path[0], memberNames(g.Inputs)))
 		}
 		return nil
 	}
 	n := g.node(r.step)
 	if n == nil {
-		return fmt.Errorf("no step %q", r.step)
+		return fmt.Errorf("no step %q%s", r.step, suggest(r.step, g.nodeIDs()))
 	}
 	if len(r.path) == 0 {
 		return nil
@@ -404,7 +407,11 @@ func (g *Graph) possible(r ref) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("no outcome of %q declares %q", r.step, r.path[0])
+	var members []string
+	for _, s := range n.schemas() {
+		members = append(members, memberNames(s)...)
+	}
+	return fmt.Errorf("no outcome of %q declares %q%s", r.step, r.path[0], suggest(r.path[0], members))
 }
 
 func declares(s *agenttool.Schema, name string) bool {

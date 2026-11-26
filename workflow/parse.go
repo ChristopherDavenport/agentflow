@@ -13,6 +13,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -162,6 +164,13 @@ type settings struct {
 
 // strict decodes one YAML document, refusing keys it does not know.
 func strict(src []byte, v any) error {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(src, &doc); err != nil {
+		return err
+	}
+	if err := knownKeys(&doc, reflect.TypeOf(v)); err != nil {
+		return err
+	}
 	d := yaml.NewDecoder(bytes.NewReader(src))
 	d.KnownFields(true)
 	if err := d.Decode(v); err != nil && !errors.Is(err, io.EOF) {
@@ -223,7 +232,7 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 		i, ok := index[s.id]
 		switch {
 		case !ok:
-			return nil, fmt.Errorf("workflow: line %d: section %q is not a node of the diagram", s.line, s.id)
+			return nil, fmt.Errorf("workflow: line %d: section %q is not a node of the diagram%s", s.line, s.id, agentflow.Suggest(s.id, slices.Collect(maps.Keys(index))))
 		case seen[s.id]:
 			return nil, fmt.Errorf("workflow: line %d: section %q appears twice", s.line, s.id)
 		}
@@ -249,7 +258,7 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 			fallthrough
 		default:
 			if !slices.Contains(outcomes, e.outcome) {
-				return nil, fmt.Errorf("workflow: node %q: edge for undeclared outcome %q", e.from, e.outcome)
+				return nil, fmt.Errorf("workflow: node %q: edge for undeclared outcome %q%s", e.from, e.outcome, agentflow.Suggest(e.outcome, outcomes))
 			}
 		}
 		// An end's name is the outcome the workflow ends with. One named
@@ -469,7 +478,7 @@ func node(n *agentflow.Node, s section) error {
 		if schema != nil {
 			n.Data[outcome] = schema
 		} else if !slices.Contains(n.Outcomes, outcome) && outcome != agentflow.OK {
-			return fmt.Errorf("outcome %q is not declared", outcome)
+			return fmt.Errorf("outcome %q is not declared%s", outcome, agentflow.Suggest(outcome, n.Outcomes))
 		}
 		return nil
 	}); err != nil {
@@ -495,7 +504,7 @@ func node(n *agentflow.Node, s section) error {
 			case "data":
 				return v.Decode(&n.UnattendedData)
 			}
-			return fmt.Errorf("unattended: unknown key %q", key)
+			return unknownKey("unattended", key, "outcome", "data")
 		})
 	}
 	return nil
@@ -536,7 +545,7 @@ func question(n *agentflow.Node, set *settings) error {
 			case "as":
 				return v.Decode(&n.Choices.As)
 			}
-			return fmt.Errorf("choices: unknown key %q", key)
+			return unknownKey("choices", key, "from", "select", "outcome", "as")
 		}); err != nil {
 			return err
 		}
@@ -567,7 +576,7 @@ func question(n *agentflow.Node, set *settings) error {
 			case "as":
 				return v.Decode(&n.Text.As)
 			}
-			return fmt.Errorf("text: unknown key %q", key)
+			return unknownKey("text", key, "outcome", "as")
 		}); err != nil {
 			return err
 		}
@@ -586,7 +595,7 @@ func question(n *agentflow.Node, set *settings) error {
 			case "data":
 				return v.Decode(&n.OnTimeoutData)
 			}
-			return fmt.Errorf("on_timeout: unknown key %q", key)
+			return unknownKey("on_timeout", key, "outcome", "data")
 		})
 	}
 	return nil
@@ -654,7 +663,7 @@ func (r *ruleSpec) UnmarshalYAML(n *yaml.Node) error {
 		case "note":
 			return v.Decode(&r.Note)
 		}
-		return fmt.Errorf("line %d: a rule has no key %q", v.Line, key)
+		return fmt.Errorf("line %d: a rule has no key %q%s", v.Line, key, agentflow.Suggest(key, []string{"rule", "note"}))
 	})
 }
 
@@ -815,7 +824,7 @@ func fieldSchema(n *yaml.Node) (s *agenttool.Schema, required bool, err error) {
 			}
 			return err
 		default:
-			return fmt.Errorf("unknown key %q", key)
+			return unknownKey("", key, "type", "required", "description", "enum", "items", "properties")
 		}
 		return nil
 	})

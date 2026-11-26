@@ -276,7 +276,7 @@ func TestReferencesAreCheckedAtLoad(t *testing.T) {
 		{"valid", func(*agentflow.Graph) {}, ""},
 		{"later step", func(g *agentflow.Graph) { g.Nodes[0].With["x"] = agentflow.From("steps.tag.outputs") }, "without running"},
 		{"unknown step", func(g *agentflow.Graph) { g.Nodes[1].With["x"] = agentflow.From("steps.nope.outputs") }, "no step"},
-		{"unknown input", func(g *agentflow.Graph) { g.Nodes[0].With["pr"] = agentflow.From("inputs.repo") }, "not a required input"},
+		{"unknown input", func(g *agentflow.Graph) { g.Nodes[0].With["pr"] = agentflow.From("inputs.repo") }, "not an input of the workflow"},
 		{"field of another outcome", func(g *agentflow.Graph) { g.Nodes[4].Next["abort"] = "tag" }, "does not certainly produce"},
 		{"field never declared", func(g *agentflow.Graph) {
 			g.Nodes[5].With["name"] = agentflow.From("steps.confirm.outputs.tag")

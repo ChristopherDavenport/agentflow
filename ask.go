@@ -132,7 +132,7 @@ func (g *Graph) checkAsk(n *Node) []error {
 	}
 	declared := func(what, outcome string) bool {
 		if !slices.Contains(n.outcomes(), outcome) {
-			bad("%s: outcome %q is not declared: want one of %s", what, outcome, strings.Join(n.outcomes(), ", "))
+			bad("%s: outcome %q is not declared%s: want one of %s", what, outcome, suggest(outcome, n.outcomes()), strings.Join(n.outcomes(), ", "))
 			return false
 		}
 		return true

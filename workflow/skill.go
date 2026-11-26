@@ -90,7 +90,13 @@ func LoadWith(s *agentskill.Skill, find Find) (*Workflow, error) {
 			case inSkill:
 				src, ok := w.Skills[skill][rel]
 				if !ok {
-					return nil, fmt.Errorf("workflow: %s: node %q calls %s, which is not in skill %q", g.Name, n.ID, n.Flow, skill)
+					var md []string
+					for p := range w.Skills[skill] {
+						if strings.HasSuffix(p, ".md") && p != "SKILL.md" {
+							md = append(md, "./"+p)
+						}
+					}
+					return nil, fmt.Errorf("workflow: %s: node %q calls %s, which is not in skill %q%s", g.Name, n.ID, n.Flow, skill, agentflow.Suggest(n.Flow, md))
 				}
 				if c, err = Parse(name, src); err != nil {
 					return nil, fmt.Errorf("workflow: skill %q: %s: %w", skill, rel, err)
@@ -136,7 +142,7 @@ func FromCatalog(c *agentskill.Catalog) Find {
 	return func(name string) (*agentskill.Skill, error) {
 		s, ok := c.Lookup(name)
 		if !ok {
-			return nil, errors.New("no such skill")
+			return nil, fmt.Errorf("no such skill%s", agentflow.Suggest(name, c.Names()))
 		}
 		return s, nil
 	}

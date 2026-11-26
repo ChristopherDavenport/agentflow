@@ -323,7 +323,10 @@ bring at least one of its references. The references of `latest` and
 member some outcome declares, so a misspelt name is not read as absent. A loop that can re-run a step
 with another outcome loses the first outcome's members. A workflow's
 `outputs` are checked at every way out. Whether `with` covers what a
-tool requires is not yet checked.
+tool requires is not yet checked. A tool a step names must be one the
+config offers, where the config lists its tools, and an error about any
+unknown name suggests the one that was likely meant (RFC 0005, section
+33).
 
 A Go builder constructs the same graph, and the graph can be written
 back out as `WORKFLOW.md`.

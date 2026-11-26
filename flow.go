@@ -175,11 +175,11 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 				}
 			}
 			if n.Model != "" && f.models != nil && !slices.Contains(f.models, n.Model) {
-				return cfg, fmt.Errorf("agentflow: %s: node %q asks for model %q, which the host does not serve: want one of %s", x.Name, n.ID, n.Model, strings.Join(f.models, ", "))
+				return cfg, fmt.Errorf("agentflow: %s: node %q asks for model %q, which the host does not serve%s: want one of %s", x.Name, n.ID, n.Model, suggest(n.Model, f.models), strings.Join(f.models, ", "))
 			}
 		}
 		if x.Model != "" && f.models != nil && !slices.Contains(f.models, x.Model) {
-			return cfg, fmt.Errorf("agentflow: %s asks for model %q, which the host does not serve: want one of %s", x.Name, x.Model, strings.Join(f.models, ", "))
+			return cfg, fmt.Errorf("agentflow: %s asks for model %q, which the host does not serve%s: want one of %s", x.Name, x.Model, suggest(x.Model, f.models), strings.Join(f.models, ", "))
 		}
 	}
 	if f.maxSteps < 0 {
@@ -239,6 +239,9 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 		!slices.ContainsFunc(cfg.Tools, func(t agenttool.Tool) bool { return t.Name() == ScriptTool }) {
 		return cfg, fmt.Errorf("agentflow: the graph has script steps and the config no %q tool", ScriptTool)
 	}
+	if err := checkTools(closure, cfg); err != nil {
+		return cfg, err
+	}
 
 	cfg.Model = f
 	f.due = &deadline{}
@@ -264,6 +267,44 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 		return userTool(ctx, info)
 	}
 	return cfg, nil
+}
+
+// checkTools holds the tools steps name to those the config offers,
+// where it says what they are: a tool a program step calls, and those a
+// model step working in this context may. A child's tools are its
+// opener's, and a config with a ToolProvider names its tools only as it
+// runs.
+func checkTools(closure map[string]*Graph, cfg agentturn.Config) error {
+	if cfg.ToolProvider != nil {
+		return nil
+	}
+	var offered []string
+	for _, t := range cfg.Tools {
+		if !strings.HasPrefix(t.Name(), reserved) {
+			offered = append(offered, t.Name())
+		}
+	}
+	var errs []error
+	missing := func(x *Graph, n *Node, tool string) {
+		if !slices.Contains(offered, tool) {
+			errs = append(errs, fmt.Errorf("agentflow: %s: node %q names the tool %s, which the config does not offer%s", x.Name, n.ID, tool, suggest(tool, offered)))
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(closure)) {
+		x := closure[name]
+		for i := range x.Nodes {
+			n := &x.Nodes[i]
+			switch {
+			case n.Kind == Run && n.Tool != "":
+				missing(x, n, n.Tool)
+			case n.Kind == Agent && !n.fresh():
+				for _, tool := range n.Tools {
+					missing(x, n, tool)
+				}
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // ErrPositionLost is a transcript that no longer says where the workflow

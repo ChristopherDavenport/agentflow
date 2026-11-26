@@ -150,3 +150,47 @@ last line with no newline is reported when the script exits.
 - **Where it lives.** The file is `.agentflow-progress-<id>` at the
   workspace's root, beside the result file, and is removed when the call
   ends.
+
+## 33. Load errors that name what was meant
+
+```
+workflow: node "review": line 3: unknown key "outcome"; did you mean "outcomes"?
+agentflow: node "fix": edge to unknown node "gathr"; did you mean "gather"?
+agentflow: node "fix": steps.reveiw.outputs.findings: no step "reveiw"; did you mean "review"?
+```
+
+Every load error that names something unknown ends, when one name is
+close enough to be what was meant, with `; did you mean "x"?`. One helper
+says it, `agentflow.Suggest(name, among)`, in both packages: the closest
+name by edit distance, at most 2 edits and at most a third of the name's
+length (1 for a short one), the first in order on a tie, and nothing when
+none is that close, since a guess at something unrelated misleads.
+
+It covers:
+
+- **Keys.** Every key of the frontmatter and of a section's settings, at
+  any depth (`judge`, `policy`, a schema field), is checked against what
+  that place takes before the settings are decoded, with the line.
+  `unattended`, `choices`, `text`, `on_timeout`, a policy rule and a
+  schema field, which are read by hand, say the same. The new keys of
+  this RFC, `description` and `skills`, are among them.
+- **Nodes.** A section for no node, and an edge to an unknown node.
+- **Outcomes.** An edge or end for an undeclared outcome, a judge's
+  outcomes, `unattended`, `on_timeout`, `choices` and `text`, the outcomes
+  of `outputs`, and a step's data.
+- **References.** `steps.<id>` to no step, `inputs.<name>` to no input, and
+  a member no outcome declares.
+- **Workflows, files and skills.** A call to no workflow, a `./<path>.md`
+  that is not in the skill, a misspelt skill name (`FromCatalog` suggests
+  among the catalog's names), and a step `Delegate` names.
+- **Tools and models.** A rule of a policy naming a tool its step does not
+  offer, a model the host does not serve, and, new here, a tool a step
+  names that the config does not offer: a program step's `tool`, and the
+  `tools` of a model step working in the current context. A child's tools
+  are its opener's and a config with a `ToolProvider` names its tools
+  only as it runs, so neither is checked.
+
+One check is new rather than reworded. A tool a step names that the
+config does not offer was, when the step ran, left out of the model's
+request without a word, or failed the program's call. It is now a load
+error, since what the config offers is known at `Apply`.

@@ -492,7 +492,7 @@ func (g *Graph) Validate() error {
 			}
 			for _, outcome := range j.Outcomes {
 				if !slices.Contains(n.outcomes(), outcome) {
-					bad("node %q: judge: undeclared outcome %q", n.ID, outcome)
+					bad("node %q: judge: undeclared outcome %q%s", n.ID, outcome, suggest(outcome, n.outcomes()))
 				}
 			}
 			for _, tool := range j.Tools {
@@ -506,16 +506,16 @@ func (g *Graph) Validate() error {
 		unknown := n.Flow != "" && n.call == nil && len(n.Outcomes) == 0
 		for outcome, next := range n.Next {
 			if !unknown && !slices.Contains(n.outcomes(), outcome) {
-				bad("node %q: edge for undeclared outcome %q", n.ID, outcome)
+				bad("node %q: edge for undeclared outcome %q%s", n.ID, outcome, suggest(outcome, n.outcomes()))
 			}
 			if g.node(next) == nil {
-				bad("node %q: edge to unknown node %q", n.ID, next)
+				bad("node %q: edge to unknown node %q%s", n.ID, next, suggest(next, g.nodeIDs()))
 			}
 		}
 		for outcome, end := range n.Ends {
 			switch {
 			case !unknown && !slices.Contains(n.outcomes(), outcome):
-				bad("node %q: end for undeclared outcome %q", n.ID, outcome)
+				bad("node %q: end for undeclared outcome %q%s", n.ID, outcome, suggest(outcome, n.outcomes()))
 			case n.Next[outcome] != "":
 				bad("node %q: outcome %q both goes on and ends", n.ID, outcome)
 			case !nodeID.MatchString(end) || g.node(end) != nil:
@@ -523,11 +523,11 @@ func (g *Graph) Validate() error {
 			}
 		}
 		if n.Unattended != "" && (n.Kind != Person || !slices.Contains(n.outcomes(), n.Unattended)) {
-			bad("node %q: unattended must be an outcome of a person node", n.ID)
+			bad("node %q: unattended must be an outcome of a person node%s", n.ID, suggest(n.Unattended, n.outcomes()))
 		}
 		for outcome := range n.Data {
 			if !slices.Contains(n.outcomes(), outcome) {
-				bad("node %q: data for undeclared outcome %q", n.ID, outcome)
+				bad("node %q: data for undeclared outcome %q%s", n.ID, outcome, suggest(outcome, n.outcomes()))
 			}
 		}
 		if n.Unattended != "" {
@@ -548,7 +548,7 @@ func (g *Graph) Validate() error {
 		for outcome, outputs := range g.OutputsBy {
 			switch {
 			case !slices.Contains(outcomes, outcome):
-				bad("outputs for %q, which is not an outcome of the workflow: want one of %s", outcome, strings.Join(outcomes, ", "))
+				bad("outputs for %q, which is not an outcome of the workflow%s: want one of %s", outcome, suggest(outcome, outcomes), strings.Join(outcomes, ", "))
 			case outcome == Failed && len(outputs) > 0:
 				bad("outputs for %q: a workflow that fails gives nothing back", outcome)
 			}
