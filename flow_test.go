@@ -33,10 +33,12 @@ type scriptArgs struct {
 	Name string `json:"name"`
 }
 
+// scriptTool runs a script that gives a new result each time, as one
+// that reads a changing repository does, so no loop it is on repeats.
 func scriptTool(ran *[]string) agenttool.Tool {
 	return agenttool.New("script", "Run a script.", func(_ context.Context, a scriptArgs) (Result, error) {
 		*ran = append(*ran, a.Name)
-		return Result{Outcome: OK}, nil
+		return Result{Outcome: OK, Data: map[string]any{"run": len(*ran)}}, nil
 	})
 }
 
@@ -92,7 +94,7 @@ func runIn(req openresponses.Request) string {
 // withRun adds to a finish or a verdict the run the request names, as a
 // model reads it from its instructions.
 func withRun(req openresponses.Request, tool, args string) string {
-	if tool != finishTool && tool != judgeTool {
+	if tool != finishTool && tool != judgeTool && tool != stuckTool {
 		return args
 	}
 	var m map[string]any
@@ -174,7 +176,7 @@ func TestNoQuestionWhenClean(t *testing.T) {
 	for _, tool := range m.requests[0].Tools {
 		offered = append(offered, tool.(*openresponses.FunctionTool).Name)
 	}
-	if want := []string{finishTool}; !slices.Equal(offered, want) {
+	if want := []string{finishTool, stuckTool}; !slices.Equal(offered, want) {
 		t.Errorf("offered = %v, want %v", offered, want)
 	}
 }
@@ -404,6 +406,7 @@ func TestVisitLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	end, _ = a.Resume(context.Background(), ans)
+	end = stopAt(t, g, a, end, "visits")
 	if end == nil || !errors.Is(end.Err, ErrVisits) {
 		t.Fatalf("end = %+v", end)
 	}
@@ -468,7 +471,9 @@ func TestLoopBounds(t *testing.T) {
 			g := loop(tc.max)
 			cfg := apply(t, g, &fakeModel{}, scriptTool(&ran))
 			cfg.MaxTurns = 40
-			end, _ := agentturn.New(cfg).Prompt(context.Background(), openresponses.UserText("go"))
+			a := agentturn.New(cfg)
+			end, _ := a.Prompt(context.Background(), openresponses.UserText("go"))
+			end = stopAt(t, g, a, end, "visits")
 			if end == nil || !errors.Is(end.Err, ErrVisits) {
 				t.Fatalf("end = %+v", end)
 			}

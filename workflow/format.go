@@ -41,8 +41,15 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 		}
 		front.add("outputs", &out.Node)
 	}
-	if g.MaxDepth != 0 {
-		if err := front.set("max_depth", g.MaxDepth); err != nil {
+	for _, s := range []struct {
+		key string
+		set bool
+		v   any
+	}{{"max_depth", g.MaxDepth != 0, g.MaxDepth}, {"max_steps", g.MaxSteps != 0, g.MaxSteps}, {"model", g.Model != "", g.Model}, {"thinking", g.Thinking != "", g.Thinking}} {
+		if !s.set {
+			continue
+		}
+		if err := front.set(s.key, s.v); err != nil {
 			return nil, err
 		}
 	}
@@ -173,6 +180,9 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 	set("context", n.Context != "", n.Context)
 	set("dir", n.Dir != "", n.Dir)
 	set("model", n.Model != "", n.Model)
+	set("thinking", n.Thinking != "", n.Thinking)
+	set("timeout", n.Timeout != 0, n.Timeout.String())
+	set("policy", n.Policy != nil, n.Policy)
 	set("instructions", n.InstructionsFile != "", n.InstructionsFile)
 	set("child", n.Child != "", n.Child)
 	set("outcomes", n.Outcomes != nil, n.Outcomes)
@@ -197,6 +207,9 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 		}
 		if j.Returns != 0 {
 			judge["max_returns"] = j.Returns
+		}
+		if j.Policy != nil {
+			judge["policy"] = j.Policy
 		}
 		set("judge", true, judge)
 	}

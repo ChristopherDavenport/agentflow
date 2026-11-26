@@ -72,6 +72,15 @@ func (f *flow) drive(ctx context.Context, a *agentturn.Agent, end *agentturn.Run
 		switch {
 		case end == nil:
 			return nil, st, errors.New("agentflow: no run to drive")
+		case errors.Is(end.Err, ErrStepTimeout) && err == nil:
+			// The model was cut off at its step's deadline: the program
+			// records the step's failure, and asks about it.
+			next, err := a.Continue(ctx)
+			if next == nil {
+				return end, st, err
+			}
+			end = next
+			continue
 		case end.Err != nil:
 			return end, st, end.Err
 		case err != nil:

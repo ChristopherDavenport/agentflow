@@ -209,7 +209,8 @@ func TestEveryWayOfLeavingIsWritten(t *testing.T) {
 		g.node("gather").MaxVisits = 1
 		fixed := says{finishTool, `{"step":"fix","outcome":"ok"}`}
 		a, read := recorded(t, g, scriptTool(&ran), &cast{script: []says{found, verdict("fix"), fixed}}, Delegate(Decide))
-		if end, _, _ := Drive(context.Background(), g, a, run(a)); !errors.Is(end.Err, ErrVisits) {
+		end, _, _ := Drive(context.Background(), g, a, run(a))
+		if end = stopAt(t, g, a, end, "visits"); !errors.Is(end.Err, ErrVisits) {
 			t.Errorf("err = %v", end.Err)
 		}
 		_, all := read()

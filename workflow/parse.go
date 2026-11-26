@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ChristopherDavenport/agentflow"
 	"github.com/ChristopherDavenport/agenttool"
@@ -116,6 +117,9 @@ type frontmatter struct {
 	Inputs   yaml.Node `yaml:"inputs"`
 	Outputs  yaml.Node `yaml:"outputs"`
 	MaxDepth int       `yaml:"max_depth"`
+	MaxSteps int       `yaml:"max_steps"`
+	Model    string    `yaml:"model"`
+	Thinking string    `yaml:"thinking"`
 }
 
 type settings struct {
@@ -132,11 +136,16 @@ type settings struct {
 	Model        string `yaml:"model"`
 	Instructions string `yaml:"instructions"`
 	Child        string `yaml:"child"`
-	Judge        *struct {
-		Criteria string   `yaml:"criteria"`
-		Outcomes []string `yaml:"outcomes"`
-		Tools    []string `yaml:"tools"`
-		Returns  int      `yaml:"max_returns"`
+	// A step's own settings.
+	Thinking string            `yaml:"thinking"`
+	Timeout  string            `yaml:"timeout"`
+	Policy   *agentflow.Policy `yaml:"policy"`
+	Judge    *struct {
+		Criteria string            `yaml:"criteria"`
+		Outcomes []string          `yaml:"outcomes"`
+		Tools    []string          `yaml:"tools"`
+		Returns  int               `yaml:"max_returns"`
+		Policy   *agentflow.Policy `yaml:"policy"`
 	} `yaml:"judge"`
 	Outcomes   []string  `yaml:"outcomes"`
 	Unattended yaml.Node `yaml:"unattended"`
@@ -173,7 +182,7 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 		if g.Inputs, err = objectSchema(&fm.Inputs); err != nil {
 			return nil, fmt.Errorf("workflow: inputs: %w", err)
 		}
-		outputs, g.MaxDepth = fm.Outputs, fm.MaxDepth
+		outputs, g.MaxDepth, g.MaxSteps, g.Model, g.Thinking = fm.Outputs, fm.MaxDepth, fm.MaxSteps, fm.Model, fm.Thinking
 		offset = end + 2
 		lines = lines[offset:]
 	}
@@ -414,8 +423,16 @@ func node(n *agentflow.Node, s section) error {
 	}
 	n.Context = set.Context
 	n.Dir, n.Model, n.InstructionsFile, n.Child = set.Dir, set.Model, set.Instructions, set.Child
+	n.Thinking, n.Policy = set.Thinking, set.Policy
+	if set.Timeout != "" {
+		d, err := time.ParseDuration(set.Timeout)
+		if err != nil || d <= 0 {
+			return fmt.Errorf("timeout %q: want a duration such as 90s, 10m or 1h", set.Timeout)
+		}
+		n.Timeout = d
+	}
 	if j := set.Judge; j != nil {
-		n.Judge = &agentflow.Judge{Criteria: strings.TrimSpace(j.Criteria), Outcomes: j.Outcomes, Tools: j.Tools, Returns: j.Returns}
+		n.Judge = &agentflow.Judge{Criteria: strings.TrimSpace(j.Criteria), Outcomes: j.Outcomes, Tools: j.Tools, Returns: j.Returns, Policy: j.Policy}
 	}
 	if n.Kind != agentflow.Agent && n.Tools != nil {
 		return errors.New("only a model node has tools")

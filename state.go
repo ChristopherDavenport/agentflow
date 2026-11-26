@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
@@ -24,10 +25,14 @@ const (
 	judgeTool  = "flow_judge"
 	endTool    = "flow_end"
 	callTool   = "flow_call"
+	clockTool  = "flow_clock"
+	stuckTool  = "flow_stuck"
 
 	// The outcomes of the question a failed step raises.
 	retryOutcome = "retry"
 	stopOutcome  = "stop"
+	// The outcomes of the question a bound raises.
+	grantOutcome = "grant"
 
 	invocationPrefix = "agentflow: start "
 	nudgePrefix      = "agentflow: the step is not finished."
@@ -46,7 +51,34 @@ var (
 	// ErrDepth is a call nested deeper than the run allows. It fails
 	// every run it is nested in, since calling again would go as deep.
 	ErrDepth = errors.New("agentflow: calls nested too deeply")
+	// ErrSteps is a tree of runs that has entered more steps than its
+	// bound. It fails every run of the tree.
+	ErrSteps = errors.New("agentflow: step limit reached")
+	// ErrRepeat is a program step that gave the same outcome and data
+	// [RepeatLimit] times in a row: a loop that is not getting anywhere.
+	ErrRepeat = errors.New("agentflow: a step repeats itself")
+	// ErrStepTimeout is a model step that ran past its timeout. The
+	// program records it as the step's failure on its next turn.
+	ErrStepTimeout = errors.New("agentflow: the step ran past its timeout")
 )
+
+// DefaultMaxSteps is how many steps a tree of runs may enter when its
+// workflow sets no bound of its own.
+const DefaultMaxSteps = 200
+
+// RepeatLimit is how many times in a row a program step may give the
+// same outcome and data before the loop it is on is stopped.
+const RepeatLimit = 3
+
+// Reached is a bound a run has come to, which a person may raise.
+type Reached struct {
+	// Limit names the bound: visits, depth, steps or repeat.
+	Limit string
+	// Reason says what reached it.
+	Reason string
+	// Step is the step that repeated, for repeat.
+	Step string
+}
 
 // Result is the output of every step. A tool a Run node calls returns
 // one. Anything else, an error or a refusal among them, fails the step:
@@ -59,6 +91,13 @@ type Result struct {
 	// Reason is why, in the words of whoever chose. It is for whoever
 	// reads the record: no step reads it as data.
 	Reason string `json:"reason,omitempty"`
+	// Entries and Granted are, for a call into a child, the steps its
+	// runs entered and the more a person granted there, which count
+	// toward the caller's tree. Limit names a bound across the tree its
+	// run failed on, which fails the caller too.
+	Entries int    `json:"entries,omitempty"`
+	Granted int    `json:"granted,omitempty"`
+	Limit   string `json:"limit,omitempty"`
 }
 
 // Step is one finished node.
@@ -127,8 +166,15 @@ type State struct {
 	Callee   string
 	Returned *Ending
 	// Entries counts the steps entered across the whole tree of runs
-	// this one belongs to, attempts and calls included.
-	Entries int
+	// this one belongs to, attempts and calls included, and Granted the
+	// steps a person granted it past its bound.
+	Entries, Granted int
+	// Reached is a bound the run has come to at Node, which waits on a
+	// person to grant more or to stop.
+	Reached *Reached
+	// Deadline is when the current attempt of a model step must be done
+	// by, as the program's clock recorded it; zero for no timeout.
+	Deadline time.Time
 	// Path is the way from the root run to this one, with the step each
 	// is at.
 	Path []Place
@@ -149,10 +195,19 @@ type State struct {
 	refused int
 	// kept are the children the run keeps, by name, each with its spawn.
 	kept map[string]string
+	// callers are the calls the run is nested in, in the transcript,
+	// outermost first.
+	callers []caller
+	// clocked says the program has read the clock for this attempt, and
+	// asked counts the bounds asked about in it.
+	clocked bool
+	asked   int
 
 	g        *Graph
 	prefix   string
 	maxDepth int
+	// maxSteps is the tree's bound on step entries.
+	maxSteps int
 	// calleeInputs is what Callee was started with.
 	calleeInputs any
 	// limit names the bound across the tree the run failed on, which no
@@ -160,9 +215,18 @@ type State struct {
 	limit string
 }
 
-// limits are the bounds across a tree of runs, by the name an ending
-// records.
-var limits = map[string]error{"depth": ErrDepth}
+// caller is a call a run is nested in.
+type caller struct {
+	node     *Node
+	workflow string
+}
+
+// limits are the bounds a run can reach, by the name an ending records.
+var limits = map[string]error{"depth": ErrDepth, "steps": ErrSteps, "visits": ErrVisits, "repeat": ErrRepeat}
+
+// treeWide says a bound is the tree's: a run that fails on it fails every
+// run it is nested in, which neither retries it nor routes on it.
+func treeWide(limit string) bool { return limit == "depth" || limit == "steps" }
 
 // limitError is a bound across the tree that a run nested deeper hit.
 type limitError struct {
@@ -192,6 +256,9 @@ type startPayload struct {
 	Caller      string            `json:"caller,omitempty"`
 	Depth       int               `json:"depth,omitempty"`
 	MaxDepth    int               `json:"max_depth,omitempty"`
+	// MaxSteps bounds the steps the tree may enter: for a run nobody
+	// called, the bound; for a child, what its caller had left.
+	MaxSteps int `json:"max_steps,omitempty"`
 	// Context is fresh for a run in a child session, whose caller's call
 	// holds it. Path is then the way to the call from the run nobody
 	// called, so the child reads on its own.
@@ -264,6 +331,14 @@ func (st State) endID() string { return st.prefix + "end" }
 // judgeID is the ID of the call that has a judge look at a question.
 func (st State) judgeID() string { return st.callID() + "-judge" }
 
+// clockID is the ID of the call that reads the clock for a model step's
+// attempt, and timeoutID that of the one that says its time ran out.
+func (st State) clockID() string   { return st.callID() + "-clock" }
+func (st State) timeoutID() string { return st.callID() + "-timeout" }
+
+// limitID is the ID of the question a bound raises.
+func (st State) limitID() string { return st.callID() + "-limit" + strconv.Itoa(st.asked+1) }
+
 // frame is one run as replay reads it.
 type frame struct {
 	st     State
@@ -282,6 +357,13 @@ type frame struct {
 	// path is where a run in a child stands in the tree it was called
 	// from.
 	path []Place
+	// extra are the visits a person granted each node past its bound, and
+	// repeats the repeats; repeating names the step whose repeat waits to
+	// be asked about.
+	extra, repeats map[string]int
+	repeating      string
+	// came says how the current node was reached, for a bound to say.
+	came string
 }
 
 // freshCall is a call a run made into a child session.
@@ -308,6 +390,9 @@ type replay struct {
 	// call none of them made is known to have lost its start.
 	prefixes []string
 	orphaned bool
+	// maxSteps is the tree's bound on step entries, and granted what a
+	// person added to it.
+	maxSteps, granted int
 }
 
 // Replay reads where the workflow stands from a transcript: the
@@ -341,7 +426,12 @@ func (g *Graph) replay(t agentturn.Transcript) *replay {
 }
 
 func (r *replay) newRoot(inputs any) *frame {
-	return &frame{st: State{g: r.g, Workflow: r.g.Name, Inputs: inputs}, visits: map[string]int{}, since: -1, start: -1, end: -1}
+	return newFrame(State{g: r.g, Workflow: r.g.Name, Inputs: inputs}, -1, nil)
+}
+
+func newFrame(st State, start int, parent *frame) *frame {
+	return &frame{st: st, visits: map[string]int{}, since: -1, start: start, end: -1, parent: parent,
+		extra: map[string]int{}, repeats: map[string]int{}}
 }
 
 // top is the innermost run under way, or the root when none is.
@@ -356,8 +446,9 @@ func (r *replay) top() *frame {
 func (r *replay) state(f *frame) State {
 	st := f.st
 	st.abandoned = r.abandoned
-	st.Entries = r.entries
+	st.Entries, st.Granted, st.maxSteps = r.entries, r.granted, r.maxSteps
 	st.Path = slices.Clone(r.root.path)
+	st.callers = nil
 	for _, s := range r.stack {
 		p := Place{Workflow: s.st.Workflow, Run: s.st.Instance}
 		if s.st.Node != nil {
@@ -367,11 +458,14 @@ func (r *replay) state(f *frame) State {
 		if s == f {
 			break
 		}
+		if s.st.Node != nil {
+			st.callers = append(st.callers, caller{s.st.Node, s.st.Workflow})
+		}
 	}
 	return st
 }
 
-var tagPattern = regexp.MustCompile(`\(run ([A-Za-z0-9_-]+), visit (\d+)\)\s*$`)
+var tagPattern = regexp.MustCompile(`\(run ([A-Za-z0-9_-]+), visit (\d+)(?:, attempt \d+)?\)\s*$`)
 
 // tagged says which run a workflow message is about, "" for none.
 func tagged(text string) string {
@@ -499,6 +593,12 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 	n := st.Node
 	res, invalid := parseResult(n, out.Output.String())
 	switch {
+	case st.Reached != nil:
+		if out.CallID != st.limitID() {
+			return
+		}
+		r.grant(f, out.Output.String())
+		return
 	case st.Failure != "":
 		if out.CallID != st.retryID() {
 			return
@@ -508,9 +608,33 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 		if answer.Outcome == retryOutcome {
 			st.Attempt, st.Failure = st.Attempt+1, ""
 			st.Callee, st.Returned, st.calleeInputs = "", nil, nil
+			st.clocked, st.Deadline, st.asked = false, time.Time{}, 0
+			if n.Kind == Agent {
+				// The step opens again, and what came before is not about
+				// this attempt.
+				f.since, st.Nudges, st.Begun, st.refused = i, 0, false, 0
+			}
 			r.entries++
+			r.bounds(f)
 		} else {
 			f.failed = fmt.Errorf("%w: %s: %s", ErrStepFailed, n.ID, st.Failure)
+		}
+		return
+	case c.Name == clockTool && strings.HasPrefix(c.CallID, reserved):
+		switch out.CallID {
+		case st.clockID():
+			st.clocked = true
+			var read struct {
+				Data struct {
+					Deadline time.Time `json:"deadline"`
+				} `json:"data"`
+			}
+			if json.Unmarshal([]byte(out.Output.String()), &read) == nil {
+				st.Deadline = read.Data.Deadline
+			}
+		case st.timeoutID():
+			// Its output is the failure, whatever it says.
+			st.Failure = out.Output.String()
 		}
 		return
 	case c.Name == judgeTool && strings.HasPrefix(c.CallID, reserved):
@@ -546,8 +670,20 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 		if n.Verdict {
 			finish = judgeTool
 		}
-		if c.Name != finish || finishStep(c.Arguments) != n.ID || r.at[out.CallID] < f.since {
+		if c.Name != finish && (c.Name != stuckTool || !n.canStick()) || finishStep(c.Arguments) != n.ID || r.at[out.CallID] < f.since {
 			return
+		}
+		if c.Name == stuckTool {
+			var said Result
+			if decode([]byte(out.Output.String()), &said) != nil || said.Outcome != Stuck {
+				// A refused report is not progress; the model saw why.
+				return
+			}
+			if !n.routesStuck() {
+				st.Failure = "the model reported it is stuck: " + said.Reason
+				return
+			}
+			res, invalid = said, nil
 		}
 		if invalid != nil {
 			if st.refused++; n.Verdict && st.refused >= 2 && f.failed == nil {
@@ -558,6 +694,19 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 	default:
 		if out.CallID != st.callID() || n.Flow != "" && !n.fresh() && st.Returned == nil {
 			return
+		}
+		if n.fresh() {
+			// What the child's runs spent counts toward this tree, and a
+			// bound across the tree it failed on fails this run.
+			var spent Result
+			if decode([]byte(out.Output.String()), &spent) == nil {
+				r.entries += spent.Entries
+				r.granted += spent.Granted
+				if spent.Limit != "" {
+					f.failed, st.limit = &limitError{limits[spent.Limit], spent.Reason}, spent.Limit
+					return
+				}
+			}
 		}
 		if invalid != nil {
 			st.Failure = out.Output.String()
@@ -610,6 +759,11 @@ func (r *replay) started(i int, f *frame, c *openresponses.FunctionCall, out *op
 			Depth: p.Depth, Fresh: p.Context == ContextFresh, g: r.g, prefix: prefix, maxDepth: cmpDepth(p.MaxDepth)}
 		root.path = p.Path
 		root.start = r.at[c.CallID]
+		// A child is given what its caller's tree had left, none included.
+		r.maxSteps = p.MaxSteps
+		if p.Context != ContextFresh {
+			r.maxSteps = cmpSteps(p.MaxSteps)
+		}
 		r.stack = []*frame{root}
 		r.frames = append(r.frames, root)
 		r.enter(root, i, &r.g.Nodes[0])
@@ -633,9 +787,8 @@ func (r *replay) started(i int, f *frame, c *openresponses.FunctionCall, out *op
 		return
 	}
 	st.Callee, st.calleeInputs = p.Run, p.Inputs
-	child := &frame{st: State{Started: true, Instance: p.Run, Workflow: g.Name, Parent: p.Parent, Caller: p.Caller, Depth: p.Depth,
-		Inputs: p.Inputs, g: g, prefix: prefix, maxDepth: st.maxDepth},
-		visits: map[string]int{}, since: -1, start: r.at[c.CallID], end: -1, parent: f}
+	child := newFrame(State{Started: true, Instance: p.Run, Workflow: g.Name, Parent: p.Parent, Caller: p.Caller, Depth: p.Depth,
+		Inputs: p.Inputs, g: g, prefix: prefix, maxDepth: st.maxDepth}, r.at[c.CallID], f)
 	r.stack = append(r.stack, child)
 	r.frames = append(r.frames, child)
 	r.enter(child, i, &g.Nodes[0])
@@ -667,6 +820,13 @@ func (r *replay) changed(p startPayload) error {
 	return fmt.Errorf("%w: %s", ErrChanged, strings.Join(names, ", "))
 }
 
+func cmpSteps(n int) int {
+	if n <= 0 {
+		return DefaultMaxSteps
+	}
+	return n
+}
+
 func cmpDepth(d int) int {
 	if d <= 0 {
 		return DefaultMaxDepth
@@ -691,7 +851,10 @@ func (r *replay) ended(c *openresponses.FunctionCall, out *openresponses.Functio
 	f.ending, f.end = &e, r.at[out.CallID]
 	f.st.Ended = true
 	// A step that failed with nobody to ask is over only by saying so.
-	if e.Status == Failed && f.failed == nil {
+	switch {
+	case e.Status == Failed && f.failed == nil && limits[e.Limit] != nil:
+		f.failed, f.st.limit = &limitError{limits[e.Limit], e.Reason}, e.Limit
+	case e.Status == Failed && f.failed == nil:
 		f.failed = fmt.Errorf("%w: %s", ErrStepFailed, e.Reason)
 	}
 	r.stack = r.stack[:len(r.stack)-1]
@@ -702,7 +865,7 @@ func (r *replay) ended(c *openresponses.FunctionCall, out *openresponses.Functio
 	// The caller learns what came of the call.
 	if p.st.Callee == f.st.Instance {
 		p.st.Returned = &e
-		if e.Limit != "" && p.failed == nil {
+		if treeWide(e.Limit) && p.failed == nil {
 			p.failed, p.st.limit = &limitError{limits[e.Limit], e.Reason}, e.Limit
 		}
 	}
@@ -729,17 +892,116 @@ func (r *replay) finish(f *frame, i int, step Step) {
 		}
 		return
 	}
+	// A program step that keeps giving the same result is on a loop that
+	// is not getting anywhere, which is asked about before going on.
+	if n.Kind == Run && n.Flow == "" && repeated(st.Steps, n.ID) >= RepeatLimit+f.repeats[n.ID] {
+		f.repeating = n.ID
+	}
+	f.came = fmt.Sprintf("%q came back to it on %q", n.ID, step.Result.Outcome)
+	r.enter(f, i, st.g.node(next))
+}
+
+// repeated is how many times in a row, among steps, the step id last
+// gave the same outcome and data.
+func repeated(steps []Step, id string) int {
+	count := 0
+	var last *Result
+	for k := len(steps) - 1; k >= 0; k-- {
+		s := steps[k]
+		if s.Node != id {
+			continue
+		}
+		if last != nil && (s.Result.Outcome != last.Outcome || !sameJSON(s.Result.Data, last.Data)) {
+			break
+		}
+		last = &steps[k].Result
+		count++
+	}
+	return count
+}
+
+// bounds raises the first bound f's current step has come to, unless
+// one is already raised: the step's visits, the depth of a call, the
+// tree's step entries, and a step that repeats itself.
+func (r *replay) bounds(f *frame) {
+	st := &f.st
+	n := st.Node
+	if n == nil || st.Reached != nil || f.failed != nil || st.Done {
+		return
+	}
 	g := st.g
-	r.enter(f, i, g.node(next))
-	if bound := g.visits(st.Node); st.Visit > bound {
+	switch bound := g.visits(n) + f.extra[n.ID]; {
+	case st.Visit > bound:
 		from := "its max_visits"
-		if st.Node.MaxVisits == 0 {
+		if n.MaxVisits == 0 {
 			from = "the default for a step on a loop"
 		}
-		f.failed = fmt.Errorf("%w: step %q of workflow %q has run %d times, %s, and %q came back to it on %q; set max_visits for the step to change it",
-			ErrVisits, next, g.Name, bound, from, n.ID, step.Result.Outcome)
+		if f.extra[n.ID] > 0 {
+			from += fmt.Sprintf(" and %d granted", f.extra[n.ID])
+		}
+		st.Reached = &Reached{Limit: "visits", Reason: fmt.Sprintf("%v: step %q of workflow %q has run %d times, %s, and %s; set max_visits for the step to change it",
+			ErrVisits, n.ID, g.Name, bound, from, f.came)}
+	case n.Flow != "" && st.Depth+1 > st.maxDepth:
+		st.Reached = &Reached{Limit: "depth", Reason: fmt.Sprintf("%v: step %q of workflow %q would call %s at depth %d, and the run allows %d",
+			ErrDepth, n.ID, st.Workflow, n.Flow, st.Depth+1, st.maxDepth)}
+	case r.entries > r.maxSteps+r.granted:
+		st.Reached = &Reached{Limit: "steps", Reason: fmt.Sprintf("%v: the tree of runs has entered %d steps, at step %q of workflow %q, and it allows %d; set max_steps for the workflow to change it",
+			ErrSteps, r.entries, n.ID, g.Name, r.maxSteps+r.granted)}
+	case f.repeating != "":
+		st.Reached = &Reached{Limit: "repeat", Step: f.repeating, Reason: fmt.Sprintf("%v: step %q of workflow %q gave the same outcome and data %d times in a row",
+			ErrRepeat, f.repeating, g.Name, repeated(st.Steps, f.repeating))}
 	}
 }
+
+// grant reads a person's answer to the bound f's run has reached: more
+// of it, or a stop, which fails the run on it.
+func (r *replay) grant(f *frame, output string) {
+	st := &f.st
+	reached := st.Reached
+	st.asked++
+	var answer Result
+	amount := 0
+	if decode([]byte(output), &answer) == nil && answer.Outcome == grantOutcome {
+		amount = grantOf(answer.Data)
+	}
+	if amount <= 0 {
+		f.failed, st.limit = &limitError{limits[reached.Limit], reached.Reason}, reached.Limit
+		return
+	}
+	st.Reached = nil
+	switch reached.Limit {
+	case "visits":
+		f.extra[st.Node.ID] += amount
+	case "depth":
+		st.maxDepth += amount
+	case "steps":
+		r.granted += amount
+	case "repeat":
+		f.repeats[reached.Step] += amount
+		f.repeating = ""
+	}
+	r.bounds(f)
+}
+
+// grantOf is the amount a grant's data carries.
+func grantOf(data any) int {
+	m, _ := data.(map[string]any)
+	switch v := m["amount"].(type) {
+	case json.Number:
+		n, err := v.Int64()
+		if err == nil && n > 0 && n <= maxGrant {
+			return int(n)
+		}
+	case float64:
+		if v >= 1 && v <= maxGrant && v == float64(int(v)) {
+			return int(v)
+		}
+	}
+	return 0
+}
+
+// maxGrant bounds what one answer may grant.
+const maxGrant = 999
 
 // enter makes n f's current node, at item i.
 func (r *replay) enter(f *frame, i int, n *Node) {
@@ -748,12 +1010,9 @@ func (r *replay) enter(f *frame, i int, n *Node) {
 	f.visits[n.ID]++
 	st.Visit, st.Attempt = f.visits[n.ID], 1
 	f.since = i
+	st.clocked, st.Deadline, st.asked = false, time.Time{}, 0
 	r.entries++
-	if n.Flow != "" && st.Depth+1 > st.maxDepth && f.failed == nil {
-		f.failed = fmt.Errorf("%w: step %q of workflow %q would call %s at depth %d, and the run allows %d",
-			ErrDepth, n.ID, st.Workflow, n.Flow, st.Depth+1, st.maxDepth)
-		st.limit = "depth"
-	}
+	r.bounds(f)
 }
 
 // verdictOf reads the verdict a judge's look at n came to.
@@ -773,7 +1032,12 @@ func askedUnseen(c *openresponses.FunctionCall) bool {
 // run they belong to. They must not read alike: agentturn quarantines by
 // content, so after a resume a message like one that was once left out
 // is left out too.
-func visitTag(st State) string { return fmt.Sprintf(" (run %s, visit %d)", st.Instance, st.Visit) }
+func visitTag(st State) string {
+	if st.Attempt > 1 {
+		return fmt.Sprintf(" (run %s, visit %d, attempt %d)", st.Instance, st.Visit, st.Attempt)
+	}
+	return fmt.Sprintf(" (run %s, visit %d)", st.Instance, st.Visit)
+}
 
 // beginning starts the message that opens a visit of an Agent node.
 func beginning(id string) string { return beginPrefix + strconv.Quote(id) + "." }

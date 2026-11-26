@@ -9,6 +9,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
@@ -43,6 +44,9 @@ type Question struct {
 	SentBack int `json:"sent_back,omitempty"`
 	// Retry says the question is whether to run a failed step again.
 	Retry bool `json:"retry,omitempty"`
+	// Limit names the bound the run has reached, when the question is
+	// whether to grant more of it: grant, with the amount, or stop.
+	Limit string `json:"limit,omitempty"`
 	// Answer is empty as asked. [Answer] fills it in.
 	Answer *Result `json:"answer,omitempty"`
 }
@@ -73,9 +77,27 @@ func Reply(fn func(context.Context, Question) (Result, bool)) Option {
 // so a resume keeps it.
 func MaxDepth(n int) Option { return func(f *flow) { f.maxDepth = n } }
 
+// MaxSteps bounds the steps a tree of runs may enter, under the bound the
+// workflow sets for itself; the smaller wins. The run's start records
+// the bound, so a resume keeps it.
+func MaxSteps(n int) Option { return func(f *flow) { f.maxSteps = n } }
+
+// DefaultUnattendedTimeout bounds a model step that sets no timeout of
+// its own when nobody is there to see it stall.
+const DefaultUnattendedTimeout = 30 * time.Minute
+
+// UnattendedTimeout sets the timeout of a model step that sets none,
+// when [Unattended]: [DefaultUnattendedTimeout] if not given, none for 0.
+func UnattendedTimeout(d time.Duration) Option { return func(f *flow) { f.idle = &d } }
+
 type flow struct {
-	g          *Graph
-	maxDepth   int
+	g        *Graph
+	maxDepth int
+	maxSteps int
+	// idle is the timeout of an unattended model step that sets none.
+	idle *time.Duration
+	// subjects are what the host's tools touch, for a step's policy.
+	subjects   map[string][]Subject
 	model      openresponses.Streamer
 	modelName  string
 	unattended bool
@@ -93,6 +115,9 @@ type flow struct {
 	// child is set for a flow run in a child: what its start records,
 	// and the instructions its settings add.
 	child *Child
+	// due is the deadline of the model step the last request was shaped
+	// for, so the model's stream is cut there.
+	due *deadline
 }
 
 // programPrefix starts the model name of a turn the program takes, so a
@@ -128,7 +153,19 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 			if n.Model != "" && f.models != nil && !slices.Contains(f.models, n.Model) {
 				return cfg, fmt.Errorf("agentflow: %s: node %q asks for model %q, which the host does not serve: want one of %s", x.Name, n.ID, n.Model, strings.Join(f.models, ", "))
 			}
+			if err := f.policed(x, &n, cfg.Tools); err != nil {
+				return cfg, err
+			}
 		}
+		if x.Model != "" && f.models != nil && !slices.Contains(f.models, x.Model) {
+			return cfg, fmt.Errorf("agentflow: %s asks for model %q, which the host does not serve: want one of %s", x.Name, x.Model, strings.Join(f.models, ", "))
+		}
+	}
+	if f.maxSteps < 0 {
+		return cfg, errors.New("agentflow: max steps must not be negative")
+	}
+	if f.idle != nil && (*f.idle < 0 || *f.idle > MaxTimeout) {
+		return cfg, fmt.Errorf("agentflow: an unattended timeout must be 0 to %s", MaxTimeout)
 	}
 	f.model, f.modelName = cfg.Model, cfg.ModelName
 	if f.modelName == "" {
@@ -161,13 +198,13 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 	if (needs || len(f.modes) > 0) && f.children == nil {
 		return cfg, errors.New("agentflow: the graph runs work in children, a fresh step or call or a judge, and the host gave no Children to open them")
 	}
-	own := []agenttool.Tool{f.startTool(), f.askTool(), f.finishTool(), f.judgeTool(), f.endTool(), f.callTool()}
+	own := []agenttool.Tool{f.startTool(), f.askTool(), f.finishTool(), f.judgeTool(), f.endTool(), f.callTool(), f.clockTool(), f.stuckTool()}
 	if p := cfg.ToolProvider; p != nil {
 		cfg.ToolProvider = func(ctx context.Context) []agenttool.Tool {
-			return append(slices.Clone(p(ctx)), own...)
+			return append(f.timed(p(ctx)), own...)
 		}
 	} else {
-		cfg.Tools = append(slices.Clone(cfg.Tools), own...)
+		cfg.Tools = append(f.timed(cfg.Tools), own...)
 	}
 
 	scripts := false
@@ -180,6 +217,7 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 	}
 
 	cfg.Model = f
+	f.due = &deadline{}
 	if transform := cfg.Transform; transform != nil {
 		cfg.Transform = f.transform(transform)
 	}
@@ -234,7 +272,7 @@ func (f *flow) samePosition(before, after agentturn.Transcript) error {
 // and a hook's, so no record takes it for the person's.
 func (f *flow) begin(ctx context.Context, info agentturn.TurnStartInfo) (openresponses.Items, error) {
 	st, _, err := f.read(ctx, info.Transcript)
-	if err != nil || st.Node == nil || st.Failure != "" || st.Begun {
+	if err != nil || st.Node == nil || st.Failure != "" || st.Reached != nil || st.Begun {
 		// An error here is the same one prepare reports.
 		return nil, nil
 	}
@@ -265,13 +303,45 @@ func (f *flow) overdue(st State, failed error) *Ending {
 		e := ending(st, nil)
 		e.Status, e.Reason, e.Step = Failed, st.Node.ID+": "+st.Failure, st.Node.ID
 		return e
+	case st.Reached != nil && f.unattended && f.reply == nil:
+		e := ending(st, nil)
+		e.Status, e.Reason, e.Step, e.Limit = Failed, st.Reached.Reason, st.Node.ID, st.Reached.Limit
+		return e
 	}
 	return nil
 }
 
 // modelTurn says the model takes the next turn.
 func modelTurn(st State) bool {
-	return st.Done && st.Reported || st.Node != nil && st.Node.Kind == Agent && !st.Node.fresh() && st.Failure == ""
+	return st.Done && st.Reported || st.Node != nil && st.Node.Kind == Agent && !st.Node.fresh() && st.Failure == "" && st.Reached == nil
+}
+
+// clockDue says the program reads the clock before st's model step
+// works, and expired that the step's time has run out.
+func (f *flow) clockDue(st State) bool {
+	return modelTurn(st) && st.Node != nil && !st.clocked && f.timeout(st) > 0
+}
+
+func (f *flow) expired(st State) bool {
+	return modelTurn(st) && st.Node != nil && !st.Deadline.IsZero() && !time.Now().Before(st.Deadline)
+}
+
+// timeout is how long st's step may take: its own timeout, or for a model
+// step with nobody there, the host's default.
+func (f *flow) timeout(st State) time.Duration {
+	n := st.Node
+	switch {
+	case n == nil:
+		return 0
+	case n.Timeout > 0:
+		return n.Timeout
+	case n.Kind == Agent && f.unattended:
+		if f.idle != nil {
+			return *f.idle
+		}
+		return DefaultUnattendedTimeout
+	}
+	return 0
 }
 
 // prepare shapes the request for whoever takes this turn. It runs
@@ -285,9 +355,12 @@ func (f *flow) prepare(ctx context.Context, req *openresponses.Request) error {
 	if err != nil {
 		return err
 	}
-	if !modelTurn(st) {
+	if !modelTurn(st) || f.clockDue(st) || f.expired(st) {
 		req.Model = programPrefix + f.g.Name
 		return nil
+	}
+	if f.due != nil {
+		f.due.set(st.Deadline)
 	}
 	req.Model = f.modelName
 	req.Input = f.visible(req.Input, all, st)
@@ -301,12 +374,25 @@ func (f *flow) prepare(ctx context.Context, req *openresponses.Request) error {
 			return err
 		}
 		req.Instructions = strings.TrimSpace(req.Instructions + "\n\n" + step)
+		// The step's model and thinking are in the request, so the record
+		// and its hash hold them.
+		req.Model = cmp.Or(n.Model, st.g.Model, f.modelName)
+		if thinking := cmp.Or(n.Thinking, st.g.Thinking); thinking != "" {
+			req.Reasoning.SetExtendedEffort("")
+			if thinking == openresponses.EffortMax {
+				req.Reasoning.SetExtendedEffort(thinking)
+			} else {
+				req.Reasoning.Effort = openresponses.ReasoningEffort(thinking)
+			}
+		}
 		finish, more := finishTool, map[string]any(nil)
 		if n.Verdict {
 			// The verdict takes the shape of what the judge may choose.
 			finish, more = judgeTool, map[string]any{"reason": map[string]any{"type": "string"}}
 		}
-		keep = func(name string) bool { return name == finish || slices.Contains(n.Tools, name) }
+		keep = func(name string) bool {
+			return name == finish || name == stuckTool && n.canStick() || slices.Contains(n.Tools, name)
+		}
 		if req.Tools, err = stepTools(req.Tools, finish, st, more); err != nil {
 			return err
 		}
@@ -329,7 +415,7 @@ func stepTools(tools openresponses.Tools, finish string, st State, more map[stri
 	// by the step's name alone.
 	required := []string{"run", "step", "outcome"}
 	data["run"] = map[string]any{"type": "string", "enum": []string{st.Instance}}
-	for _, outcome := range n.outcomes() {
+	for _, outcome := range n.finishable() {
 		if s := n.Data[outcome]; s != nil {
 			shapes = append(shapes, s)
 		}
@@ -342,7 +428,7 @@ func stepTools(tools openresponses.Tools, finish string, st State, more map[stri
 	default:
 		data["data"] = map[string]any{}
 	}
-	if len(shapes) == len(n.outcomes()) {
+	if len(shapes) == len(n.finishable()) {
 		required = append(required, "data")
 	}
 	for name, schema := range more {
@@ -350,16 +436,27 @@ func stepTools(tools openresponses.Tools, finish string, st State, more map[stri
 		required = append(required, name)
 	}
 	data["step"] = map[string]any{"type": "string", "enum": []string{n.ID}}
-	data["outcome"] = map[string]any{"type": "string", "enum": n.outcomes()}
+	data["outcome"] = map[string]any{"type": "string", "enum": n.finishable()}
 	params, err := json.Marshal(map[string]any{"type": "object", "properties": data, "required": required})
+	if err != nil {
+		return nil, err
+	}
+	stuck, err := json.Marshal(map[string]any{"type": "object", "required": []string{"run", "step", "reason"}, "properties": map[string]any{
+		"run":    data["run"],
+		"step":   data["step"],
+		"reason": map[string]any{"type": "string", "description": "What stops you, for whoever reads it."},
+	}})
 	if err != nil {
 		return nil, err
 	}
 	out := slices.Clone(tools)
 	for i, t := range out {
-		if fn, ok := t.(*openresponses.FunctionTool); ok && fn.Name == finish {
+		if fn, ok := t.(*openresponses.FunctionTool); ok && (fn.Name == finish || fn.Name == stuckTool) {
 			own := *fn
 			own.Parameters, own.Strict = params, nil
+			if fn.Name == stuckTool {
+				own.Parameters = stuck
+			}
 			out[i] = &own
 		}
 	}
@@ -387,8 +484,8 @@ func (f *flow) instructions(st State) (string, error) {
 		fmt.Fprintf(&b, "\n\nInputs: %s", j)
 	}
 	fmt.Fprintf(&b, "\n\nWhen the step is done, call %s with step %q%s and one outcome of: %s.",
-		finishTool, n.ID, runClause(st), strings.Join(n.outcomes(), ", "))
-	for _, outcome := range n.outcomes() {
+		finishTool, n.ID, runClause(st), strings.Join(n.finishable(), ", "))
+	for _, outcome := range n.finishable() {
 		if s := n.Data[outcome]; s != nil {
 			j, err := json.Marshal(s)
 			if err != nil {
@@ -397,7 +494,21 @@ func (f *flow) instructions(st State) (string, error) {
 			fmt.Fprintf(&b, "\nFor outcome %s, data must match this schema: %s", outcome, j)
 		}
 	}
+	fmt.Fprintf(&b, "\nIf you cannot do the step, call %s with step %q%s and your reason, rather than finish it with an outcome that is not so.",
+		stuckTool, n.ID, runClause(st))
+	f.limitsText(&b, st)
 	return b.String(), nil
+}
+
+// limitsText says what limits st's step works under: its policies and
+// its time.
+func (f *flow) limitsText(b *strings.Builder, st State) {
+	if limits := describe(f.policies(st)); limits != "" {
+		fmt.Fprintf(b, "\n\n%s", limits)
+	}
+	if t := f.timeout(st); t > 0 {
+		fmt.Fprintf(b, "\n\nThe step has %s; past that it is stopped.", t)
+	}
 }
 
 // rootName is the workflow the tree's run nobody called is of: a child's
@@ -449,7 +560,7 @@ func (f *flow) call(st State) (name string, args any, err error) {
 		if err != nil {
 			return "", nil, err
 		}
-		a := callArgs{Workflow: c.Name, Digest: c.OwnDigest(), Run: key, With: with, Context: ContextFresh, Child: n.Child, Spawn: key}
+		a := callArgs{Workflow: c.Name, Digest: c.OwnDigest(), Run: key, With: with, Context: ContextFresh, Child: n.Child, Spawn: key, MaxSteps: st.left()}
 		if spawn := st.kept[n.Child]; n.Child != "" && spawn != "" {
 			a.Spawn = spawn
 		}
@@ -471,10 +582,33 @@ func (f *flow) call(st State) (name string, args any, err error) {
 	return n.Tool, merged, nil
 }
 
+// serve passes a model's turn to the model, cut off at the deadline of
+// its step. A stream cut there ends in [ErrStepTimeout], which no retry
+// mends, and the program records the step's failure on its next turn.
+func (f *flow) serve(ctx context.Context, req openresponses.Request, sink openresponses.EventSink) error {
+	var due time.Time
+	if f.due != nil {
+		due = f.due.get()
+	}
+	if due.IsZero() {
+		return f.model.CreateStream(ctx, req, sink)
+	}
+	if !time.Now().Before(due) {
+		return fmt.Errorf("%w, at %s", ErrStepTimeout, due.Format(time.RFC3339))
+	}
+	cut, stop := context.WithDeadline(ctx, due)
+	defer stop()
+	err := f.model.CreateStream(cut, req, sink)
+	if err != nil && ctx.Err() == nil && errors.Is(cut.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("%w, at %s", ErrStepTimeout, due.Format(time.RFC3339))
+	}
+	return err
+}
+
 // CreateStream takes a program turn itself and passes a model's on.
 func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink openresponses.EventSink) error {
 	if !strings.HasPrefix(req.Model, programPrefix) {
-		return f.model.CreateStream(ctx, req, sink)
+		return f.serve(ctx, req, sink)
 	}
 	st, _, err := f.read(ctx, req.Input)
 	over := f.overdue(st, err)
@@ -510,12 +644,20 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 			return err
 		}
 		id, name, args = keyPrefix(p.Run)+"start", startTool, p
+	case st.Reached != nil:
+		id, name, args = st.limitID(), askTool, limitQuestion(st)
 	case st.Failure != "":
 		id, name = st.retryID(), askTool
 		q := Question{Step: st.Node.ID, Retry: true, Outcomes: []string{retryOutcome, stopOutcome},
 			Question: fmt.Sprintf("Step %q failed: %s\nRun it again?", st.Node.ID, st.Failure)}
 		q.where(st)
 		args = q
+	case f.expired(st):
+		name = clockTool
+		id, args = f.clockCall(st, true)
+	case f.clockDue(st):
+		name = clockTool
+		id, args = f.clockCall(st, false)
 	case f.judging(st):
 		id, name = st.judgeID(), judgeTool
 		if args, err = f.judgeCall(st); err != nil {
@@ -622,6 +764,11 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 		if name != startTool || !strings.HasPrefix(id, reserved) {
 			return block("the workflow has not started")
 		}
+	case st.Reached != nil:
+		if name != askTool || id != st.limitID() {
+			return block(fmt.Sprintf("step %q has reached its bound on %s", n.ID, st.Reached.Limit))
+		}
+		return f.ask(ctx, info, st)
 	case st.Failure != "":
 		if name != askTool || id != st.retryID() {
 			return block(fmt.Sprintf("step %q failed", n.ID))
@@ -652,6 +799,15 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 		if n.Verdict {
 			finish, verb = judgeTool, "judging"
 		}
+		if name == clockTool {
+			if id == st.clockID() && f.clockDue(st) || id == st.timeoutID() && f.expired(st) {
+				return nil, nil
+			}
+			return block("only the workflow reads the clock")
+		}
+		if name == stuckTool && n.canStick() {
+			name = finish
+		}
 		if name == finish {
 			if step := finishStep(info.Call.Arguments); step != n.ID {
 				return block(fmt.Sprintf("you are %s step %q, not %q", verb, n.ID, step))
@@ -664,6 +820,9 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 		if !slices.Contains(n.Tools, name) {
 			return block(fmt.Sprintf("step %q does not allow %s", n.ID, name))
 		}
+		if why := f.police(ctx, st, info); why != "" {
+			return block(fmt.Sprintf("step %q refuses this call: %s", n.ID, why))
+		}
 	case id != st.callID():
 		return block(fmt.Sprintf("step %q takes no other calls", n.ID))
 	case n.Kind == Person:
@@ -673,14 +832,48 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 }
 
 // validAnswer holds an answer to what its question may be answered with.
-func validAnswer(n *Node, retry bool, res Result) error {
-	if !retry {
+func validAnswer(n *Node, q Question, res Result) error {
+	switch {
+	case q.Limit != "":
+		switch {
+		case res.Outcome == stopOutcome:
+		case res.Outcome != grantOutcome:
+			return fmt.Errorf("outcome %q: want %s or %s", res.Outcome, grantOutcome, stopOutcome)
+		case grantOf(numbers(res.Data)) == 0:
+			return fmt.Errorf("a grant needs an amount, a whole number from 1 to %d", maxGrant)
+		}
+		return nil
+	case !q.Retry:
 		return n.check(res)
 	}
 	if res.Outcome != retryOutcome && res.Outcome != stopOutcome {
 		return fmt.Errorf("outcome %q: want %s or %s", res.Outcome, retryOutcome, stopOutcome)
 	}
 	return nil
+}
+
+// numbers reads data as the record will, numbers kept as written.
+func numbers(data any) any {
+	b, err := json.Marshal(data)
+	if err != nil {
+		return data
+	}
+	var out any
+	if decode(b, &out) != nil {
+		return data
+	}
+	return out
+}
+
+// limitQuestion asks whether to grant more of the bound st has reached.
+func limitQuestion(st State) Question {
+	what := map[string]string{"visits": "more visits of the step", "depth": "more levels of nesting", "steps": "more steps for the tree", "repeat": "more repeats of the step"}[st.Reached.Limit]
+	q := Question{Step: st.Node.ID, Limit: st.Reached.Limit, Outcomes: []string{grantOutcome, stopOutcome},
+		Question: fmt.Sprintf("%s.\nGrant %s, or stop?", st.Reached.Reason, what),
+		Form: map[string]any{grantOutcome: map[string]any{"type": "object", "required": []string{"amount"}, "properties": map[string]any{
+			"amount": map[string]any{"type": "integer", "description": fmt.Sprintf("How many %s, 1 to %d.", what, maxGrant)}}}}}
+	q.where(st)
+	return q
 }
 
 // ask decides who answers a question: the host's rules, then a judge
@@ -701,14 +894,14 @@ func (f *flow) ask(ctx context.Context, info agentturn.ToolCallInfo, st State) (
 		return nil, fmt.Errorf("agentflow: question: %w", err)
 	}
 	if f.reply != nil {
-		if res, ok := f.reply(ctx, q); ok && validAnswer(n, q.Retry, res) == nil {
+		if res, ok := f.reply(ctx, q); ok && validAnswer(n, q, res) == nil {
 			res.By = "rules"
 			return answer(q, res, "answered by the host's rules")
 		}
 	}
 	// The verdict is read from the transcript, not from the question.
 	why := q.Question
-	if v := st.Advice; !q.Retry && v != nil && f.mode(st) == Decide && v.Outcome != HandBack {
+	if v := st.Advice; !q.Retry && q.Limit == "" && v != nil && f.mode(st) == Decide && v.Outcome != HandBack {
 		if st.g.spent(st, *v) {
 			why = fmt.Sprintf("the judge has sent this back %d times: %s", st.g.sentBack(st, n), q.Question)
 		} else {
@@ -717,7 +910,7 @@ func (f *flow) ask(ctx context.Context, info agentturn.ToolCallInfo, st State) (
 	}
 	// With nobody there, the tool takes the node's default, and refuses
 	// a retry, which ends the workflow.
-	if f.unattended && (q.Retry || n.Unattended != "") {
+	if f.unattended && (q.Retry || q.Limit != "" || n.Unattended != "") {
 		return nil, nil
 	}
 	return &agentturn.ToolDecision{Action: agentturn.Defer, Reason: "agentflow: " + why}, nil
@@ -802,16 +995,16 @@ func (f *flow) askTool() agenttool.Tool {
 		if n == nil {
 			return Result{}, fmt.Errorf("agentflow: no step %q", q.Step)
 		}
-		if !q.Retry && n.Kind != Person {
+		if !q.Retry && q.Limit == "" && n.Kind != Person {
 			return Result{}, fmt.Errorf("agentflow: step %q asks nothing", q.Step)
 		}
 		switch {
 		case q.Answer != nil:
-			if err := validAnswer(n, q.Retry, *q.Answer); err != nil {
+			if err := validAnswer(n, q, *q.Answer); err != nil {
 				return Result{}, fmt.Errorf("agentflow: %w", err)
 			}
 			return *q.Answer, nil
-		case f.unattended && !q.Retry && n.Unattended != "":
+		case f.unattended && !q.Retry && q.Limit == "" && n.Unattended != "":
 			return Result{Outcome: n.Unattended, Data: n.UnattendedData, By: "unattended default"}, nil
 		}
 		return Result{}, errors.New("agentflow: this question needs an answer")
@@ -845,6 +1038,9 @@ func (f *flow) finishTool() agenttool.Tool {
 		n := st.Node
 		if n == nil || n.Kind != Agent || n.Verdict || n.fresh() || n.ID != a.Step || a.Run != st.Instance {
 			return Result{}, fmt.Errorf("agentflow: %q is not a step you can finish", a.Step)
+		}
+		if a.Outcome == Stuck {
+			return Result{}, fmt.Errorf("agentflow: to say you are stuck, call %s with your reason", stuckTool)
 		}
 		res := Result{Outcome: a.Outcome, Data: unquote(n.Data[a.Outcome], a.Data)}
 		if err := n.check(res); err != nil {
@@ -881,7 +1077,7 @@ func (g *Graph) Answer(pending agentturn.PendingCall, res Result) (agentturn.Ans
 	if n == nil {
 		return agentturn.Answer{}, fmt.Errorf("agentflow: no step %q", q.Step)
 	}
-	if err := validAnswer(n, q.Retry, res); err != nil {
+	if err := validAnswer(n, q, res); err != nil {
 		return agentturn.Answer{}, fmt.Errorf("agentflow: %w", err)
 	}
 	q.Answer = &res

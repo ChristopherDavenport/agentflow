@@ -27,6 +27,9 @@ type Judge struct {
 	// by an outcome that leads to this question again, before the next
 	// such verdict goes to the person. 0 means [DefaultReturns].
 	Returns int `json:"returns,omitempty"`
+	// Policy limits what its tools may touch, beside the policies of the
+	// calls the question's run is nested in.
+	Policy *Policy `json:"policy,omitempty"`
 }
 
 // DefaultReturns is how often a judge that sets no limit may send work
@@ -233,7 +236,7 @@ func (f *flow) judgeCall(st State) (callArgs, error) {
 	if st.Held != nil {
 		mode = Shadow
 	}
-	return callArgs{Workflow: j.Name, Digest: j.OwnDigest(), Run: key, With: with, Context: ContextFresh, Spawn: key, Step: n.ID, Mode: mode.String()}, nil
+	return callArgs{Workflow: j.Name, Digest: j.OwnDigest(), Run: key, With: with, Context: ContextFresh, Spawn: key, Step: n.ID, Mode: mode.String(), MaxSteps: st.left()}, nil
 }
 
 // checkJudgeCall holds a judge's call to the look st's question wants.
@@ -253,6 +256,8 @@ func checkJudgeCall(st State, c *openresponses.FunctionCall) error {
 		return errors.New("a verdict is the program's to give, when the judge has looked")
 	case st.Held != nil && a.Mode != Shadow.String():
 		return errors.New("a held answer is judged unseen")
+	case a.MaxSteps != st.left():
+		return fmt.Errorf("a judge of step %q is given the %d steps its tree has left", n.ID, st.left())
 	}
 	with, err := st.resolveAll(n.With)
 	if err != nil {

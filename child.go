@@ -1,6 +1,7 @@
 package agentflow
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -46,6 +47,11 @@ type Child struct {
 	parent   *flow
 	g        *Graph
 	maxDepth int
+	// maxSteps is what the caller's tree had left of its steps, and
+	// policies are those of the steps and calls the child's work is
+	// nested in, which hold its tools too.
+	maxSteps int
+	policies []ruled
 	made     **flow
 }
 
@@ -54,8 +60,10 @@ type ChildSettings struct {
 	// Dir is the child's working directory, below the workspace's root,
 	// empty for the root. script.Sub makes a workspace of it.
 	Dir string
-	// Model names the model the child asks, empty for the caller's.
-	Model string
+	// Model names the model the child asks, empty for the caller's, and
+	// Thinking how hard it reasons, for a fresh model step.
+	Model    string
+	Thinking string
 	// Instructions is added to the child's instructions.
 	Instructions string
 	// Tools names the tools its step may call.
@@ -71,8 +79,8 @@ func (c Child) Apply(cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 		return cfg, errors.New("agentflow: a child is the program's to make")
 	}
 	p := c.parent
-	f := &flow{g: c.g, maxDepth: p.maxDepth, unattended: p.unattended, reply: p.reply, delegations: p.delegations,
-		modes: p.modes, judgeName: p.judgeName, children: p.children, models: p.models}
+	f := &flow{g: c.g, maxDepth: p.maxDepth, maxSteps: p.maxSteps, unattended: p.unattended, reply: p.reply, delegations: p.delegations,
+		modes: p.modes, judgeName: p.judgeName, children: p.children, models: p.models, idle: p.idle, subjects: p.subjects}
 	own := c
 	f.child = &own
 	for _, opt := range opts {
@@ -134,7 +142,7 @@ func (f *flow) childFor(st State, call *openresponses.FunctionCall, a callArgs) 
 		return Child{}, err
 	}
 	c := Child{Run: a.Run, Spawn: a.Spawn, Caller: call.CallID, Parent: st.Instance, Workflow: g.Name, Kept: a.Child,
-		Depth: st.Depth + 1, Path: slices.Clone(st.Path), parent: f, g: g, maxDepth: st.maxDepth}
+		Depth: st.Depth + 1, Path: slices.Clone(st.Path), parent: f, g: g, maxDepth: st.maxDepth, maxSteps: a.MaxSteps}
 	switch {
 	case call.Name == judgeTool:
 		c.Step, c.Judge = n.ID, true
@@ -142,11 +150,15 @@ func (f *flow) childFor(st State, call *openresponses.FunctionCall, a callArgs) 
 		if f.judgeName != f.modelName {
 			c.Settings.Model = f.judgeName
 		}
+		c.policies = f.chain(st)
 	case n.Kind == Agent:
 		c.Step = n.ID
-		c.Settings = ChildSettings{Dir: n.Dir, Model: n.Model, Instructions: n.Instructions, Tools: n.Tools}
+		c.Settings = ChildSettings{Dir: n.Dir, Model: n.Model, Thinking: cmp.Or(n.Thinking, st.g.Thinking), Instructions: n.Instructions, Tools: n.Tools}
+		// The step's own policy is its node's in the child.
+		c.policies = f.chain(st)
 	default:
 		c.Settings = ChildSettings{Dir: n.Dir, Model: n.Model, Instructions: n.Instructions}
+		c.policies = f.policies(st)
 	}
 	return c, nil
 }
@@ -257,12 +269,20 @@ func letGo(st State, p agentturn.PendingCall, a callArgs, done State, failed err
 				a.Verdict.Data = nil
 			}
 		}
+	case treeWide(done.limit):
+		// The child's tree came to a bound of the whole tree, which fails
+		// the caller too.
+		a.Result = &Result{Outcome: Failed, Limit: done.limit, Reason: fmt.Sprint(failed)}
 	case n.Kind == Agent:
-		if last := len(done.Steps) - 1; done.Done && last >= 0 && failed == nil {
+		last := len(done.Steps) - 1
+		switch {
+		case !done.Done || last < 0 || failed != nil:
+			a.Failure = fmt.Sprintf("agentflow: step %q did not finish in its child: %v", n.ID, failed)
+		case done.Steps[last].Result.Outcome == Stuck && !n.routesStuck():
+			a.Failure = "agentflow: the model reported it is stuck: " + done.Steps[last].Result.Reason
+		default:
 			r := done.Steps[last].Result
 			a.Result = &r
-		} else {
-			a.Failure = fmt.Sprintf("agentflow: step %q did not finish in its child: %v", n.ID, failed)
 		}
 	default:
 		r, err := returned(n, a.Workflow, ending(done, failed))
@@ -271,6 +291,10 @@ func letGo(st State, p agentturn.PendingCall, a callArgs, done State, failed err
 		} else {
 			a.Result = &r
 		}
+	}
+	// What the child's runs spent counts toward the caller's tree.
+	if a.Result != nil {
+		a.Result.Entries, a.Result.Granted = done.Entries, done.Granted
 	}
 	args, err := json.Marshal(a)
 	if err != nil {

@@ -347,8 +347,8 @@ there, each naming its caller.
 | Event | In the frame where it happens | In each frame above |
 |---|---|---|
 | a step fails | the retry question, in its own key. `retry` runs it again; `stop`, or nobody to ask, ends the frame `failed` | the call ends with the outcome `failed`. With an edge for it, the caller goes on there. Without one, the calling step has failed and raises its own retry question; `retry` calls the callee again under a new key. Nobody to ask: that frame fails too, with the reason chained (`review: pr-review failed at gather: …`) |
-| a visit bound | the frame ends `failed` | as above |
-| a bound across the tree (depth, step entries) | the frame that would cross it ends `failed` | every frame fails without a retry question, since a retry would cross the bound again. Item 21 turns this into a request for more allowance |
+| a visit bound, or a step that repeats itself | a person is asked to grant more (RFC 0003, section 21); `stop`, or nobody to ask, ends the frame `failed` | as for a failed step |
+| a bound across the tree (depth, step entries) | a person is asked to grant more, in the frame that would cross it; `stop`, or nobody to ask, ends it `failed` | every frame fails without a retry question, since a retry would cross the bound again |
 | abort (context cancelled, `Agent.Abort`) | nothing is written; the frame is still running | the same. A child's run is aborted, and its parent's call stays held |
 | a person's new invocation | `abandoned`, innermost first | `abandoned` |
 | a pending question | the run ends `input_required` on that frame's `flow_ask` | in context, nothing more. Through a child, the parent is already `input_required` on its held `flow_call` |
@@ -401,22 +401,21 @@ its own end with its own reason. Only a bound across the tree skips the
   record holds definitions but not scripts. Reading back a run is
   unaffected, since it uses the pins.
 
-## 7. Bounds across a tree (spiked: depth, and counting entries)
+## 7. Bounds across a tree (spiked)
 
 - **Depth.** The root has depth 0, and each call adds 1, in context or
   fresh. The default bound is 8. It can be set with `max_depth` in the
   root's frontmatter or with the host option `MaxDepth`; the smaller
-  wins. A call that would go deeper fails the calling step, as a
-  tree-wide limit ([section 5](#5-failure-at-each-level)).
+  wins. A call that would go deeper asks for more depth, and failing on
+  it is a tree-wide limit ([section 5](#5-failure-at-each-level)).
 - **Steps.** Every step entry, which is a node made current, counting
   attempts, counts once toward the tree's total. A calling step's own
   entry counts as well.
   - In context, replay counts every frame's entries.
-  - A fresh call is to pass the remaining `allowance` in its arguments.
-    The child counts against it, its end records the entries it used,
-    and the caller adds those. Not built: a child's entries are counted
-    in its own session only, so `State.Entries` is the count of one
-    session. This and the bound belong to item 18.
+  - A fresh call passes what the tree has left as `max_steps` in its
+    arguments. The child counts against it, the result of the call
+    carries the entries the child's runs made, and the caller adds those.
+    The bound and its syntax are in RFC 0003, section 18.
 
 ## 8. Record format 2 (spiked)
 
@@ -498,8 +497,8 @@ agent seeded from the child's session, or keeps one in memory.
 
 ## 10. A child's own settings (spiked)
 
-These keys are allowed only with `context: fresh`. Item 14 opens `model`
-to every model step.
+These keys are allowed only with `context: fresh`, but for `model`, which
+RFC 0003 (section 14) opens to every model step, with `thinking`.
 
 ```yaml
 context: fresh

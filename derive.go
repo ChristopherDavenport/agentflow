@@ -1,6 +1,7 @@
 package agentflow
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"maps"
@@ -21,7 +22,7 @@ func (n *Node) checkChild() []error {
 		for _, s := range []struct {
 			key string
 			set bool
-		}{{"dir", n.Dir != ""}, {"model", n.Model != ""}, {"instructions", n.Instructions != "" || n.InstructionsFile != ""}, {"child", n.Child != ""}} {
+		}{{"dir", n.Dir != ""}, {"instructions", n.Instructions != "" || n.InstructionsFile != ""}, {"child", n.Child != ""}} {
 			if s.set {
 				bad("%s is a setting of a child; it needs context: %s", s.key, ContextFresh)
 			}
@@ -40,6 +41,46 @@ func (n *Node) checkChild() []error {
 	}
 	if n.Verdict && n.Kind != Agent {
 		bad("only a model step gives a verdict")
+	}
+	return errs
+}
+
+// checkSettings holds a node's step settings to the steps they are for.
+func (n *Node) checkSettings() []error {
+	var errs []error
+	bad := func(format string, args ...any) {
+		errs = append(errs, fmt.Errorf("agentflow: node %q: "+format, append([]any{n.ID}, args...)...))
+	}
+	call := n.Flow != ""
+	switch {
+	case n.Model != "" && n.Kind != Agent && !(call && n.fresh()):
+		bad("model is a model step's, or a child's")
+	case n.Thinking != "" && n.Kind != Agent:
+		bad("thinking is a model step's")
+	case n.Thinking != "" && !slices.Contains(thinkingLevels, n.Thinking):
+		bad("thinking %q: want one of %s", n.Thinking, strings.Join(thinkingLevels, ", "))
+	}
+	switch {
+	case n.Timeout < 0 || n.Timeout > MaxTimeout:
+		bad("timeout must be above 0 and at most %s", MaxTimeout)
+	case n.Timeout > 0 && (n.Kind == Person || call):
+		bad("a timeout is a script's, a tool's or a model step's")
+	case n.Timeout > 0 && n.Verdict:
+		bad("a judge's look has the timeout of an unattended model step")
+	}
+	switch {
+	case n.Policy != nil && n.Kind != Agent && !call:
+		bad("a policy is a model step's, or a call's for what it calls")
+	case n.Policy != nil:
+		if err := n.Policy.check(); err != nil {
+			bad("policy: %v", err)
+		}
+	}
+	if slices.Contains(n.Outcomes, Stuck) || n.Data[Stuck] != nil {
+		bad("%q is the outcome flow_stuck reports, so no step declares it or its data", Stuck)
+	}
+	if !n.canStick() && (n.Next[Stuck] != "" || n.Ends[Stuck] != "") && !slices.Contains(n.outcomes(), Stuck) {
+		bad("only a model step can be %s", Stuck)
 	}
 	return errs
 }
@@ -88,7 +129,11 @@ func inputsOf(n *Node) (*agenttool.Schema, map[string]Value) {
 // its child: the step itself, reading its inputs from the child's start.
 func (g *Graph) stepGraph(n *Node) *Graph {
 	inputs, with := inputsOf(n)
-	step := Node{ID: n.ID, Kind: Agent, Prompt: n.Prompt, Tools: n.Tools, Outcomes: n.Outcomes, Data: n.Data, With: with}
+	// The child reports a stuck model as its outcome, and the caller
+	// decides what that means.
+	step := Node{ID: n.ID, Kind: Agent, Prompt: n.Prompt, Tools: n.Tools, Outcomes: n.Outcomes, Data: n.Data, With: with,
+		Model: cmp.Or(n.Model, g.Model), Thinking: cmp.Or(n.Thinking, g.Thinking), Timeout: n.Timeout, Policy: n.Policy,
+		Ends: map[string]string{Stuck: Stuck}}
 	return &Graph{Name: g.Name + ":" + n.ID, Nodes: []Node{step}, Inputs: inputs, Sources: g.Sources}
 }
 
@@ -107,7 +152,7 @@ func (g *Graph) judgeGraph(n *Node) *Graph {
 		}
 	}
 	prompt := fmt.Sprintf("The question: %s\n\nWhat to weigh:\n%s", n.Prompt, n.Judge.Criteria)
-	judge := Node{ID: n.ID, Kind: Agent, Verdict: true, Prompt: prompt, Tools: n.Judge.Tools, Outcomes: outcomes, Data: data, With: with}
+	judge := Node{ID: n.ID, Kind: Agent, Verdict: true, Prompt: prompt, Tools: n.Judge.Tools, Outcomes: outcomes, Data: data, With: with, Policy: n.Judge.Policy}
 	return &Graph{Name: g.Name + ":" + n.ID + ":judge", Nodes: []Node{judge}, Inputs: inputs, Sources: g.Sources}
 }
 

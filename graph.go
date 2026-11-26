@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ChristopherDavenport/agenttool"
 )
@@ -60,6 +61,21 @@ const (
 
 // OK is the outcome of a node that declares none.
 const OK = "ok"
+
+// Stuck is the outcome a model step takes when its model reports, with
+// flow_stuck, that it cannot do the step. A step that draws an edge or
+// an end for it goes on there; one that does not has failed.
+const Stuck = "stuck"
+
+// stuckSchema is the data of [Stuck]: the model's reason.
+var stuckSchema = &agenttool.Schema{Type: "object", Properties: []agenttool.Property{{Name: "reason", Schema: &agenttool.Schema{Type: "string"}}}, Required: []string{"reason"}}
+
+// Thinking levels a step may ask for, as openresponses names them; max
+// is its extension above xhigh.
+var thinkingLevels = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+// MaxTimeout bounds a step's timeout.
+const MaxTimeout = 24 * time.Hour
 
 // DefaultLoopVisits is how often a node on a loop runs when it sets no
 // bound of its own.
@@ -151,10 +167,21 @@ type Node struct {
 	// the skill's file InstructionsFile. Child names a child kept across
 	// the visits and steps of a run that name it, on a model step.
 	Dir              string `json:",omitempty"`
-	Model            string `json:",omitempty"`
 	Instructions     string `json:",omitempty"`
 	InstructionsFile string `json:",omitempty"`
 	Child            string `json:",omitempty"`
+	// Model names the model a model step asks, and Thinking how hard it
+	// reasons: one of none, minimal, low, medium, high, xhigh and max.
+	// Empty is the workflow's, and then the host's. On a call into a
+	// child, Model is the child's.
+	Model    string `json:",omitempty"`
+	Thinking string `json:",omitempty"`
+	// Timeout bounds a script, tool or model step. A step that runs past
+	// it fails, with the error recorded, and asks to be retried.
+	Timeout time.Duration `json:",omitempty"`
+	// Policy limits what a model step's tools may touch. On a call, it
+	// limits every model step and judge of the runs it calls.
+	Policy *Policy `json:",omitempty"`
 	// Verdict says the node is a judge's: it ends with flow_judge, giving
 	// a reason. Only a workflow agentflow makes to judge a step has one.
 	Verdict bool `json:",omitempty"`
@@ -194,13 +221,35 @@ type callee struct {
 }
 
 func (n *Node) outcomes() []string {
+	var out []string
 	switch {
 	case len(n.Outcomes) > 0:
-		return n.Outcomes
+		out = n.Outcomes
 	case n.Flow != "" && n.call != nil:
 		return n.call.outcomes
+	default:
+		out = []string{OK}
 	}
-	return []string{OK}
+	if n.routesStuck() {
+		out = append(slices.Clone(out), Stuck)
+	}
+	return out
+}
+
+// finishable are the outcomes a model finishes its step with: all but
+// [Stuck], which it reports with flow_stuck.
+func (n *Node) finishable() []string {
+	return slices.DeleteFunc(slices.Clone(n.outcomes()), func(o string) bool { return o == Stuck })
+}
+
+// canStick says the node's model may report it is stuck: a model step's,
+// and not a judge's, which hands back instead.
+func (n *Node) canStick() bool { return n.Kind == Agent && !n.Verdict }
+
+// routesStuck says a model step goes on, somewhere it names, when its
+// model is stuck.
+func (n *Node) routesStuck() bool {
+	return n.canStick() && (n.Next[Stuck] != "" || n.Ends[Stuck] != "")
 }
 
 // schemas is the node's data by outcome: declared, or for a call, the
@@ -208,6 +257,14 @@ func (n *Node) outcomes() []string {
 func (n *Node) schemas() map[string]*agenttool.Schema {
 	if n.Flow != "" && n.call != nil {
 		return n.call.data
+	}
+	if n.routesStuck() {
+		out := maps.Clone(n.Data)
+		if out == nil {
+			out = map[string]*agenttool.Schema{}
+		}
+		out[Stuck] = stuckSchema
+		return out
 	}
 	return n.Data
 }
@@ -237,6 +294,14 @@ type Graph struct {
 	// nest calls. 0 means [DefaultMaxDepth]; a host's [MaxDepth] may
 	// lower it.
 	MaxDepth int `json:",omitempty"`
+	// MaxSteps bounds the steps a run started from this workflow may
+	// enter, across every run it calls. 0 means [DefaultMaxSteps]; a
+	// host's [MaxSteps] may lower it.
+	MaxSteps int `json:",omitempty"`
+	// Model and Thinking are what the workflow's model steps ask for when
+	// they do not say.
+	Model    string `json:",omitempty"`
+	Thinking string `json:",omitempty"`
 	// Sources is the digest of the files the graph was loaded from,
 	// scripts among them, so a change to any is a change to the graph.
 	Sources string
@@ -290,6 +355,12 @@ func (g *Graph) Validate() error {
 	}
 	if g.MaxDepth < 0 || g.MaxDepth > 99 {
 		bad("max depth must be 0 to 99")
+	}
+	if g.MaxSteps < 0 || g.MaxSteps > 9999 {
+		bad("max steps must be 0 to 9999")
+	}
+	if g.Thinking != "" && !slices.Contains(thinkingLevels, g.Thinking) {
+		bad("thinking %q: want one of %s", g.Thinking, strings.Join(thinkingLevels, ", "))
 	}
 	if g.Outputs != nil && g.OutputsBy != nil {
 		bad("outputs are either by outcome or for every outcome")
@@ -346,6 +417,7 @@ func (g *Graph) Validate() error {
 			bad("node %q: context %q: want %q or %q", n.ID, n.Context, ContextSession, ContextFresh)
 		}
 		errs = append(errs, n.checkChild()...)
+		errs = append(errs, n.checkSettings()...)
 		if j := n.Judge; j != nil {
 			switch {
 			case n.Kind != Person:

@@ -32,6 +32,9 @@ type callArgs struct {
 	// first started a kept child.
 	Child string `json:"child,omitempty"`
 	Spawn string `json:"spawn,omitempty"`
+	// MaxSteps is what the caller's tree has left of its steps, which the
+	// child's runs may enter.
+	MaxSteps int `json:"max_steps,omitempty"`
 	// Step and Mode are a judge's: the step it looks at, and how far the
 	// host lets it answer.
 	Step string `json:"step,omitempty"`
@@ -64,10 +67,10 @@ func (f *flow) rootStart(inputs any) (startPayload, error) {
 		return startPayload{}, err
 	}
 	p := startPayload{Workflow: f.g.Name, Digest: f.g.Digest(), Inputs: inputs, Format: RecordFormat,
-		Definition: json.RawMessage(definition), MaxDepth: f.depth()}
+		Definition: json.RawMessage(definition), MaxDepth: f.depth(), MaxSteps: f.steps()}
 	if c := f.child; c != nil {
 		p.Run, p.Parent, p.Caller, p.Depth, p.Path, p.Context = c.Run, c.Parent, c.Caller, c.Depth, c.Path, ContextFresh
-		p.MaxDepth = c.maxDepth
+		p.MaxDepth, p.MaxSteps = c.maxDepth, c.maxSteps
 	} else if p.Run, err = newKey(); err != nil {
 		return startPayload{}, err
 	}
@@ -96,6 +99,18 @@ func (f *flow) depth() int {
 	}
 	return d
 }
+
+// steps is the bound on step entries a new tree records.
+func (f *flow) steps() int {
+	n := cmpSteps(f.g.MaxSteps)
+	if f.maxSteps > 0 {
+		n = min(n, f.maxSteps)
+	}
+	return n
+}
+
+// left is what st's tree has left of its steps, for a child to enter.
+func (st State) left() int { return max(0, st.maxSteps+st.Granted-st.Entries) }
 
 // callStart holds the start of a call to what the calling step makes.
 func callStart(st State, c *openresponses.FunctionCall) error {
@@ -140,6 +155,8 @@ func callFresh(st State, c *openresponses.FunctionCall) error {
 		return fmt.Errorf("step %q keeps child %q in the session it started", n.ID, n.Child)
 	case a.Result != nil || a.Failure != "" || a.Verdict != nil:
 		return errors.New("what came of a child is the program's to say, when it has ended")
+	case a.MaxSteps != st.left():
+		return fmt.Errorf("step %q gives its child the %d steps its tree has left", n.ID, st.left())
 	}
 	with, err := st.resolveAll(n.With)
 	if err != nil {
@@ -236,7 +253,7 @@ func returned(n *Node, workflow string, e *Ending) (Result, error) {
 	switch {
 	case e.Status == Done:
 		return Result{Outcome: e.Outcome, Data: e.Outputs}, nil
-	case e.Status == Failed && e.Limit == "" && n.routesFailure():
+	case e.Status == Failed && !treeWide(e.Limit) && n.routesFailure():
 		data := map[string]any{"reason": e.Reason, "workflow": workflow}
 		if e.Step != "" {
 			data["step"] = e.Step

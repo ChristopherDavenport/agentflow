@@ -409,7 +409,7 @@ func TestDepthIsBoundedAcrossTheTree(t *testing.T) {
 			var counts []int
 			var ran []string
 			a := nestedAgent(t, g, &fakeModel{}, []agenttool.Tool{countTool(&counts), scriptTool(&ran)}, opts...)
-			end := run(a)
+			end := stopAt(t, g, a, run(a), "depth")
 			if !errors.Is(end.Err, ErrDepth) || len(ran) != 0 {
 				t.Fatalf("end = %s, %v, ran %v", end.Reason, end.Err, ran)
 			}

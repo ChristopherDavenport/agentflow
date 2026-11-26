@@ -173,9 +173,12 @@ this accepts has not been verified.
 
 A node a path can come back to may run 5 times unless it says otherwise,
 so a loop is bounded without every step saying so. To tighten or loosen
-it, set `max_visits` on any one node of the loop. Reaching a bound fails
-the workflow with an error naming the step, the bound, where it came
-from and the edge taken.
+it, set `max_visits` on any one node of the loop. Reaching a bound asks
+a person whether to grant more visits; unattended, with no rule that
+answers, it fails the workflow with an error naming the step, the bound,
+where it came from and the edge taken. A program step that gives the
+same outcome and data three times in a row is asked about the same way.
+See [RFC 0003](0003-step-settings-and-limits.md), sections 19 and 21.
 
 ### Sections
 
@@ -195,11 +198,14 @@ and be none. Unknown keys are errors.
 | `outputs` | all | schema of the step's data, by outcome |
 | `tools` | model | tools the model may call; none if absent |
 | `context` | model, call | `session` (default) or `fresh`, a child session; see [Context](#context-spiked) |
-| `dir`, `model`, `instructions` | fresh model, fresh call | the child's working directory, model, and a file of the skill added to its instructions (RFC 0002, section 10) |
+| `dir`, `instructions` | fresh model, fresh call | the child's working directory, and a file of the skill added to its instructions (RFC 0002, section 10) |
+| `model`, `thinking` | model; `model` also a fresh call | the model a step asks and how hard it reasons; the frontmatter's `model` and `thinking` are the workflow's defaults (RFC 0003, section 14) |
+| `timeout` | script, tool, model | a duration past which the step fails and asks to be retried (RFC 0003, section 13) |
+| `policy` | model, call | what the step's tools may write, read and run; on a call, for every model step it calls (RFC 0003, section 17) |
 | `child` | fresh model | a child kept across the visits and steps that name it (RFC 0002, section 11) |
 | `outcomes` | all | ways the node can end; `[ok]` if absent |
 | `unattended` | person | outcome, and data, taken when nobody can be asked |
-| `judge` | person | that a model may answer: `criteria`, `outcomes` it may choose, `tools`, `max_returns` |
+| `judge` | person | that a model may answer: `criteria`, `outcomes` it may choose, `tools`, `max_returns`, `policy` |
 | `max_visits` | all | how often the node may run; if absent, 5 for a node on a loop and 1 for any other |
 
 The text under a model or person node is its prompt.
@@ -382,7 +388,7 @@ with the instance, a status, a reason, the path taken and the outputs:
 | Status | When |
 |---|---|
 | `done` | the last step finished; the report follows |
-| `failed` | a step failed with nobody to retry it, a person chose `stop`, a visit bound was reached, or the outputs could not be made. The run then ends in the same error as before |
+| `failed` | a step failed with nobody to retry it, a person chose `stop`, a bound was reached with nobody to grant more (the ending's `limit` names it), or the outputs could not be made. The run then ends in the same error as before |
 | `abandoned` | another instance was asked for over an unfinished one; written before the new `flow_start` |
 
 An instance with no `flow_end` is `running`: waiting, stalled,
@@ -427,9 +433,12 @@ the model sees and can correct.
 ### Failure
 
 A failed step raises a `flow_ask` with the outcomes `retry` and `stop`.
-`retry` runs the step again under a new call ID. `stop` fails the
-workflow. The host's rules may answer; unattended, with no rule that
-does, the workflow fails.
+`retry` runs the step again under a new call ID; a model step opens
+again, its messages naming the attempt. `stop` fails the workflow. The
+host's rules may answer; unattended, with no rule that does, the
+workflow fails. A model step fails when its model reports with
+`flow_stuck` that it cannot do it and the step draws no edge for `stuck`,
+or when it runs past its timeout (RFC 0003, sections 13 and 20).
 
 ### Position
 
