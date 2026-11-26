@@ -28,22 +28,26 @@ func TestTheRecordHoldsWhatALaterReadingNeeds(t *testing.T) {
 	}
 	g, ran := judged(), []string{}
 	m := &cast{script: []says{found, unseen("report"), fixDone, {finishTool, `{"step":"review","outcome":"clean"}`}}}
+	kids := &recordedKin{store: store, rec: rec, model: m, name: "worker", tools: []agenttool.Tool{scriptTool(&ran)}}
 	cfg, err := Apply(g, agentturn.Config{Model: m, ModelName: "worker", Tools: []agenttool.Tool{scriptTool(&ran)}},
-		Delegate(Shadow), JudgeModel("critic"))
+		Delegate(Shadow), JudgeModel("critic"), kids.option())
 	if err != nil {
 		t.Fatal(err)
 	}
 	a := agentturn.New(cfg)
 	rec.Attach(a)
-	answered(t, g, m, a, start(t, a), Result{Outcome: "fix", Reason: "it is real"})
+	end := answered(t, g, m, a, start(t, a), Result{Outcome: "fix", Reason: "it is real"})
+	if _, _, err := Drive(ctx, g, a, end); err != nil {
+		t.Fatal(err)
+	}
 
 	got, err := store.Open(ctx, s.ID())
 	if err != nil {
 		t.Fatal(err)
 	}
 	var (
-		started, question, answer, verdict, judge string
-		asked, decided                            bool
+		started, question, answer, verdict, judge, looked string
+		asked, decided                                    bool
 	)
 	for _, e := range got.Path(got.Leaf()) {
 		switch e := e.(type) {
@@ -56,21 +60,35 @@ func TestTheRecordHoldsWhatALaterReadingNeeds(t *testing.T) {
 				case askTool:
 					question, asked = it.Arguments, !e.Timestamp.IsZero()
 				case judgeTool:
-					verdict = it.Arguments
+					looked = it.CallID
 				}
 			case *openresponses.FunctionCallOutput:
 				if strings.HasSuffix(it.CallID, "_triage_v1") {
 					answer = it.Output.String()
 				}
+				if it.CallID == looked {
+					verdict = it.Output.String()
+				}
 			}
 		case *agentsession.DecisionEntry:
 			decided = decided || string(e.By) == "human" && !e.Timestamp.IsZero()
-		case *agentsession.ResponseEntry:
-			if e.Model == "critic" {
-				judge = e.Model
-			}
 		}
 	}
+	// The judge's own work, the model it was asked among it, is in its
+	// session.
+	if len(kids.opened) != 1 || !kids.opened[0].Judge {
+		t.Fatalf("opened %+v", kids.opened)
+	}
+	child, err := store.Open(ctx, spawnedID(t, store, kids.opened[0].Spawn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range child.Path(child.Leaf()) {
+		if r, ok := e.(*agentsession.ResponseEntry); ok && r.Model == "critic" {
+			judge = r.Model
+		}
+	}
+	checkHashes(t, child)
 	for what, have := range map[string]bool{
 		"the workflow and its digest": strings.Contains(started, `"workflow":"pr"`) && strings.Contains(started, `"digest":"sha256:`),
 		"the question and its step":   strings.Contains(question, `"step":"triage"`) && strings.Contains(question, "Fix them"),

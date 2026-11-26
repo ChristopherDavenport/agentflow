@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -15,46 +16,61 @@ import (
 	"github.com/ChristopherDavenport/openresponses"
 )
 
-// callArgs is flow_call's arguments: what a step that calls a workflow
-// passed it, and which run it was. The result is the run's ending.
+// callArgs is the arguments of flow_call, and of the flow_judge the
+// program makes: what a step that calls a workflow passed it, and which
+// run it was. In the current context the result is the run's ending.
+// For a run in a child, Context is fresh, Spawn names the child's
+// session, and what came of the run is added when the call is let go.
 type callArgs struct {
 	Workflow string         `json:"workflow"`
 	Digest   string         `json:"digest"`
 	Run      string         `json:"run"`
 	With     map[string]any `json:"with,omitempty"`
+	Context  string         `json:"context,omitempty"`
+	// Child is the name of a child the run keeps, and Spawn the spawn ID
+	// of the child's session: the run's key, or the key of the run that
+	// first started a kept child.
+	Child string `json:"child,omitempty"`
+	Spawn string `json:"spawn,omitempty"`
+	// Step and Mode are a judge's: the step it looks at, and how far the
+	// host lets it answer.
+	Step string `json:"step,omitempty"`
+	Mode string `json:"mode,omitempty"`
+	// Result, Failure and Verdict are what came of the child.
+	Result  *Result  `json:"result,omitempty"`
+	Failure string   `json:"failure,omitempty"`
+	Verdict *Verdict `json:"verdict,omitempty"`
 }
 
 // skillOf is the skill a workflow's name says it is of.
 func skillOf(name string) string {
-	skill, _, _ := strings.Cut(name, "/")
+	skill, _, _ := strings.Cut(name, ":")
+	skill, _, _ = strings.Cut(skill, "/")
 	return skill
 }
 
 // runClause is how instructions name the run a finish belongs to.
-func runClause(st State) string {
-	if st.Format == 1 {
-		return ""
-	}
-	return fmt.Sprintf(", run %q", st.Instance)
-}
+func runClause(st State) string { return fmt.Sprintf(", run %q", st.Instance) }
 
 // where says which run asks a question, and the way to it.
-func (q *Question) where(st State) {
-	if st.Format == 1 {
-		return
-	}
-	q.Workflow, q.Run, q.Path = st.Workflow, st.Instance, st.Path
-}
+func (q *Question) where(st State) { q.Workflow, q.Run, q.Path = st.Workflow, st.Instance, st.Path }
 
-// rootStart is the start of a run nobody called: the definition of the
-// workflow and of every one it can reach, pinned.
-func (f *flow) rootStart(key string, inputs any) (startPayload, error) {
+// rootStart is the start of a run nobody called here: the definition of
+// the workflow and of every one it can reach, pinned. A run in a child
+// also records who called it, so the child's session reads on its own.
+func (f *flow) rootStart(inputs any) (startPayload, error) {
 	definition, err := json.Marshal(f.g)
 	if err != nil {
 		return startPayload{}, err
 	}
 	p := startPayload{Workflow: f.g.Name, Digest: f.g.Digest(), Inputs: inputs, Format: RecordFormat,
-		Definition: json.RawMessage(definition), Run: key, MaxDepth: f.depth()}
+		Definition: json.RawMessage(definition), MaxDepth: f.depth()}
+	if c := f.child; c != nil {
+		p.Run, p.Parent, p.Caller, p.Depth, p.Path, p.Context = c.Run, c.Parent, c.Caller, c.Depth, c.Path, ContextFresh
+		p.MaxDepth = c.maxDepth
+	} else if p.Run, err = newKey(); err != nil {
+		return startPayload{}, err
+	}
 	closure := f.g.closure()
 	for _, name := range slices.Sorted(maps.Keys(closure)) {
 		if name == f.g.Name {
@@ -102,6 +118,40 @@ func callStart(st State, c *openresponses.FunctionCall) error {
 	}
 	return nil
 }
+
+// callFresh holds a call into a child to what the calling step makes.
+func callFresh(st State, c *openresponses.FunctionCall) error {
+	n := st.Node
+	want := st.g.Callees[n.Flow]
+	if n.Kind == Agent {
+		want = st.g.stepGraph(n)
+	}
+	var a callArgs
+	switch {
+	case c.Name != callTool || c.CallID != st.callID():
+		return fmt.Errorf("step %q runs in a child and takes no other calls", n.ID)
+	case decode([]byte(c.Arguments), &a) != nil:
+		return errors.New("the call is not readable")
+	case a.Context != ContextFresh || a.Workflow != want.Name || a.Digest != want.OwnDigest():
+		return fmt.Errorf("step %q runs %s, as pinned, in a child", n.ID, want.Name)
+	case !keyPattern.MatchString(a.Run) || a.Child != n.Child || a.Step != "" || a.Mode != "":
+		return errors.New("the call is not one the step makes")
+	case a.Spawn != a.Run && (n.Child == "" || a.Spawn != st.kept[n.Child]):
+		return fmt.Errorf("step %q keeps child %q in the session it started", n.ID, n.Child)
+	case a.Result != nil || a.Failure != "" || a.Verdict != nil:
+		return errors.New("what came of a child is the program's to say, when it has ended")
+	}
+	with, err := st.resolveAll(n.With)
+	if err != nil {
+		return err
+	}
+	if !sameJSON(a.With, with) {
+		return fmt.Errorf("step %q passes its child other inputs than its own", n.ID)
+	}
+	return nil
+}
+
+var keyPattern = regexp.MustCompile(`^[0-9a-f]{10}$`)
 
 // callReturn holds a flow_call to the run it reports: the one the step
 // started, with what that run was given.
@@ -162,22 +212,38 @@ func (f *flow) callTool() agenttool.Tool {
 		if err != nil {
 			return Result{}, err
 		}
+		if a.Context == ContextFresh {
+			switch {
+			case a.Failure != "":
+				return Result{}, errors.New(a.Failure)
+			case a.Result == nil:
+				return Result{}, fmt.Errorf("agentflow: run %q has not ended", a.Run)
+			}
+			return *a.Result, nil
+		}
 		e := st.Returned
 		if st.Node == nil || st.Node.Flow == "" || e == nil || e.Instance != a.Run {
 			return Result{}, fmt.Errorf("agentflow: run %q has not ended", a.Run)
 		}
-		switch {
-		case e.Status == Done:
-			return Result{Outcome: e.Outcome, Data: e.Outputs}, nil
-		case e.Status == Failed && st.Node.routesFailure():
-			data := map[string]any{"reason": e.Reason, "workflow": a.Workflow}
-			if e.Step != "" {
-				data["step"] = e.Step
-			}
-			return Result{Outcome: Failed, Data: data}, nil
-		}
-		return Result{}, fmt.Errorf("agentflow: %s (run %s) %s: %s", a.Workflow, a.Run, e.Status, e.Reason)
+		return returned(st.Node, a.Workflow, e)
 	}, agenttool.WithReplay(safeReplay))
+}
+
+// returned is what a run's ending gives the step that called it: its
+// outcome and outputs, or the outcome failed where the step routes on
+// it. A failure it does not route on fails the step.
+func returned(n *Node, workflow string, e *Ending) (Result, error) {
+	switch {
+	case e.Status == Done:
+		return Result{Outcome: e.Outcome, Data: e.Outputs}, nil
+	case e.Status == Failed && e.Limit == "" && n.routesFailure():
+		data := map[string]any{"reason": e.Reason, "workflow": workflow}
+		if e.Step != "" {
+			data["step"] = e.Step
+		}
+		return Result{Outcome: Failed, Data: data}, nil
+	}
+	return Result{}, fmt.Errorf("agentflow: %s (run %s) %s: %s", workflow, e.Instance, e.Status, e.Reason)
 }
 
 // routesFailure says a call goes on, somewhere it names, when what it

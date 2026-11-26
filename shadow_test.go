@@ -3,6 +3,7 @@ package agentflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -70,13 +71,16 @@ func TestShadowJudgesUnseen(t *testing.T) {
 	// The person says fix; the judge, who looks first, would have
 	// reported. Then the work goes round and triage is not reached.
 	m := &cast{script: []says{found, look, unseen("report"), fixDone, {finishTool, `{"step":"review","outcome":"clean"}`}}}
-	cfg, err := Apply(g, agentturn.Config{Model: m, ModelName: "worker", Tools: []agenttool.Tool{scriptTool(&ran)}}, Delegate(Shadow))
+	cfg, err := kinApply(g, agentturn.Config{Model: m, ModelName: "worker", Tools: []agenttool.Tool{scriptTool(&ran)}}, Delegate(Shadow))
 	if err != nil {
 		t.Fatal(err)
 	}
 	a := agentturn.New(cfg)
 	rec.Attach(a)
 	end := answered(t, g, m, a, start(t, a), Result{Outcome: "fix", Reason: "the race is real, zzz-person"})
+	if end, _, err = Drive(ctx, g, a, end); err != nil {
+		t.Fatal(err)
+	}
 	st, err := g.Replay(a.State().Transcript)
 	if err != nil || end.Reason != agentturn.ReasonDone || !st.Done {
 		t.Fatalf("end = %s %v, %v", end.Reason, end.Err, err)
@@ -115,7 +119,7 @@ func TestShadowJudgesUnseen(t *testing.T) {
 
 func TestShadowNeverHoldsUpThePerson(t *testing.T) {
 	for name, lines := range map[string][]says{
-		"a judge that only talks": {found, {}},
+		"a judge that only talks": {found, {}, {}},
 		"a judge refused twice":   {found, unseen("nope"), unseen("nope")},
 		"a judge that hands back": {found, unseen(HandBack)},
 	} {
@@ -155,17 +159,18 @@ func TestADecidingJudgesReasonIsKept(t *testing.T) {
 	}
 }
 
-func TestAPersonsNextWordMovesPastASilentJudge(t *testing.T) {
+func TestAJudgeIsDrivenAndNeverPrompted(t *testing.T) {
 	g := judged()
-	m := &cast{script: []says{found, {}, fixDone, {finishTool, `{"step":"review","outcome":"clean"}`}}}
+	m := &cast{script: []says{found, unseen("report"), fixDone, {finishTool, `{"step":"review","outcome":"clean"}`}}}
 	a, end, _ := play(t, g, m, Delegate(Shadow))
-	answered(t, g, m, a, end, Result{Outcome: "fix"})
-	// No driver: the person just carries on.
-	if _, err := a.Prompt(context.Background(), openresponses.UserText("go on")); err != nil {
-		t.Fatal(err)
+	end = answered(t, g, m, a, end, Result{Outcome: "fix"})
+	// The program holds its call while the judge looks in its child, so
+	// nothing the person says next reaches the judge or moves on past it.
+	if _, err := a.Prompt(context.Background(), openresponses.UserText("go on")); !errors.Is(err, agentturn.ErrInputRequired) {
+		t.Fatalf("prompt over a held judge: %v", err)
 	}
-	st, err := g.Replay(a.State().Transcript)
-	if got := stepOf(st, "triage"); err != nil || !st.Done || got.Result.Outcome != "fix" || got.Advice != nil {
-		t.Errorf("done = %v, triage = %+v, %v", st.Done, got, err)
+	end, st, err := Drive(context.Background(), g, a, end)
+	if got := stepOf(st, "triage"); err != nil || !st.Done || got.Result.Outcome != "fix" || got.Advice == nil || got.Advice.Outcome != "report" {
+		t.Errorf("done = %v, triage = %+v, %s %v", st.Done, got, end.Reason, err)
 	}
 }

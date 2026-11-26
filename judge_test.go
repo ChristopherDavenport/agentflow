@@ -59,17 +59,20 @@ func judged() *Graph {
 	return g
 }
 
-// play runs the release graph with the model's lines, and returns the
-// run's end and the workflow's state.
+// play runs the release graph with the model's lines, driven through
+// its children, and returns the run's end and the workflow's state.
 func play(t *testing.T, g *Graph, m *cast, opts ...Option) (*agentturn.Agent, *agentturn.RunEnd, State) {
 	t.Helper()
 	var ran []string
-	cfg, err := Apply(g, agentturn.Config{Model: m, ModelName: "worker", Tools: []agenttool.Tool{scriptTool(&ran)}}, opts...)
+	cfg, err := kinApply(g, agentturn.Config{Model: m, ModelName: "worker", Tools: []agenttool.Tool{scriptTool(&ran)}}, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	a := agentturn.New(cfg)
-	end := start(t, a)
+	end, _, err := Drive(context.Background(), g, a, start(t, a))
+	if err != nil && !errors.Is(err, end.Err) {
+		t.Fatal(err)
+	}
 	st, err := g.Replay(a.State().Transcript)
 	if err != nil {
 		t.Fatal(err)
@@ -98,15 +101,15 @@ func TestJudgeDecides(t *testing.T) {
 	}
 	g, ran := judged(), []string{}
 	m := &cast{script: []says{found, verdict("report")}}
-	cfg, err := Apply(g, agentturn.Config{Model: m, ModelName: "worker", Tools: []agenttool.Tool{scriptTool(&ran)}},
+	cfg, err := kinApply(g, agentturn.Config{Model: m, ModelName: "worker", Tools: []agenttool.Tool{scriptTool(&ran)}},
 		Delegate(Decide), JudgeModel("critic"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	a := agentturn.New(cfg)
 	rec.Attach(a)
-	if end := start(t, a); end.Reason != agentturn.ReasonDone {
-		t.Fatalf("reason = %s, err = %v", end.Reason, end.Err)
+	if end, _, err := Drive(ctx, g, a, start(t, a)); err != nil || end.Reason != agentturn.ReasonDone {
+		t.Fatalf("reason = %s, err = %v", end.Reason, err)
 	}
 	st, err := g.Replay(a.State().Transcript)
 	if err != nil {
@@ -115,9 +118,9 @@ func TestJudgeDecides(t *testing.T) {
 	if got := stepOf(st, "triage"); got.Result.Outcome != "report" || got.Result.By != ByJudge || got.Advice.Reason != "because" {
 		t.Errorf("triage = %+v", got)
 	}
-	// The judge is a request of its own: its model, none of the work.
+	// The judge works in a child: its model, none of the work.
 	req := m.requests[1]
-	if in := texts(req.Input); req.Model != "critic" || len(in) != 1 || !strings.HasPrefix(in[0], beginning("triage")) {
+	if in := texts(req.Input); req.Model != "critic" || len(in) != 2 || !strings.HasPrefix(in[0], invocationPrefix+"pr:triage:judge") || !strings.HasPrefix(in[1], beginning("triage")) {
 		t.Errorf("judge asked %s with %q", req.Model, in)
 	}
 	var offered []string
@@ -131,8 +134,9 @@ func TestJudgeDecides(t *testing.T) {
 	if !strings.Contains(req.Instructions, "Fix real bugs.") {
 		t.Errorf("judge instructions: %s", req.Instructions)
 	}
-	// Nothing in the record says a person did this.
-	if got := verdicts(t, store, s.ID()); !slices.Equal(got, []string{"proceed by policy"}) {
+	// Nothing in the record says a person did this: the program held its
+	// call while the judge looked, let it go, and the judge decided.
+	if got := verdicts(t, store, s.ID()); !slices.Equal(got, []string{"hold by policy", "proceed by policy", "proceed by policy"}) {
 		t.Errorf("decisions = %v", got)
 	}
 	got, err := store.Open(ctx, s.ID())
@@ -237,14 +241,15 @@ func TestTheWorkingModelCannotJudge(t *testing.T) {
 
 func TestDriveRemindsAJudge(t *testing.T) {
 	g := judged()
-	a, end, _ := play(t, g, &cast{script: []says{found, {}, {}}}, Delegate(Decide))
-	_, st, err := Drive(context.Background(), g, a, end)
-	if !errors.Is(err, ErrStalled) || st.Node.ID != "triage" {
-		t.Fatalf("err = %v, state = %+v", err, st)
+	m := &cast{script: []says{found, {}, {}}}
+	_, end, st := play(t, g, m, Delegate(Decide))
+	// A judge that stops twice has given no verdict, and the person is
+	// asked.
+	if end.Reason != agentturn.ReasonInputRequired || st.Node.ID != "triage" || st.Advice == nil || !st.Advice.None || st.Advice.Outcome != HandBack {
+		t.Fatalf("end = %s, state = %+v", end.Reason, st)
 	}
-	last := a.State().Transcript
 	var nudged bool
-	for _, s := range texts(openresponses.Items(last)) {
+	for _, s := range texts(m.requests[2].Input) {
 		nudged = nudged || strings.HasPrefix(s, nudgePrefix) && strings.Contains(s, judgeTool)
 	}
 	if !nudged {

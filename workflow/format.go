@@ -118,6 +118,13 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 	}
 	written := *g
 	written.Sources = ""
+	// The file names a step's instructions, and loading reads them.
+	written.Nodes = slices.Clone(g.Nodes)
+	for i := range written.Nodes {
+		if written.Nodes[i].InstructionsFile != "" {
+			written.Nodes[i].Instructions = ""
+		}
+	}
 	if back.OwnDigest() != written.OwnDigest() {
 		return nil, errors.New("workflow: the graph cannot be written as a file without changing it")
 	}
@@ -164,6 +171,10 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 	}
 	set("tools", n.Tools != nil, n.Tools)
 	set("context", n.Context != "", n.Context)
+	set("dir", n.Dir != "", n.Dir)
+	set("model", n.Model != "", n.Model)
+	set("instructions", n.InstructionsFile != "", n.InstructionsFile)
+	set("child", n.Child != "", n.Child)
 	set("outcomes", n.Outcomes != nil, n.Outcomes)
 	if n.Data != nil {
 		out := mapping()

@@ -1,8 +1,9 @@
 # RFC 0002: nested workflows and child sessions
 
-Status: sections 1 to 8 are **spiked** for calls in the current
-context; children (fresh calls, sections 9 to 12) are proposed and not
-built. It covers nested flows and children: what
+Status: sections 1 to 12 are **spiked**: calls in the current context
+and in children, fresh steps, child settings, kept children and the
+judge as a child. Notes in each section say where the build differs
+from the first proposal. It covers nested flows and children: what
 a nested call records, how invocations are keyed, how failures and
 resumes cross levels, pinning, bounds, the record format, fresh steps as
 child sessions, child settings, kept children and the judge. Where it
@@ -162,7 +163,7 @@ output of a script, is checked again when the call is made. A value that
 breaks the schema then fails the step, as a script that breaks its
 schema does now.
 
-## 3. Context (spiked for the current context)
+## 3. Context (spiked)
 
 - **The default is the current context.** The callee's steps write to the
   caller's transcript. Its `session` model steps read that conversation
@@ -271,22 +272,59 @@ flow_call   flow_77b01c4a9e_review_v1  {workflow: pr-review, digest, run: 3fa9�
   A callee that failed gives an error, and the calling step fails
   ([section 5](#5-failure-at-each-level)).
 
-### The record, through a child
+### The record, through a child (spiked)
 
 A fresh call goes the way `flow_ask` goes now:
 
 ```
-parent  flow_call  flow_77b01c4a9e_review_v1  {workflow, digest, run: 3fa9…, with, context: fresh}
+parent  flow_call  flow_77b01c4a9e_review_v1  {workflow, digest, run: 3fa9…, with, context: fresh, spawn: 3fa9…}
         decision   hold by policy             (the run ends input_required)
         link       subsession, spawn_id 3fa9c2d1e0
-child   flow_start … steps … flow_end         (session SpawnedSessionID(parent, "3fa9c2d1e0"))
-parent  decision   proceed by policy, with the result in the arguments
-        output     {"outcome": "clean", "data": {…}, "usage": {…}}
+child   agentflow: start pr-review {…}        (developer message: the invocation)
+        flow_start … steps … flow_end         (session SpawnedSessionID(parent, "3fa9c2d1e0"))
+parent  decision   proceed by policy, with result (or failure) added to the arguments
+        output     {"outcome": "clean", "data": {…}}
 ```
 
 The parent holds the call, the result and the link. The spawn ID is the
-child's key, so the child's session can be found from the parent's
-session alone.
+child's key, or for a kept child the first visit's key
+([section 11](#11-keeping-one-child)), so the child's session is found
+from the parent's session alone. The child's start records `parent`,
+`caller`, `depth`, `context: fresh` and `path`, the way to the call from
+the run nobody called, beside its own definition and closure, so the
+child's session reads on its own.
+
+`Drive` does the work. A run that ends `input_required` on a held call
+is not returned: the child is opened through the host's opener, given
+with `Children`. The child's run is then handled by what it holds:
+
+- not started: prompted with the invocation;
+- cut off part way: continued;
+- with calls pending: driven on them.
+
+Each child is driven the same way, so its own children are too. When
+the child's run has ended, the held call is approved with `result` or
+`failure` added to its arguments, and `flow_call` returns that. A child
+that waits on a question stops `Drive`, which returns that child's end
+and state. `Resume(ctx, g, a, answers)` takes an answer down to the
+child that holds the call and drives back up. `Invoke(ctx, g, a,
+inputs)` is a person's new invocation over a tree that may wait on
+children.
+
+The opener returns the context the child's runs take and the child's
+agent: with agentturn/session, the context of `Recorder.ContinueChild`,
+or `StartChild` for a spawn not yet linked, and an agent seeded from the
+child's session. Its config goes through `Child.Apply`, which gives it
+the caller's options. Without an opener, `Apply` refuses a graph with a
+fresh step or call, or a step the host lets a judge answer. agentflow
+cannot record a child itself, since the root package does not import
+agentturn/session.
+
+**Not built: `usage` in the result.** `Drive` could count the child's
+usage only for the runs it saw. After a resume the count would be
+partial, and the record would hold a wrong number. agentsession's
+`DelegatedWork` adds child sessions up by link correctly, so cost is read
+from there.
 
 ### Reading it back as a tree
 
@@ -298,11 +336,13 @@ It returns each invocation with:
 - the span of items it covers, its path, status and state;
 - its children.
 
-`open` reads a child's session by ID. Without `open`, a child appears as
-a link with the status its call's result gives. Children are not built,
-so `open` is unused.
+`open` reads a child's session by spawn ID (spiked). A run in a child
+is listed with `Fresh` and its `Spawn`, read from its own session. Without
+`open`, a child appears with the status its call's result gives. A
+child's session read on its own lists its runs as runs nobody called
+there, each naming its caller.
 
-## 5. Failure at each level (spiked for the current context)
+## 5. Failure at each level (spiked)
 
 | Event | In the frame where it happens | In each frame above |
 |---|---|---|
@@ -327,8 +367,13 @@ its own end with its own reason. Only a bound across the tree skips the
   graph, linked, holds them all, so `Graph.Answer` stays.
 - A host names a judged step of a called workflow to `Delegate` as
   `<workflow>:<step>`.
-- `Drive` returns pending calls at any depth, each with its path, and
-  resumes the agent the answer belongs to.
+- `Drive` returns the end of the run that waits, at any depth, with its
+  path, and `Resume` gives the answer to the agent it belongs to.
+- A person's new invocation over a held child goes through `Invoke`. It
+  abandons the child's runs in the child's session first: the program
+  tells the child `agentflow: abandon`, and the child ends its runs and
+  starts none. The held call is then refused with `agentflow: abandoned`,
+  ahead of the invocation.
 - A policy deferral of an ordinary tool call inside a child surfaces the
   same way.
 - While a child waits, the parent takes no prompt, since agentturn
@@ -345,11 +390,10 @@ its own end with its own reason. Only a bound across the tree skips the
 - An in-context start carries the callee's name and digest. Its
   definition is read from the root's pins, and a start naming a digest
   that is not pinned is refused.
-- A fresh child's start carries the closure as pinned at the root, so
-  the child's session reads on its own and cannot drift from its parent.
-- Naming ends gives existing end IDs a meaning, so a workflow with an end
-  named other than its outcome, such as `take-issue`'s `done`, has a new
-  digest: a run of it in progress under format 1 does not resume.
+- A fresh child's start carries its own definition and those it can
+  reach, as pinned at the root, so the child's session reads on its own.
+  The caller's call names the callee's own digest, which the child's
+  start is held to through its closure's.
 - **A change to a run in progress:** a change to any workflow in the
   closure makes resuming fail with `ErrChanged`, naming the workflow that
   changed. This holds whether or not the run has reached that workflow
@@ -368,11 +412,11 @@ its own end with its own reason. Only a bound across the tree skips the
   attempts, counts once toward the tree's total. A calling step's own
   entry counts as well.
   - In context, replay counts every frame's entries.
-  - A fresh call passes the remaining `allowance` in its arguments. The
-    child counts against it, its end records the entries it used, and
-    the caller adds those.
-  - The default bound and its syntax belong to item 18. The count is
-    `State.Entries`.
+  - A fresh call is to pass the remaining `allowance` in its arguments.
+    The child counts against it, its end records the entries it used,
+    and the caller adds those. Not built: a child's entries are counted
+    in its own session only, so `State.Entries` is the count of one
+    session. This and the bound belong to item 18.
 
 ## 8. Record format 2 (spiked)
 
@@ -381,53 +425,57 @@ its own end with its own reason. Only a bound across the tree skips the
 - call IDs;
 - the `run` argument of `flow_finish` and `flow_judge`;
 - the wording of step messages;
-- the start's `run`, `parent`, `caller`, `depth` and `definitions`;
-- the end's `run` and `outcome`;
-- `flow_call`.
+- the start's `run`, `parent`, `caller`, `depth`, `definitions`, and for
+  a child's run `context` and `path`;
+- the end's `outcome`;
+- `flow_call`, and `flow_judge` made by the program.
 
-**Older sessions:**
+**Older sessions are not read.** The repository is private and no
+session needs keeping, so format 1 was dropped rather than carried
+beside format 2. A format-1 start fails replay with `ErrChanged` and
+"record format 1", and `Runs` reports it in `Problem`. Gone with it:
 
-- A format-1 run is read, and resumed, as a root frame with no children:
-  - its key is its instance;
-  - its IDs are `flow_<workflow>_<instance>_…`;
-  - its finishes carry no `run` and belong to it;
-  - its messages end `(run X, visit N)`.
-- A frame carries its format, and only ID parsing and the matching of
-  finishes and messages depend on it.
-- A transcript holding runs of both formats reads both. Every new run is
-  format 2.
-- A format-1 reader that meets format 2 says so in `Problem`, as it does
-  for any unknown format now.
+- parsing of format-1 call IDs;
+- finishes and verdicts that name no run;
+- untagged step messages;
+- the judge that worked in the caller's transcript.
 
-## 9. A fresh model step is a child
+## 9. A fresh model step is a child (spiked)
 
 `context: fresh` on a model step becomes a fresh call of a one-step
-workflow made from that step, with the step's prompt, tools, outcomes
-and schemas. It is pinned in the closure. Its session reads like any
-run: start, opening message, the model's work, finish, end. The narrowed
-view of the parent's transcript goes, and with it `since`, `ownInput`
-and their special cases.
+workflow made from that step, named `<workflow>:<step>`, with the step's
+prompt, tools, outcomes and schemas, reading its `with` as its inputs.
+The caller's own digest already covers the step, so the made workflow
+is not added to the root's pins. The child's start pins it, so the
+child's session reads on its own. Its session reads like any run:
+invocation, start, opening message, the model's work, finish, end. The
+narrowed view of the parent's transcript is gone, and with it `since`,
+`ownInput` and their special cases.
 
 | Concern | As a child |
 |---|---|
 | inputs | the step's `with`, resolved in the caller and carried by the child's start. The child's instructions show them, as now |
 | results | the child's `flow_finish` gives the outcome and data, the child's end records them, and the parent's `flow_call` returns them. The parent routes on them as on any step |
-| request hashes | each request of the child's is the child's whole transcript, with no narrowing, so every request keeps a verifiable hash, fold or no fold. Today a fresh step's request after a fold is unverifiable |
+| request hashes | each request of the child's is the child's whole transcript, with no narrowing, so every request keeps a verifiable hash, fold or no fold. Before, a fresh step's request after a fold was unverifiable. Tried offline with folds in both caller and child: every response of both sessions has a hash that rebuilds |
 | compaction | the child has its own `Transform`, from the host's opener. The parent's compaction never sees the child's turns. `SummaryFilter` serves both |
-| cost | recorded on the child's responses. agentsession's `DelegatedWork` already adds child sessions up by link. The parent's result carries `usage` (requests, input and output tokens) for the child's subtree, so a summary needs no other session |
+| cost | recorded on the child's responses. agentsession's `DelegatedWork` adds child sessions up by link. The result carries no `usage` ([section 4](#the-record-through-a-child-spiked)) |
 | cancellation | cancelling the parent's context aborts the child's run and writes nothing. A resume continues the child |
 | questions inside | a model step asks nothing, but a policy may hold one of its tool calls. The child's run then ends `input_required` and `Drive` surfaces the hold with its path ([section 5](#5-failure-at-each-level)) |
 | resuming | from the store: the held call carries the child's key, and the key is the spawn ID |
 
-**The host's opener:**
+**The host's opener**, as built:
 
 ```go
-// Child is what a fresh call needs made.
 type Child struct {
-	Run, Caller      string // the child's key, which is its spawn ID, and the calling call
-	Workflow, Step   string // Step is set for a fresh model step
-	Kept             string // the name of a kept child (section 11), or empty
-	Settings         ChildSettings
+	Run, Spawn     string // the child's key, and the spawn ID of its session
+	Caller, Parent string // the call that holds it, and the caller's key
+	Workflow       string // a workflow, <workflow>:<step> or <workflow>:<step>:judge
+	Step           string // the step a fresh step or a judge works on
+	Judge          bool
+	Kept           string // a kept child's name (section 11), or empty
+	Depth          int
+	Path           []Place
+	Settings       ChildSettings
 }
 
 type ChildSettings struct {
@@ -435,20 +483,20 @@ type ChildSettings struct {
 	Tools                    []string
 }
 
-// Children makes and reopens the agents that fresh calls run in. open
-// starts the child with Recorder.StartChild(ctx, c.Run), or continues
-// it with ContinueChild, builds its tools for c.Settings.Dir and passes
-// its config through apply, which makes it follow the workflow.
-func Children(open func(ctx context.Context, c Child,
-	apply func(agentturn.Config) (agentturn.Config, error),
-) (*agentturn.Agent, error)) Option
+// Apply makes cfg follow the child's workflow, with the caller's
+// options and opts (a History for the child's record, say).
+func (c Child) Apply(cfg agentturn.Config, opts ...Option) (agentturn.Config, error)
+
+func Children(open func(ctx context.Context, c Child) (context.Context, *agentturn.Agent, error)) Option
+func Models(names ...string) Option
 ```
 
-`Apply` refuses a graph with a fresh step or a fresh call when the host
-gave no `Children`. agentflow cannot record a child itself, because the
-root package does not import agentturn/session.
+The opener returns a context as well as the agent, because the
+recorder finds a child's session from the context a run takes. It is
+called each time the program works on a child, so it builds a fresh
+agent seeded from the child's session, or keeps one in memory.
 
-## 10. A child's own settings
+## 10. A child's own settings (spiked)
 
 These keys are allowed only with `context: fresh`. Item 14 opens `model`
 to every model step.
@@ -463,23 +511,27 @@ instructions: prompts/api.md   # a file in the skill
 
 - **`dir`** is the child's working directory.
   - It must be relative and clean, with no `..`; this is checked at load.
-    Whether it exists is checked when the call is made, and a missing
-    one fails the step.
+    Whether it exists is checked when the opener makes the workspace:
+    `script.Sub` refuses a missing one.
   - agentworkspace offers no sub-workspace, so agentflow adds
     `script.Sub(ws, dir)`, a workspace whose root, file system and
-    commands are confined to `dir`.
+    commands are confined to `dir`. A link inside `dir` is followed as
+    the parent workspace follows it.
   - The host's opener builds the child's tools on it. The AGENTS.md chain
     for `dir` is the host's to add (`agentsmd.Chain`), as it would be
     for any agent started there.
 - **`model`** names the child's model. The opener maps the name to a
-  model. A host option `Models(names...)` lets `Apply` check the names at
-  load.
-- **`tools`** keeps its present meaning. `Apply` checks the names
-  against the tools the host offers.
-- **`instructions`** is a file in the skill, taken into the snapshot and
-  the digest, and added to the child's instructions.
+  model. A host option `Models(names...)` lets `Apply` check every step's
+  model, and the judge's, at load.
+- **`tools`** keeps its present meaning. Not built: checking the names
+  at `Apply`. A child's tools are the opener's, built for its `dir`, so
+  the caller's config cannot say what they will be.
+- **`instructions`** is a file in the skill. `workflow.Load` reads it
+  from the snapshot into the definition, so the digest covers it, and
+  it is added to every request of the child. `Format` writes the file's
+  name back.
 
-## 11. Keeping one child
+## 11. Keeping one child (spiked)
 
 ```yaml
 context: fresh
@@ -491,7 +543,9 @@ child: reviewer
   the invocation, so a recursive invocation gets its own.
 - The first call starts the child. Its key is the spawn ID, and the
   call's arguments carry `child: reviewer` and `spawn`. Later calls name
-  the same spawn and continue the session at its leaf.
+  the same spawn and continue the session at its leaf. Replay learns the
+  spawn from the first call as it is made, so a child that failed is
+  still the one kept.
 - Each visit is a frame of its own in the child: its own key, start, end
   and opening message. So the child reads as a sequence of runs, and its
   model sees its own earlier visits.
@@ -502,12 +556,12 @@ child: reviewer
   run is a session of its own. That can be opened up if a workflow needs
   it.
 
-## 12. The judge becomes a child
+## 12. The judge becomes a child (spiked)
 
-Approved.
+Approved, and built.
 
-Today a judge's request is the parent's transcript narrowed to the
-node's opening message. This causes four problems:
+Before, a judge's request was the parent's transcript narrowed to the
+node's opening message. This caused four problems:
 
 - what it looks at is hidden from later steps by spans of omissions
   (`unseen`);
@@ -517,20 +571,30 @@ node's opening message. This causes four problems:
 
 As a child:
 
-- The program makes `flow_judge` in the parent, under the frame's key,
-  and the call is held while the judge runs.
+- The program makes `flow_judge` in the parent, ID
+  `flow_<key>_<step>_v<n>-judge`, and the call is held while the judge
+  runs.
+- The judge runs `<workflow>:<step>:judge`, one model step whose
+  instructions hold the question and the criteria, whose tools are the
+  judge's, and which ends with the judge's model calling `flow_judge`
+  with its run, step, outcome and reason.
 - The judge's session holds its look at files and its verdict call.
-- The parent's call is approved with the verdict.
-- agentsession has a `judged_by` link relation for this.
+- The parent's call is approved with the verdict, and returns it.
+- A judge that stops twice, or gives two verdicts it may not give, comes
+  to no verdict (`Verdict.None`). Under `shadow` the held answer's step
+  then finishes with no advice. Under `advise` and `decide` the question
+  goes to the person with the hand-back marked as none. Before, a judge
+  that stalled was `ErrStalled`.
+- The child is linked as any spawned child is, by a subsession link.
+  agentsession's `judged_by` relation is not used.
 
 Under `shadow`, only that one call and its result are left out of the
 working model's requests, not a span of the transcript, and `unseen` goes
 away. The judge's input is unchanged: the question, the `with` values,
 the criteria and its tools.
 
-The cost is a second rewrite of the judge's record and tests in the same
-format change, and the trials recorded in RFC 0001 were made with the
-judge inline.
+The trials recorded in RFC 0001 were made with the judge inline, and
+have not been run again with it as a child.
 
 ## The rules, held
 

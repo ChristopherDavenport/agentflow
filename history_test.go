@@ -95,8 +95,15 @@ func TestCompactionDuringAWorkflow(t *testing.T) {
 			// A fold as hard as it can be made: everything but the last.
 			fold := compact.NewLocal(sum, append(rec.CompactOptions(), compact.WithOnFold(rec.Fold), compact.WithFilter(SummaryFilter), compact.WithBudget(1), compact.WithKeepLast(1), compact.WithMinFold(0))...)
 			history := recordOf(store, s.ID())
+			// The children fold too, as hard, with a summarizer of their
+			// own: a judge's session is its own to summarise.
+			kidSum := &summarizer{}
+			kids := &recordedKin{store: store, rec: rec, model: m, name: "w", tools: []agenttool.Tool{scriptTool(&ran)},
+				fold: func() func(context.Context, agentturn.Transcript) (agentturn.Transcript, error) {
+					return compact.NewLocal(kidSum, append(rec.CompactOptions(), compact.WithOnFold(rec.Fold), compact.WithFilter(SummaryFilter), compact.WithBudget(1), compact.WithKeepLast(1), compact.WithMinFold(0))...).Transform
+				}}
 			cfg, err := Apply(g, agentturn.Config{Model: m, ModelName: "w", Transform: fold.Transform, Tools: []agenttool.Tool{scriptTool(&ran)}},
-				history, Delegate(Shadow))
+				history, Delegate(Shadow), kids.option())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -120,7 +127,7 @@ func TestCompactionDuringAWorkflow(t *testing.T) {
 			if want := []string{"gather", "gather", "report"}; !slices.Equal(ran, want) {
 				t.Errorf("ran = %v", ran)
 			}
-			if len(sum.read) == 0 {
+			if len(sum.read) == 0 || len(kidSum.read) == 0 {
 				t.Fatal("nothing was compacted, so this shows nothing")
 			}
 			// The step is handed the value, and the old items are not
@@ -142,7 +149,7 @@ func TestCompactionDuringAWorkflow(t *testing.T) {
 			// A summarized notice reads, to a later step, as something the
 			// person asked for that is still under way.
 			for i, read := range sum.read {
-				for _, notice := range []string{beginPrefix, nudgePrefix, noVerdict, invocationPrefix} {
+				for _, notice := range []string{beginPrefix, nudgePrefix, invocationPrefix} {
 					if strings.Contains(read, notice) {
 						t.Errorf("summary %d was shown a workflow notice:\n%s", i, read)
 					}
@@ -162,10 +169,18 @@ func TestCompactionDuringAWorkflow(t *testing.T) {
 			if notes == 0 || !strings.Contains(all, "call "+finishTool) && !fresh {
 				t.Errorf("notes = %d, the model's own calls kept = %v", notes, strings.Contains(all, "call "+finishTool))
 			}
-			total, missing, wrong := unverified(t, store, s.ID())
-			t.Logf("%d responses, no hash %v, wrong hash %v, %d folds", total, missing, wrong, len(sum.read))
-			if len(wrong) > 0 {
-				t.Errorf("hashes that do not rebuild: %v", wrong)
+			// A judge and a fresh step work in sessions of their own, so
+			// every request, fold or not, keeps a hash that rebuilds.
+			ids := []string{s.ID()}
+			for _, c := range kids.opened {
+				ids = append(ids, spawnedID(t, store, c.Spawn))
+			}
+			for _, id := range slices.Compact(ids) {
+				total, missing, wrong := unverified(t, store, id)
+				t.Logf("%s: %d responses, no hash %v, wrong hash %v, %d folds", id, total, missing, wrong, len(sum.read))
+				if len(wrong) > 0 || len(missing) > 0 {
+					t.Errorf("hashes that do not rebuild: %v, none: %v", wrong, missing)
+				}
 			}
 		})
 	}
@@ -209,14 +224,17 @@ func TestResumeAfterKillInAModelStep(t *testing.T) {
 		}
 		var ran []string
 		m := &dies{cast: cast{script: []says{{finishTool, `{"step":"review","outcome":"findings","data":{"note":"param-7f3"}}`}}}, after: 1}
-		cfg, err := Apply(graph(fresh == "true"), agentturn.Config{Model: m, ModelName: "w", Tools: []agenttool.Tool{scriptTool(&ran)}},
-			Unattended(), recordOf(store, s.ID()))
+		kids := &recordedKin{store: store, rec: rec, model: m, name: "w", tools: []agenttool.Tool{scriptTool(&ran)}}
+		g := graph(fresh == "true")
+		cfg, err := Apply(g, agentturn.Config{Model: m, ModelName: "w", Tools: []agenttool.Tool{scriptTool(&ran)}},
+			Unattended(), recordOf(store, s.ID()), kids.option())
 		if err != nil {
 			t.Fatal(err)
 		}
 		a := agentturn.New(cfg)
 		rec.Attach(a)
-		_, _ = a.Prompt(ctx, openresponses.UserText("go"))
+		end, _ := a.Prompt(ctx, openresponses.UserText("go"))
+		_, _, _ = Drive(ctx, g, a, end)
 		t.Fatal("it did not die")
 	}
 	for _, fresh := range []string{"false", "true"} {
@@ -245,16 +263,24 @@ func TestResumeAfterKillInAModelStep(t *testing.T) {
 			var ran []string
 			g := graph(fresh == "true")
 			m := &cast{script: []says{fixDone, {finishTool, `{"step":"review","outcome":"clean"}`}}}
+			kids := &recordedKin{store: store, rec: rec, model: m, name: "w", tools: []agenttool.Tool{scriptTool(&ran)}}
 			cfg, err := Apply(g, agentturn.Config{Model: m, ModelName: "w", Tools: []agenttool.Tool{scriptTool(&ran)}},
-				Unattended(), recordOf(store, string(id)))
+				Unattended(), recordOf(store, string(id)), kids.option())
 			if err != nil {
 				t.Fatal(err)
 			}
 			a := agentturn.New(cfg, seed...)
 			rec.Attach(a)
 			t.Logf("resumed with %d of the items", len(a.State().Transcript))
-			end, err := a.Prompt(ctx, openresponses.UserText("go on"))
-			if err != nil || end.Reason != agentturn.ReasonDone {
+			// A fresh step died in its child, and its caller's call is
+			// still held: driving it reopens the child where it stood.
+			var end *agentturn.RunEnd
+			if len(a.State().Pending) == 0 {
+				if end, err = a.Prompt(ctx, openresponses.UserText("go on")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if end, _, err = Drive(ctx, g, a, end); err != nil || end.Reason != agentturn.ReasonDone {
 				t.Fatalf("%v, %+v", err, end)
 			}
 			// What ran before the kill did not run again.
@@ -264,10 +290,16 @@ func TestResumeAfterKillInAModelStep(t *testing.T) {
 			if !strings.Contains(m.requests[0].Instructions, `"note":"param-7f3"`) {
 				t.Errorf("fix was not given its input: %s", m.requests[0].Instructions)
 			}
-			total, missing, wrong := unverified(t, store, string(id))
-			t.Logf("%d responses, no hash %v, wrong hash %v; the model was sent %d items", total, missing, wrong, len(m.requests[0].Input))
-			if len(wrong) > 0 {
-				t.Errorf("hashes that do not rebuild: %v", wrong)
+			ids := []string{string(id)}
+			for _, c := range kids.opened {
+				ids = append(ids, spawnedID(t, store, c.Spawn))
+			}
+			for _, id := range ids {
+				total, missing, wrong := unverified(t, store, id)
+				t.Logf("%s: %d responses, no hash %v, wrong hash %v", id, total, missing, wrong)
+				if len(wrong) > 0 || len(missing) > 0 {
+					t.Errorf("hashes that do not rebuild: %v, none: %v", wrong, missing)
+				}
 			}
 			got, err := store.Open(ctx, string(id))
 			if err != nil {
@@ -304,8 +336,9 @@ func TestResumeWhenTheTranscriptHasLostItems(t *testing.T) {
 		name             string
 		fresh, compacted bool
 	}{
-		{"omitted", false, false}, {"omitted, fresh step", true, false},
-		{"compacted", false, true}, {"compacted, fresh step", true, true},
+		// A fresh step works in a child, so the caller's transcript
+		// loses nothing to it; TestResumeAfterKillInAModelStep resumes one.
+		{"omitted", false, false}, {"compacted", false, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -326,7 +359,7 @@ func TestResumeWhenTheTranscriptHasLostItems(t *testing.T) {
 					base.Transform = compact.NewLocal(&summarizer{}, append(rec.CompactOptions(),
 						compact.WithOnFold(rec.Fold), compact.WithFilter(SummaryFilter), compact.WithBudget(1), compact.WithKeepLast(1), compact.WithMinFold(0))...).Transform
 				}
-				cfg, err := Apply(g, base, Unattended(), recordOf(store, id))
+				cfg, err := kinApply(g, base, Unattended(), recordOf(store, id))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -392,7 +425,7 @@ func TestSummaryFilterDropsOnlyWhatTheWorkflowSays(t *testing.T) {
 		inv,
 		openresponses.UserText(beginning("fix") + " Do this step now."),
 		openresponses.UserText(nudgePrefix + " Text is not read."),
-		openresponses.UserText(noVerdict),
+		openresponses.DeveloperText(abandonText),
 		openresponses.UserText("please fix it"),
 		openresponses.DeveloperText("Be brief."),
 		openresponses.UserText("quoting " + beginPrefix),

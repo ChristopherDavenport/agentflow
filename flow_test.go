@@ -128,7 +128,7 @@ func say(sink openresponses.EventSink, model, text string) error {
 
 func newAgent(t *testing.T, g *Graph, m *fakeModel, ran *[]string, opts ...Option) *agentturn.Agent {
 	t.Helper()
-	cfg, err := Apply(g, agentturn.Config{Model: m, ModelName: "fake", Tools: []agenttool.Tool{scriptTool(ran)}}, opts...)
+	cfg, err := kinApply(g, agentturn.Config{Model: m, ModelName: "fake", Tools: []agenttool.Tool{scriptTool(ran)}}, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +279,7 @@ func TestUnattendedFailureIsFinal(t *testing.T) {
 	for name, opts := range map[string][]Option{"alone": {Unattended()}, "rules decline": {Unattended(), declines}} {
 		t.Run(name, func(t *testing.T) {
 			var ran []string
-			cfg, err := Apply(release(), agentturn.Config{Model: &fakeModel{}, ModelName: "fake", MaxTurns: 10, Tools: []agenttool.Tool{flaky(1, &ran)}}, opts...)
+			cfg, err := kinApply(release(), agentturn.Config{Model: &fakeModel{}, ModelName: "fake", MaxTurns: 10, Tools: []agenttool.Tool{flaky(1, &ran)}}, opts...)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -411,7 +411,7 @@ func TestVisitLimit(t *testing.T) {
 
 func TestPolicyStillDecides(t *testing.T) {
 	g, ran := release(), []string{}
-	cfg, err := Apply(g, agentturn.Config{
+	cfg, err := kinApply(g, agentturn.Config{
 		Model: &fakeModel{outcomes: []string{"clean"}}, ModelName: "fake",
 		Tools: []agenttool.Tool{scriptTool(&ran)},
 		BeforeToolCall: func(_ context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {

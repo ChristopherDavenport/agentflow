@@ -2,6 +2,7 @@ package agentflow
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -71,7 +72,8 @@ func TestFreshContextSeesOnlyItsStep(t *testing.T) {
 	// The model first only talks at the fresh step, so the step takes
 	// two requests, the second after a reminder.
 	m, ran := &fakeModel{outcomes: []string{"findings", "", "ok", "clean"}}, []string{}
-	a := newAgent(t, g, m, &ran, Reply(func(context.Context, Question) (Result, bool) {
+	kids := &recordedKin{store: store, rec: rec, model: m, name: "fake"}
+	a := newAgent(t, g, m, &ran, kids.option(), Reply(func(context.Context, Question) (Result, bool) {
 		return Result{Outcome: "fix"}, true
 	}))
 	rec.Attach(a)
@@ -82,34 +84,51 @@ func TestFreshContextSeesOnlyItsStep(t *testing.T) {
 	if len(m.requests) != 4 {
 		t.Fatalf("the model took %d turns, want 4", len(m.requests))
 	}
+	// The child reads what its call passed in, and its own turns.
 	fresh := texts(m.requests[1].Input)
-	if len(fresh) != 1 || !strings.HasPrefix(fresh[0], beginning("fix")) || strings.Contains(fresh[0], "before it") {
-		t.Errorf("fresh step read %q, want only its opening message", fresh)
+	if len(fresh) != 2 || !strings.HasPrefix(fresh[0], invocationPrefix+"pr:fix") || !strings.HasPrefix(fresh[1], beginning("fix")) || strings.Contains(fresh[1], "before it") {
+		t.Errorf("fresh step read %q, want only its invocation and opening message", fresh)
 	}
-	// What the step itself did stays, and nothing from before it.
-	if again := texts(m.requests[2].Input); len(again) != 3 || again[1] != "some text" || !strings.HasPrefix(again[2], nudgePrefix) {
+	if again := texts(m.requests[2].Input); len(again) != 4 || again[2] != "some text" || !strings.HasPrefix(again[3], nudgePrefix) {
 		t.Errorf("fresh step then read %q", again)
 	}
-	// The next step has the whole conversation again.
-	if after := texts(m.requests[3].Input); after[0] != "review this PR" {
+	// The next step has the whole conversation again, with the call
+	// that held the child and its result, and none of the child's turns.
+	after := texts(m.requests[3].Input)
+	if after[0] != "review this PR" || slices.Contains(after, "some text") || !slices.Contains(after, "call "+callTool) {
 		t.Errorf("the step after read %q", after)
 	}
-	got, err := store.Open(ctx, s.ID())
+	for _, id := range []string{s.ID()} {
+		got, err := store.Open(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkHashes(t, got)
+	}
+	// The child's session holds the step, linked from the parent's.
+	if len(kids.opened) == 0 {
+		t.Fatal("no child was opened")
+	}
+	child, err := childSessions(t, store)(kids.opened[0].Spawn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkHashes(t, got)
-}
-
-func TestFreshContextIsNotSilentlyWidened(t *testing.T) {
-	g := release()
-	if _, err := since(openresponses.Items{openresponses.UserText("a secret")}, State{Node: g.node("fix"), Instance: "k"}); err == nil {
-		t.Error("a missing opening message sent the whole input")
+	runs, err := Runs(child, nil)
+	if err != nil || len(runs) != 1 || runs[0].Workflow != "pr:fix" || runs[0].Status != Done || !runs[0].Fresh || runs[0].Caller == "" {
+		t.Fatalf("child runs = %+v, %v", runs, err)
+	}
+	all, err := store.Open(ctx, s.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	top, err := Runs(pathItems(all), childSessions(t, store))
+	if err != nil || len(top) != 1 || len(top[0].Children) != 1 || top[0].Children[0].ID != runs[0].ID || top[0].Children[0].Spawn == "" {
+		t.Fatalf("tree = %+v, %v", top, err)
 	}
 }
 
 func TestContextIsAModelSetting(t *testing.T) {
-	for node, want := range map[string]string{"triage": "only a model node has a context", "review": `context "all"`} {
+	for node, want := range map[string]string{"triage": "only a model node or a call has a context", "review": `context "all"`} {
 		g := release()
 		g.node(node).Context = "all"
 		if err := g.Validate(); err == nil || !strings.Contains(err.Error(), want) {

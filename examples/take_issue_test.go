@@ -140,8 +140,9 @@ func (r repository) run(t *testing.T, m *scripted, answers []agentflow.Result, o
 	writer := agenttool.New("write", "Write a file.", func(ctx context.Context, a writeArgs) (string, error) {
 		return "written", ws.WriteFile(ctx, a.Path, []byte(a.Content), 0o644)
 	})
-	cfg, err := agentflow.Apply(w.Graph, agentturn.Config{Model: m, ModelName: "scripted",
-		Tools: append(tools(ws.FS()), writer, script.New(ws, time.Minute, script.Files(w.Files)))}, opts...)
+	all := append(tools(ws.FS()), writer, script.New(ws, time.Minute, script.Files(w.Files)))
+	cfg, err := agentflow.Apply(w.Graph, agentturn.Config{Model: m, ModelName: "scripted", Tools: all},
+		append([]agentflow.Option{inMemory(m, "scripted", all)}, opts...)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,6 +152,9 @@ func (r repository) run(t *testing.T, m *scripted, answers []agentflow.Result, o
 		t.Fatal(err)
 	}
 	end, err := a.Prompt(ctx, item)
+	if err == nil {
+		end, _, err = agentflow.Drive(ctx, w.Graph, a, end)
+	}
 	for err == nil && end.Reason == agentturn.ReasonInputRequired {
 		if len(answers) == 0 {
 			t.Fatalf("an unexpected question: %s", end.Pending[0].Call.Arguments)
@@ -160,7 +164,7 @@ func (r repository) run(t *testing.T, m *scripted, answers []agentflow.Result, o
 			t.Fatalf("%v: %s", err2, end.Pending[0].Call.Arguments)
 		}
 		answers = answers[1:]
-		end, err = a.Resume(ctx, ans)
+		end, _, err = agentflow.Resume(ctx, w.Graph, a, []agentturn.Answer{ans})
 	}
 	if err != nil {
 		t.Fatal(err)

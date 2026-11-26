@@ -24,8 +24,12 @@ import (
 // skill: <skill>/<path>.
 var (
 	graphName = regexp.MustCompile(`^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$`)
-	flowName  = regexp.MustCompile(`^([A-Za-z0-9_-]+|\./[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*\.md)$`)
-	nodeID    = regexp.MustCompile(`^[A-Za-z0-9_-]{1,20}$`)
+	// A workflow made from one step, to run it in a child, is named
+	// <workflow>:<step>, and one made to judge a step <workflow>:<step>:judge.
+	derivedName = regexp.MustCompile(`^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*:[A-Za-z0-9_-]{1,20}(:judge)?$`)
+	childName   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,40}$`)
+	flowName    = regexp.MustCompile(`^([A-Za-z0-9_-]+|\./[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*\.md)$`)
+	nodeID      = regexp.MustCompile(`^[A-Za-z0-9_-]{1,20}$`)
 )
 
 // maxName bounds a workflow's name.
@@ -43,12 +47,14 @@ const (
 	Person
 )
 
-// What an Agent node's model reads of the conversation.
+// Where a model step or a call does its work.
 const (
-	// ContextSession is the whole transcript, and what empty means.
+	// ContextSession is the current context, and what empty means: a
+	// model step reads the whole transcript, and a call's steps write to
+	// it.
 	ContextSession = "session"
-	// ContextFresh is the transcript from where the step began, so the
-	// model knows only the step's prompt and inputs.
+	// ContextFresh is a child session, which sees only what the call
+	// passes in, its own instructions and its own tools.
 	ContextFresh = "fresh"
 )
 
@@ -136,8 +142,22 @@ type Node struct {
 	// Tools names the tools an Agent node may call.
 	Tools []string
 	// Context is [ContextSession], [ContextFresh] or empty, on an Agent
-	// node only.
+	// node or a call.
 	Context string
+
+	// A step in a child may set the child's own settings: Dir, its
+	// working directory below the workspace's root; Model, its model's
+	// name; and Instructions, text added to its instructions, read from
+	// the skill's file InstructionsFile. Child names a child kept across
+	// the visits and steps of a run that name it, on a model step.
+	Dir              string `json:",omitempty"`
+	Model            string `json:",omitempty"`
+	Instructions     string `json:",omitempty"`
+	InstructionsFile string `json:",omitempty"`
+	Child            string `json:",omitempty"`
+	// Verdict says the node is a judge's: it ends with flow_judge, giving
+	// a reason. Only a workflow agentflow makes to judge a step has one.
+	Verdict bool `json:",omitempty"`
 
 	// Outcomes are the ways the node can end. Empty means only [OK].
 	Outcomes []string
@@ -265,7 +285,7 @@ func (g *Graph) node(id string) *Node {
 func (g *Graph) Validate() error {
 	var errs []error
 	bad := func(format string, args ...any) { errs = append(errs, fmt.Errorf("agentflow: "+format, args...)) }
-	if !graphName.MatchString(g.Name) || len(g.Name) > maxName {
+	if !graphName.MatchString(g.Name) && !derivedName.MatchString(g.Name) || len(g.Name) > maxName {
 		bad("invalid graph name %q: want up to %d letters, digits, _ or -, in parts joined by /", g.Name, maxName)
 	}
 	if g.MaxDepth < 0 || g.MaxDepth > 99 {
@@ -320,11 +340,12 @@ func (g *Graph) Validate() error {
 			bad("node %q: unknown kind %d", n.ID, n.Kind)
 		}
 		switch {
-		case n.Context != "" && n.Kind != Agent:
-			bad("node %q: only a model node has a context", n.ID)
+		case n.Context != "" && n.Kind != Agent && n.Flow == "":
+			bad("node %q: only a model node or a call has a context", n.ID)
 		case n.Context != "" && n.Context != ContextSession && n.Context != ContextFresh:
 			bad("node %q: context %q: want %q or %q", n.ID, n.Context, ContextSession, ContextFresh)
 		}
+		errs = append(errs, n.checkChild()...)
 		if j := n.Judge; j != nil {
 			switch {
 			case n.Kind != Person:
@@ -401,6 +422,7 @@ func (g *Graph) Validate() error {
 			}
 		}
 	}
+	errs = append(errs, g.checkKept()...)
 	if len(g.Nodes) > 0 {
 		errs = append(errs, g.checkRefs()...)
 	}

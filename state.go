@@ -2,7 +2,6 @@ package agentflow
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,7 +31,6 @@ const (
 
 	invocationPrefix = "agentflow: start "
 	nudgePrefix      = "agentflow: the step is not finished."
-	noVerdict        = "agentflow: no verdict is coming."
 	beginPrefix      = "agentflow: begin step "
 )
 
@@ -97,8 +95,6 @@ type State struct {
 	Parent   string
 	Caller   string
 	Depth    int
-	// Format is the record format the run was started under.
-	Format int
 	// Inputs is what the invocation carried, and Outputs what the done
 	// workflow gives back.
 	Inputs  any
@@ -117,7 +113,7 @@ type State struct {
 	// Nudges counts the reminders given since Node became current.
 	Nudges int
 	// Begun says the transcript holds the message that opens this visit
-	// of an Agent node, or opens a judge's look at a Person node.
+	// of an Agent node.
 	Begun bool
 	// Advice is the judge's verdict on the question now being asked.
 	Advice *Verdict
@@ -139,16 +135,20 @@ type State struct {
 	// Steps are the finished nodes, oldest first.
 	Steps []Step
 
+	// Fresh says the run is in a child session of its own, which its
+	// caller's call holds.
+	Fresh bool
+	// Left says the runs under way were abandoned with their caller, and
+	// none is to start until an invocation.
+	Left bool
+
 	// abandoned are earlier runs another was asked for over, innermost
 	// first, with nothing yet written of their ends.
 	abandoned []*Ending
-	// refused counts a judge's refused verdicts while an answer is held,
-	// and talked says it replied in words.
+	// refused counts the verdicts a judge gave that it may not give.
 	refused int
-	talked  bool
-	// unseen are the stretches of the transcript, ends included, where a
-	// judge looked after a person had answered.
-	unseen [][2]int
+	// kept are the children the run keeps, by name, each with its spawn.
+	kept map[string]string
 
 	g        *Graph
 	prefix   string
@@ -187,11 +187,16 @@ type startPayload struct {
 	Definition json.RawMessage `json:"definition,omitempty"`
 	// Definitions are every other workflow the root can reach, by name.
 	Definitions map[string]pinned `json:"definitions,omitempty"`
-	Run         string            `json:"run,omitempty"`
+	Run         string            `json:"run"`
 	Parent      string            `json:"parent,omitempty"`
 	Caller      string            `json:"caller,omitempty"`
 	Depth       int               `json:"depth,omitempty"`
 	MaxDepth    int               `json:"max_depth,omitempty"`
+	// Context is fresh for a run in a child session, whose caller's call
+	// holds it. Path is then the way to the call from the run nobody
+	// called, so the child reads on its own.
+	Context string  `json:"context,omitempty"`
+	Path    []Place `json:"path,omitempty"`
 }
 
 // pinned is one workflow a run may reach, as its start recorded it.
@@ -242,16 +247,6 @@ func newKey() (string, error) {
 // keyPrefix starts every call ID of the run with key.
 func keyPrefix(key string) string { return reserved + key + "_" }
 
-// v1Prefix started the call IDs of a workflow's runs in record format 1.
-// A long name was cut and told apart by its hash.
-func v1Prefix(name string) string {
-	if len(name) > 16 {
-		sum := sha256.Sum256([]byte(name))
-		name = name[:9] + "-" + hex.EncodeToString(sum[:3])
-	}
-	return reserved + name + "_"
-}
-
 // callID is the ID of the call the program makes for an attempt.
 func (st State) callID() string {
 	id := st.prefix + st.Node.ID + "_v" + strconv.Itoa(st.Visit)
@@ -266,6 +261,9 @@ func (st State) retryID() string { return st.callID() + "-retry" }
 
 func (st State) endID() string { return st.prefix + "end" }
 
+// judgeID is the ID of the call that has a judge look at a question.
+func (st State) judgeID() string { return st.callID() + "-judge" }
+
 // frame is one run as replay reads it.
 type frame struct {
 	st     State
@@ -279,6 +277,17 @@ type frame struct {
 	start, end int
 	ending     *Ending
 	parent     *frame
+	// children are the calls it made into child sessions, in order.
+	children []freshCall
+	// path is where a run in a child stands in the tree it was called
+	// from.
+	path []Place
+}
+
+// freshCall is a call a run made into a child session.
+type freshCall struct {
+	call                 string
+	workflow, run, spawn string
 }
 
 // replay reads a transcript as a stack of runs.
@@ -295,9 +304,6 @@ type replay struct {
 	entries int
 	// abandoned outlives a root: it is written before the next starts.
 	abandoned []*Ending
-	// unseen outlives a run: a later one's model reads the same
-	// transcript.
-	unseen [][2]int
 	// prefixes are those of every run started, of any workflow, so a
 	// call none of them made is known to have lost its start.
 	prefixes []string
@@ -350,9 +356,8 @@ func (r *replay) top() *frame {
 func (r *replay) state(f *frame) State {
 	st := f.st
 	st.abandoned = r.abandoned
-	st.unseen = r.unseen
 	st.Entries = r.entries
-	st.Path = nil
+	st.Path = slices.Clone(r.root.path)
 	for _, s := range r.stack {
 		p := Place{Workflow: s.st.Workflow, Run: s.st.Instance}
 		if s.st.Node != nil {
@@ -376,11 +381,13 @@ func tagged(text string) string {
 	return ""
 }
 
-// mine says a workflow message names st's run, or names none in a run
-// whose format did not tag every message.
-func (st *State) mine(text string) bool {
+// mine says a workflow message names st's run.
+func (st *State) mine(text string) bool { return tagged(text) == st.Instance }
+
+// known says a workflow message names a run the transcript started.
+func (r *replay) known(text string) bool {
 	key := tagged(text)
-	return key == st.Instance || key == "" && st.Format == 1
+	return key != "" && slices.Contains(r.prefixes, keyPrefix(key))
 }
 
 func (r *replay) message(i int, m *openresponses.Message) {
@@ -389,19 +396,20 @@ func (r *replay) message(i int, m *openresponses.Message) {
 			r.invoke(i, inputs)
 			return
 		}
+		if m.Text() == abandonText {
+			r.invoke(i, nil)
+			r.root.st.Left = true
+			return
+		}
 	}
 	f := r.top()
 	st := &f.st
 	text := m.Text()
 	switch {
 	case !st.Started && m.Role == openresponses.RoleUser && strings.HasPrefix(text, beginPrefix):
-		r.orphaned = true
-	// A judge that replied in words is waited on no longer: the next
-	// thing said, the driver's or the person's, moves on.
-	case st.Held != nil && m.Role == openresponses.RoleUser && (st.talked || strings.HasPrefix(text, noVerdict) && st.mine(text)):
-		r.release(f, i, nil)
-	case st.Held != nil && st.Begun && m.Role == openresponses.RoleAssistant:
-		st.talked = true
+		// An earlier run's step, of another workflow a kept child ran,
+		// has its start; one without has lost it.
+		r.orphaned = r.orphaned || !r.known(text)
 	case m.Role == openresponses.RoleUser && strings.HasPrefix(text, nudgePrefix):
 		if st.mine(text) {
 			st.Nudges++
@@ -416,9 +424,6 @@ func (r *replay) message(i int, m *openresponses.Message) {
 // invoke asks for a new run, abandoning every one under way, innermost
 // first.
 func (r *replay) invoke(i int, inputs any) {
-	if f := r.top(); f.st.Held != nil {
-		r.unseen = append(r.unseen, [2]int{f.since + 1, i - 1})
-	}
 	var left []*Ending
 	for _, f := range slices.Backward(r.stack) {
 		if f.ending == nil {
@@ -442,6 +447,22 @@ func (r *replay) call(i int, c *openresponses.FunctionCall) {
 			r.prefixes = append(r.prefixes, prefix)
 		}
 		return
+	}
+	// A call into a child is the run's from when it is made: the child
+	// it keeps is kept from then on, whatever comes of the call.
+	if f := r.top(); f.st.Started && strings.HasPrefix(c.CallID, f.st.prefix) && (c.Name == callTool || c.Name == judgeTool) {
+		var a callArgs
+		if decode([]byte(c.Arguments), &a) == nil && a.Context == ContextFresh {
+			f.children = append(f.children, freshCall{call: c.CallID, workflow: a.Workflow, run: a.Run, spawn: a.Spawn})
+			if a.Child != "" {
+				if f.st.kept == nil {
+					f.st.kept = map[string]string{}
+				}
+				if f.st.kept[a.Child] == "" {
+					f.st.kept[a.Child] = a.Spawn
+				}
+			}
+		}
 	}
 	// Only the program makes these IDs. An earlier run's end is the one
 	// that stands without its run.
@@ -471,7 +492,7 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 			return
 		}
 	case c.Name == finishTool || c.Name == judgeTool:
-		if run := runOf(c.Arguments); run != st.Instance && (run != "" || st.Format != 1) {
+		if runOf(c.Arguments) != st.Instance {
 			return
 		}
 	}
@@ -492,33 +513,50 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 			f.failed = fmt.Errorf("%w: %s: %s", ErrStepFailed, n.ID, st.Failure)
 		}
 		return
-	case st.Held != nil:
-		// Nothing but a verdict, or two failures to give one, moves a
-		// held answer on.
-		if c.Name != judgeTool || r.at[out.CallID] <= f.since {
+	case c.Name == judgeTool && strings.HasPrefix(c.CallID, reserved):
+		// A judge's look, from its child: under shadow it finishes the
+		// held answer's step, and otherwise it advises the question.
+		if out.CallID != st.judgeID() || n.Kind != Person {
 			return
 		}
-		if v, ok := verdictOf(n, c, out); ok && st.Begun {
-			r.release(f, i, &v)
-		} else if st.refused++; st.refused >= 2 {
-			r.release(f, i, nil)
-		}
-		return
-	case n.Kind == Person && c.Name == judgeTool:
-		// A verdict advises; the question's own answer finishes the
-		// step. The first one given for this visit counts.
-		if v, ok := verdictOf(n, c, out); ok && st.Advice == nil && st.Begun && r.at[out.CallID] > f.since {
+		v, ok := verdictOf(n, out)
+		switch {
+		case st.Held != nil:
+			advice := &v
+			if !ok || v.None {
+				advice = nil
+			}
+			r.finish(f, i, Step{Result: *st.Held, Advice: advice, Blind: true})
+		case st.Advice != nil:
+		case ok:
 			st.Advice = &v
+		default:
+			// A look that failed is no verdict, and the person is asked.
+			st.Advice = &Verdict{Outcome: HandBack, Reason: "the judge's look failed: " + out.Output.String(), None: true}
 		}
 		return
-	case n.Kind == Agent:
+	case st.Held != nil:
+		// Nothing but the judge's look moves a held answer on.
+		return
+	case n.Kind == Agent && !n.fresh():
 		// A finish that was rejected or is for another node is not
-		// progress; the model saw the error and goes on.
-		if invalid != nil || c.Name != finishTool || finishStep(c.Arguments) != n.ID || r.at[out.CallID] < f.since {
+		// progress; the model saw the error and goes on. A judge that
+		// gives two verdicts it may not give has given none.
+		finish := finishTool
+		if n.Verdict {
+			finish = judgeTool
+		}
+		if c.Name != finish || finishStep(c.Arguments) != n.ID || r.at[out.CallID] < f.since {
+			return
+		}
+		if invalid != nil {
+			if st.refused++; n.Verdict && st.refused >= 2 && f.failed == nil {
+				f.failed = fmt.Errorf("%w: %s: two verdicts it may not give", ErrStepFailed, n.ID)
+			}
 			return
 		}
 	default:
-		if out.CallID != st.callID() || n.Flow != "" && st.Returned == nil {
+		if out.CallID != st.callID() || n.Flow != "" && !n.fresh() && st.Returned == nil {
 			return
 		}
 		if invalid != nil {
@@ -550,7 +588,9 @@ func (r *replay) started(i int, f *frame, c *openresponses.FunctionCall, out *op
 		return json.Unmarshal([]byte(out.Output.String()), &res) == nil && res.Outcome == OK
 	}
 	prefix := strings.TrimSuffix(c.CallID, "start")
-	if p.Parent == "" {
+	if p.Parent == "" || p.Context == ContextFresh {
+		// A run nobody called here: the root, or a child's, whose caller
+		// is in another session.
 		root := r.root
 		if f != root || root.st.Started || root.failed != nil || p.Workflow != r.g.Name {
 			return
@@ -559,19 +599,16 @@ func (r *replay) started(i int, f *frame, c *openresponses.FunctionCall, out *op
 		case !ok():
 			root.failed = fmt.Errorf("%w: start: %s", ErrStepFailed, out.Output.String())
 			return
-		case p.Format != 1 && p.Format != RecordFormat:
-			root.failed = fmt.Errorf("%w: record format %d", ErrChanged, p.Format)
+		case p.Format != RecordFormat:
+			root.failed = fmt.Errorf("%w: record format %d, and this reads %d", ErrChanged, p.Format, RecordFormat)
 			return
 		case p.Digest != r.g.Digest():
 			root.failed = r.changed(p)
 			return
 		}
-		key := p.Run
-		if p.Format == 1 {
-			key = strings.TrimSuffix(strings.TrimPrefix(c.CallID, v1Prefix(r.g.Name)), "_start")
-		}
-		root.st = State{Started: true, Instance: key, Workflow: r.g.Name, Format: p.Format, Inputs: p.Inputs,
-			g: r.g, prefix: prefix, maxDepth: cmpDepth(p.MaxDepth)}
+		root.st = State{Started: true, Instance: p.Run, Workflow: r.g.Name, Inputs: p.Inputs, Parent: p.Parent, Caller: p.Caller,
+			Depth: p.Depth, Fresh: p.Context == ContextFresh, g: r.g, prefix: prefix, maxDepth: cmpDepth(p.MaxDepth)}
+		root.path = p.Path
 		root.start = r.at[c.CallID]
 		r.stack = []*frame{root}
 		r.frames = append(r.frames, root)
@@ -582,7 +619,7 @@ func (r *replay) started(i int, f *frame, c *openresponses.FunctionCall, out *op
 	// not have made it yet.
 	st := &f.st
 	n := st.Node
-	if f.failed != nil || !st.Started || st.Done || n == nil || n.Flow == "" || st.Callee != "" || st.Failure != "" ||
+	if f.failed != nil || !st.Started || st.Done || n == nil || n.Flow == "" || n.fresh() || st.Callee != "" || st.Failure != "" ||
 		p.Parent != st.Instance || p.Caller != st.callID() {
 		return
 	}
@@ -597,7 +634,7 @@ func (r *replay) started(i int, f *frame, c *openresponses.FunctionCall, out *op
 	}
 	st.Callee, st.calleeInputs = p.Run, p.Inputs
 	child := &frame{st: State{Started: true, Instance: p.Run, Workflow: g.Name, Parent: p.Parent, Caller: p.Caller, Depth: p.Depth,
-		Format: RecordFormat, Inputs: p.Inputs, g: g, prefix: prefix, maxDepth: st.maxDepth},
+		Inputs: p.Inputs, g: g, prefix: prefix, maxDepth: st.maxDepth},
 		visits: map[string]int{}, since: -1, start: r.at[c.CallID], end: -1, parent: f}
 	r.stack = append(r.stack, child)
 	r.frames = append(r.frames, child)
@@ -671,19 +708,13 @@ func (r *replay) ended(c *openresponses.FunctionCall, out *openresponses.Functio
 	}
 }
 
-// release ends a held answer's step, with the verdict if one came.
-func (r *replay) release(f *frame, i int, advice *Verdict) {
-	r.unseen = append(r.unseen, [2]int{f.since + 1, i})
-	r.finish(f, i, Step{Result: *f.st.Held, Advice: advice, Blind: true})
-}
-
 // finish ends f's current node with step, at item i.
 func (r *replay) finish(f *frame, i int, step Step) {
 	st := &f.st
 	n := st.Node
 	step.Node, step.Visit = n.ID, st.Visit
 	st.Steps = append(st.Steps, step)
-	f.since, st.Nudges, st.Begun, st.Advice, st.Held, st.refused, st.talked = i, 0, false, nil, nil, 0, false
+	f.since, st.Nudges, st.Begun, st.Advice, st.Held, st.refused = i, 0, false, nil, nil, 0
 	st.Callee, st.Returned, st.calleeInputs = "", nil, nil
 	next := n.Next[step.Result.Outcome]
 	if next == "" {
@@ -725,9 +756,9 @@ func (r *replay) enter(f *frame, i int, n *Node) {
 	}
 }
 
-// verdictOf reads the verdict a flow_judge call on n produced.
-func verdictOf(n *Node, c *openresponses.FunctionCall, out *openresponses.FunctionCallOutput) (v Verdict, ok bool) {
-	ok = finishStep(c.Arguments) == n.ID && decode([]byte(out.Output.String()), &v) == nil &&
+// verdictOf reads the verdict a judge's look at n came to.
+func verdictOf(n *Node, out *openresponses.FunctionCallOutput) (v Verdict, ok bool) {
+	ok = decode([]byte(out.Output.String()), &v) == nil &&
 		(v.Outcome == HandBack || n.Judge != nil && n.judged(v) == nil)
 	return v, ok
 }
@@ -736,30 +767,6 @@ func verdictOf(n *Node, c *openresponses.FunctionCall, out *openresponses.Functi
 func askedUnseen(c *openresponses.FunctionCall) bool {
 	var q Question
 	return c != nil && c.Name == askTool && decode([]byte(c.Arguments), &q) == nil && q.Mode == Shadow.String()
-}
-
-// without drops the stretches of t a judge spent after a person had
-// answered, so what it said reaches no later step.
-func without(t openresponses.Items, unseen [][2]int) openresponses.Items {
-	if len(unseen) == 0 {
-		return t
-	}
-	out := make(openresponses.Items, 0, len(t))
-	dropped := map[string]bool{}
-	for i, item := range t {
-		in := slices.ContainsFunc(unseen, func(s [2]int) bool { return i >= s[0] && i <= s[1] })
-		switch it := item.(type) {
-		case *openresponses.FunctionCall:
-			dropped[it.CallID] = in
-		case *openresponses.FunctionCallOutput:
-			// A call's output goes with it, wherever it landed.
-			in = in || dropped[it.CallID]
-		}
-		if !in {
-			out = append(out, item)
-		}
-	}
-	return out
 }
 
 // visitTag tells one visit's messages from every other's, and names the
@@ -775,7 +782,7 @@ func beginning(id string) string { return beginPrefix + strconv.Quote(id) + "." 
 // in st's run.
 func opens(m *openresponses.Message, st *State) bool {
 	n := st.Node
-	return (n.Kind == Agent || n.Judge != nil) && m.Role == openresponses.RoleUser && strings.HasPrefix(m.Text(), beginning(n.ID)) && st.mine(m.Text())
+	return n.Kind == Agent && !n.fresh() && m.Role == openresponses.RoleUser && strings.HasPrefix(m.Text(), beginning(n.ID)) && st.mine(m.Text())
 }
 
 func parseResult(n *Node, output string) (Result, error) {

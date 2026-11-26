@@ -18,8 +18,8 @@ import (
 // RecordFormat versions what a workflow writes into a transcript and how
 // it is read. flow_start carries it, and a reader that does not know the
 // one it finds says so rather than guess. Format 2 keys every run, so
-// that runs can nest; a run of format 1 is still read, and resumed, as a
-// run nobody called.
+// that runs can nest, in a transcript or in child sessions. Format 1 is
+// no longer read.
 const RecordFormat = 2
 
 // The statuses of an [Instance]. All but running are written down, by
@@ -101,6 +101,10 @@ type Instance struct {
 	// the runs it is nested in.
 	Parent, Caller string
 	Depth          int
+	// Spawn names the child session a run called into one works in, and
+	// Fresh says the run is one.
+	Spawn string
+	Fresh bool
 	// Start is the item that called flow_start, and End the item that
 	// recorded the ending, -1 while there is none.
 	Start, End int
@@ -122,10 +126,13 @@ type Instance struct {
 	from, stop int
 }
 
-// Runs lists the runs of a transcript nobody called, in the order they
-// started, each with the runs it called. open reads a session a run was
-// called into; it may be nil while none is.
-func Runs(t agentturn.Transcript, open func(session string) (agentturn.Transcript, error)) ([]*Instance, error) {
+// Runs lists the runs of a transcript nobody called there, in the order
+// they started, each with the runs it called. A run in a child session
+// is one nobody called there, and names its caller. open reads the items
+// of the child session a spawn ID names, as every item of its path; with
+// it, a run called into a child is read from there, and without it, it
+// is listed with what its call's result says.
+func Runs(t agentturn.Transcript, open func(spawn string) (agentturn.Transcript, error)) ([]*Instance, error) {
 	calls := map[string]int{}
 	var out []*Instance
 	started, made := false, false
@@ -146,7 +153,7 @@ func Runs(t agentturn.Transcript, open func(session string) (agentturn.Transcrip
 			if c.Name != startTool || !strings.HasPrefix(c.CallID, reserved) {
 				continue
 			}
-			run, err := rootRun(t, at, c, it)
+			run, err := rootRun(t, at, c, it, open)
 			if err != nil {
 				return nil, fmt.Errorf("agentflow: item %d: %w", at, err)
 			}
@@ -199,22 +206,23 @@ func spanOf(g *Graph, t agentturn.Transcript, from, to int) agentturn.Transcript
 
 // rootRun reads the run nobody called whose flow_start is item at, nil
 // for a call's start.
-func rootRun(t agentturn.Transcript, at int, c *openresponses.FunctionCall, out *openresponses.FunctionCallOutput) (*Instance, error) {
+func rootRun(t agentturn.Transcript, at int, c *openresponses.FunctionCall, out *openresponses.FunctionCallOutput, open func(string) (agentturn.Transcript, error)) (*Instance, error) {
 	var p startPayload
 	if err := decode([]byte(c.Arguments), &p); err != nil {
 		return nil, fmt.Errorf("flow_start: %w", err)
 	}
-	if p.Parent != "" {
+	if p.Parent != "" && p.Context != ContextFresh {
 		return nil, nil
 	}
-	run := &Instance{Workflow: p.Workflow, Digest: p.Digest, Inputs: p.Inputs, Start: at, End: -1, Status: Running, from: at, stop: len(t)}
+	run := &Instance{Workflow: p.Workflow, Digest: p.Digest, Inputs: p.Inputs, Start: at, End: -1, Status: Running, from: at, stop: len(t),
+		ID: p.Run, Parent: p.Parent, Caller: p.Caller, Depth: p.Depth, Fresh: p.Context == ContextFresh}
 	var res Result
 	if json.Unmarshal([]byte(out.Output.String()), &res) != nil || res.Outcome != OK {
 		run.Status, run.Reason = Failed, out.Output.String()
 		return run, nil
 	}
-	if p.Format != 1 && p.Format != RecordFormat {
-		run.Problem = fmt.Sprintf("record format %d, and this reads up to %d", p.Format, RecordFormat)
+	if p.Format != RecordFormat {
+		run.Problem = fmt.Sprintf("record format %d, and this reads %d", p.Format, RecordFormat)
 		return run, nil
 	}
 	g, err := pinnedGraph(p)
@@ -223,10 +231,6 @@ func rootRun(t agentturn.Transcript, at int, c *openresponses.FunctionCall, out 
 		return run, nil
 	}
 	run.Graph, run.root = g, g
-	run.ID = p.Run
-	if p.Format == 1 {
-		run.ID = strings.TrimSuffix(strings.TrimPrefix(c.CallID, v1Prefix(g.Name)), "_start")
-	}
 	// The run stops where another of its workflow is asked for or
 	// started; its ending, and its calls', for an abandoned run, come
 	// after that.
@@ -242,7 +246,7 @@ func rootRun(t agentturn.Transcript, at int, c *openresponses.FunctionCall, out 
 		case *openresponses.FunctionCall:
 			if it.Name == startTool && strings.HasPrefix(it.CallID, reserved) && i < run.stop {
 				var q startPayload
-				if decode([]byte(it.Arguments), &q) == nil && q.Parent == "" && q.Workflow == g.Name {
+				if decode([]byte(it.Arguments), &q) == nil && (q.Parent == "" || q.Context == ContextFresh) && q.Workflow == g.Name {
 					run.stop = i
 				}
 			}
@@ -278,11 +282,62 @@ func rootRun(t agentturn.Transcript, at int, c *openresponses.FunctionCall, out 
 		byKey[f.st.Instance] = in
 		in.State = r.state(f)
 		judge(in, f)
+		for _, fc := range f.children {
+			kid, err := childRun(t, at, fc, in, open)
+			if err != nil {
+				return run, err
+			}
+			in.Children = append(in.Children, kid)
+		}
 	}
 	if len(r.frames) > 0 && r.frames[0].end >= 0 {
 		run.End = at + r.frames[0].end
 	}
 	return run, nil
+}
+
+// childRun is the run a call of in made into a child session: read from
+// the session, or without open, what the call's result says of it.
+func childRun(t agentturn.Transcript, at int, fc freshCall, in *Instance, open func(string) (agentturn.Transcript, error)) (*Instance, error) {
+	if open != nil {
+		ct, err := open(fc.spawn)
+		if err != nil {
+			return nil, fmt.Errorf("agentflow: child session %s: %w", fc.spawn, err)
+		}
+		runs, err := Runs(ct, open)
+		if err != nil {
+			return nil, fmt.Errorf("agentflow: child session %s: %w", fc.spawn, err)
+		}
+		for _, r := range runs {
+			if r.ID == fc.run {
+				r.Spawn = fc.spawn
+				return r, nil
+			}
+		}
+	}
+	kid := &Instance{Workflow: fc.workflow, ID: fc.run, Parent: in.ID, Caller: fc.call, Depth: in.Depth + 1, Spawn: fc.spawn, Fresh: true,
+		Start: -1, End: -1, Status: Running}
+	for i := at; i < len(t); i++ {
+		o, ok := t[i].(*openresponses.FunctionCallOutput)
+		if !ok || o.CallID != fc.call {
+			continue
+		}
+		var res Result
+		if decode([]byte(o.Output.String()), &res) == nil && res.Outcome != "" {
+			kid.Status, kid.Outcome = Done, res.Outcome
+			if res.Outcome == Failed {
+				kid.Status = Failed
+			}
+		} else {
+			kid.Status, kid.Reason = Failed, o.Output.String()
+		}
+		break
+	}
+	if open == nil {
+		return kid, nil
+	}
+	kid.Problem = "the child session holds no such run"
+	return kid, nil
 }
 
 // judge sets a run's status from its ending, and holds the replay to it.

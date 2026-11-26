@@ -153,14 +153,24 @@ func loadSkill(s *agentskill.Skill) (*agentflow.Graph, map[string][]byte, error)
 	return g, files, nil
 }
 
-// scriptsIn holds a workflow's scripts to its skill's files.
+// scriptsIn holds a workflow's scripts and instruction files to its
+// skill's files, and reads each step's instructions from the snapshot,
+// so the definition, and its digest, hold them.
 func scriptsIn(g *agentflow.Graph, skill string, files map[string][]byte) error {
-	for _, n := range g.Nodes {
+	for i := range g.Nodes {
+		n := &g.Nodes[i]
 		if n.Script != "" && files[n.Script] == nil {
 			return fmt.Errorf("workflow: skill %q: node %q runs %q, which is not in it", skill, n.ID, n.Script)
 		}
+		if n.InstructionsFile != "" {
+			text, ok := files[n.InstructionsFile]
+			if !ok {
+				return fmt.Errorf("workflow: skill %q: node %q takes instructions from %q, which is not in it", skill, n.ID, n.InstructionsFile)
+			}
+			n.Instructions = strings.TrimSpace(string(text))
+		}
 	}
-	return nil
+	return g.Validate()
 }
 
 func snapshot(fsys fs.FS) (map[string][]byte, string, error) {

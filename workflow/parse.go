@@ -127,7 +127,12 @@ type settings struct {
 	Outputs yaml.Node      `yaml:"outputs"`
 	Tools   []string       `yaml:"tools"`
 	Context string         `yaml:"context"`
-	Judge   *struct {
+	// A child's own settings, with context: fresh.
+	Dir          string `yaml:"dir"`
+	Model        string `yaml:"model"`
+	Instructions string `yaml:"instructions"`
+	Child        string `yaml:"child"`
+	Judge        *struct {
 		Criteria string   `yaml:"criteria"`
 		Outcomes []string `yaml:"outcomes"`
 		Tools    []string `yaml:"tools"`
@@ -408,6 +413,7 @@ func node(n *agentflow.Node, s section) error {
 		return errors.New("only a program node has run, tool, args or flow")
 	}
 	n.Context = set.Context
+	n.Dir, n.Model, n.InstructionsFile, n.Child = set.Dir, set.Model, set.Instructions, set.Child
 	if j := set.Judge; j != nil {
 		n.Judge = &agentflow.Judge{Criteria: strings.TrimSpace(j.Criteria), Outcomes: j.Outcomes, Tools: j.Tools, Returns: j.Returns}
 	}

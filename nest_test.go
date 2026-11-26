@@ -447,66 +447,22 @@ func TestAChangeToACalleeStopsAResume(t *testing.T) {
 	}
 }
 
-func TestAFormatOneRunReadsAndResumes(t *testing.T) {
-	g := &Graph{Name: "old", Nodes: []Node{
-		{ID: "gather", Kind: Run, Tool: "script", Next: map[string]string{OK: "review"}},
-		{ID: "review", Kind: Agent, Prompt: "Review it."},
-	}}
-	definition, err := json.Marshal(g)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// As format 1 wrote it: no key, the workflow in every ID, and a
-	// visit's opening message tagged with the instance.
-	start, err := json.Marshal(map[string]any{"workflow": "old", "digest": g.Digest(), "format": 1, "definition": json.RawMessage(definition)})
+func TestAFormatOneRecordIsRefused(t *testing.T) {
+	g := &Graph{Name: "old", Nodes: []Node{{ID: "review", Kind: Agent, Prompt: "Review it."}}}
+	start, err := json.Marshal(map[string]any{"workflow": "old", "digest": g.Digest(), "format": 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ok := openresponses.FunctionCallOutputData{Text: `{"outcome":"ok"}`}
 	recorded := agentturn.Transcript{
-		openresponses.UserText("go"),
 		&openresponses.FunctionCall{CallID: "flow_old_ab12cd34_start", Name: startTool, Arguments: string(start)},
 		&openresponses.FunctionCallOutput{CallID: "flow_old_ab12cd34_start", Output: ok},
-		&openresponses.FunctionCall{CallID: "flow_old_ab12cd34_gather_v1", Name: "script", Arguments: `{}`},
-		&openresponses.FunctionCallOutput{CallID: "flow_old_ab12cd34_gather_v1", Output: ok},
 	}
-	st, err := g.Replay(recorded)
-	if err != nil || st.Node == nil || st.Node.ID != "review" || st.Format != 1 || st.Instance != "ab12cd34" {
-		t.Fatalf("state = %+v, %v", st, err)
+	if _, err := g.Replay(recorded); !errors.Is(err, ErrChanged) || !strings.Contains(err.Error(), "record format 1") {
+		t.Errorf("replay: %v", err)
 	}
-	var ran []string
-	m := &fakeModel{outcomes: []string{OK}}
-	cfg, err := Apply(g, agentturn.Config{Model: m, ModelName: "fake", Tools: []agenttool.Tool{scriptTool(&ran)}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	a := agentturn.New(cfg, agentturn.WithTranscript(recorded))
-	end, err := a.Continue(context.Background())
-	if err != nil || end.Reason != agentturn.ReasonDone {
-		t.Fatalf("end = %+v, %v", end, err)
-	}
-	if len(ran) != 0 {
-		t.Errorf("ran %v again", ran)
-	}
-	items := a.State().Transcript
-	// It finishes as it began: the finish names no run, and the end is
-	// written under the old ID.
-	var finish, ending string
-	for _, item := range items {
-		if c, ok := item.(*openresponses.FunctionCall); ok {
-			switch c.Name {
-			case finishTool:
-				finish = c.Arguments
-			case endTool:
-				ending = c.CallID
-			}
-		}
-	}
-	if strings.Contains(finish, `"run"`) || ending != "flow_old_ab12cd34_end" || strings.Contains(m.requests[0].Instructions, ", run ") {
-		t.Errorf("finish %s, end %s", finish, ending)
-	}
-	runs, err := Runs(items, nil)
-	if err != nil || len(runs) != 1 || runs[0].Status != Done || runs[0].ID != "ab12cd34" || runs[0].Problem != "" {
+	runs, err := Runs(recorded, nil)
+	if err != nil || len(runs) != 1 || !strings.Contains(runs[0].Problem, "record format 1") {
 		t.Errorf("runs = %v, %v", tree(runs), err)
 	}
 }

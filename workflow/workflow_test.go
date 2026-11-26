@@ -105,8 +105,8 @@ func TestSkillRunsAsAWorkflow(t *testing.T) {
 	})
 	m := &model{}
 	g := w.Graph
-	cfg, err := agentflow.Apply(g, agentturn.Config{Model: m, ModelName: "fake", MaxTurns: 20,
-		Tools: []agenttool.Tool{script.New(ws, time.Minute, script.Files(w.Files)), tag}})
+	all := []agenttool.Tool{script.New(ws, time.Minute, script.Files(w.Files)), tag}
+	cfg, err := agentflow.Apply(g, agentturn.Config{Model: m, ModelName: "fake", MaxTurns: 20, Tools: all}, inMemory(m, "fake", all))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,11 +116,14 @@ func TestSkillRunsAsAWorkflow(t *testing.T) {
 		t.Fatal(err)
 	}
 	end, err := a.Prompt(context.Background(), item)
+	if err == nil {
+		end, _, err = agentflow.Drive(context.Background(), g, a, end)
+	}
 	if err != nil || end.Reason != agentturn.ReasonInputRequired {
 		t.Fatalf("end = %+v, %v", end, err)
 	}
 	// The prose, its own heading and fence included, is the prompt.
-	for _, want := range []string{"Summarise the change", "### An example", "```json", `Inputs: {"paths":["a.go"]}`} {
+	for _, want := range []string{"Summarise the change", "### An example", "```json", `Inputs: {"paths":["a.go"]}`, "Be terse."} {
 		if !strings.Contains(m.instructions[0], want) {
 			t.Errorf("instructions lack %q:\n%s", want, m.instructions[0])
 		}
@@ -177,8 +180,10 @@ func TestFormatRoundTrips(t *testing.T) {
 		t.Fatalf("not stable: %v\n%s\n%s", err, out, again)
 	}
 	t.Logf("%s", out)
-	if !strings.Contains(string(out), "context: fresh") {
-		t.Error("the context was not written")
+	for _, want := range []string{"context: fresh", "model: fake", "instructions: prompts/review.md"} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("%q was not written", want)
+		}
 	}
 
 	// A graph the file cannot say is refused rather than changed.
@@ -220,7 +225,7 @@ func TestEverythingUnknownIsRefused(t *testing.T) {
 		"unknown section":     {edit("Well?", "Well?\n## c"), "not a node"},
 		"section twice":       {edit("Well?", "Well?\n## a"), "twice"},
 		"unknown setting":     {edit("tool: x", "tool: x\nretries: 3"), "retries"},
-		"context on a tool":   {edit("tool: x", "tool: x\ncontext: fresh"), "only a model node has a context"},
+		"context on a tool":   {edit("tool: x", "tool: x\ncontext: fresh"), "only a model node or a call has a context"},
 		"late settings":       {edit("Well?", "Well?\n```yaml\nmax_visits: 3\n```"), "opens the section"},
 		"tool on a person":    {edit("Well?", "```yaml\ntool: x\n```\nWell?"), "only a program node"},
 		"tools on a program":  {edit("tool: x", "tool: x\ntools: [y]"), "only a model node"},
