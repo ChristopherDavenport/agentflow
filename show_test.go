@@ -186,12 +186,18 @@ func TestNoSummaryTakesInAWholeShownResult(t *testing.T) {
 	m := &cast{script: []says{{}, reviewed, {}}}
 	g := showing(&Show{Members: []string{"summary"}})
 	g.node("review").With = nil
-	recordedShow(t, g, m, &ran, &got, func(rec *session.Recorder) func(context.Context, agentturn.Transcript) (agentturn.Transcript, error) {
+	store, id := recordedShow(t, g, m, &ran, &got, func(rec *session.Recorder) func(context.Context, agentturn.Transcript) (agentturn.Transcript, error) {
 		return compact.NewLocal(sum, append(rec.CompactOptions(), compact.WithOnFold(rec.Fold), compact.WithFilter(SummaryFilter),
 			compact.WithBudget(1), compact.WithKeepLast(1), compact.WithMinFold(0))...).Transform
 	})
 	if len(sum.read) == 0 {
 		t.Fatal("nothing was compacted, so this shows nothing")
+	}
+	// The program's turn between the result and its showing applies the
+	// folds in force, so its request rebuilds too. A live trial found it
+	// unhashed.
+	if total, missing, wrong := unverified(t, store, id); len(missing) > 0 || len(wrong) > 0 {
+		t.Errorf("%d responses: no hash %v, wrong %v", total, missing, wrong)
 	}
 	noted := false
 	for _, read := range sum.read {
@@ -358,5 +364,34 @@ func TestResumeBetweenAResultAndItsShowing(t *testing.T) {
 	total, missing, wrong := unverified(t, store, id)
 	if total == 0 || len(missing) > 0 || len(wrong) > 0 {
 		t.Errorf("%d responses, no hash %v, wrong hash %v", total, missing, wrong)
+	}
+}
+
+// A fold made before a result that is shown in part is still in force in
+// the program's turn that shows it, so that turn's request rebuilds from
+// the record, while no summary takes the whole result in. A live trial
+// found that turn unhashed.
+func TestTheShowingTurnKeepsTheFoldsInForce(t *testing.T) {
+	var ran []string
+	var got []any
+	sum := &summarizer{}
+	g := showing(&Show{Members: []string{"summary"}})
+	g.Nodes = append([]Node{{ID: "think", Kind: Agent, Prompt: "Think first.", Next: map[string]string{OK: "gather"}}}, g.Nodes...)
+	g.node("review").With = nil
+	m := &cast{script: []says{{finishTool, `{"step":"think","outcome":"ok"}`}, reviewed, {}}}
+	store, id := recordedShow(t, g, m, &ran, &got, func(rec *session.Recorder) func(context.Context, agentturn.Transcript) (agentturn.Transcript, error) {
+		return compact.NewLocal(sum, append(rec.CompactOptions(), compact.WithOnFold(rec.Fold), compact.WithFilter(SummaryFilter),
+			compact.WithBudget(1), compact.WithKeepLast(1), compact.WithMinFold(0))...).Transform
+	})
+	if len(sum.read) == 0 {
+		t.Fatal("nothing was compacted, so this shows nothing")
+	}
+	if total, missing, wrong := unverified(t, store, id); len(missing) > 0 || len(wrong) > 0 {
+		t.Errorf("%d responses: no hash %v, wrong %v", total, missing, wrong)
+	}
+	for _, read := range sum.read {
+		if strings.Contains(read, bulk) {
+			t.Errorf("a summarizer read the whole result:\n%s", read)
+		}
 	}
 }

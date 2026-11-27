@@ -139,12 +139,14 @@ func itemKey(item openresponses.Item) string {
 func (f *flow) transform(host func(context.Context, agentturn.Transcript) (agentturn.Transcript, error)) func(context.Context, agentturn.Transcript) (agentturn.Transcript, error) {
 	return func(ctx context.Context, t agentturn.Transcript) (agentturn.Transcript, error) {
 		// Between a result a model sees only in part and the flow_shown
-		// that shows it, the program's turn comes first, and nothing is
-		// summarised: a summary made then could take in the whole result.
-		if st, _, _ := f.read(ctx, t); st.show != nil {
-			return t, nil
-		}
+		// that shows it, the program's turn comes first. Without a record
+		// nothing is summarised then: a summary could take in the whole
+		// result.
+		st, all, err := f.read(ctx, t)
 		if f.history == nil {
+			if st.show != nil {
+				return t, nil
+			}
 			out, err := host(ctx, t)
 			if err != nil {
 				return nil, err
@@ -152,11 +154,26 @@ func (f *flow) transform(host func(context.Context, agentturn.Transcript) (agent
 			return out, f.samePosition(t, out)
 		}
 		// A failed run's error is the request's to report.
-		st, all, err := f.read(ctx, t)
 		if all == nil {
 			return nil, err
 		}
-		return host(ctx, agentturn.Transcript(f.visible(openresponses.Items(t), all, st)))
+		view := f.visible(openresponses.Items(t), all, st)
+		if u := st.show; u != nil {
+			// With a record the folds in force still apply, so the
+			// request is one the record rebuilds, and the whole result is
+			// left out of what the host is given, so no summary takes it
+			// in. A live trial found this turn's request unhashed.
+			view = slices.DeleteFunc(slices.Clone(view), func(item openresponses.Item) bool {
+				switch it := item.(type) {
+				case *openresponses.FunctionCall:
+					return it.CallID == u.of
+				case *openresponses.FunctionCallOutput:
+					return it.CallID == u.of
+				}
+				return false
+			})
+		}
+		return host(ctx, agentturn.Transcript(view))
 	}
 }
 

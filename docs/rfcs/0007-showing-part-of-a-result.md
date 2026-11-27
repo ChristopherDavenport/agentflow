@@ -46,8 +46,12 @@ Without `show`, a model sees the whole result, as before.
   `SummaryFilter` also leaves out any call a `flow_shown` shows, with its
   result, and notes the shown part as the workflow's, so a host without
   `History` summarises none of it either. In the one program turn
-  between a result and its `flow_shown`, the host's transform is not
-  run: a fold made then could take in the whole result.
+  between a result and its `flow_shown`, the host's transform is given
+  the view with the whole result left out, so the folds already in force
+  still apply and the request rebuilds from the record, while a fold
+  made then cannot take the result in. Without `History` it is not run
+  then. A live trial found that turn's request unhashed when the
+  transform was skipped after a fold.
 - **A fresh child is unaffected.** It is sent what its call passes in,
   and its own steps' `show` holds in its own session.
 
