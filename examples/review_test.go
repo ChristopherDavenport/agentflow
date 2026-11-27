@@ -42,6 +42,24 @@ func loadFrom(t *testing.T, dir string) *workflow.Workflow {
 
 func TestSkillLoads(t *testing.T) { load(t) }
 
+// Each example's SKILL.md opens with the text that tells a host without
+// workflows how to follow it.
+func TestSkillsOpenWithTheSkillBody(t *testing.T) {
+	skills, err := fs.Glob(os.DirFS("skills"), "*/SKILL.md")
+	if err != nil || len(skills) == 0 {
+		t.Fatalf("skills: %v, %v", skills, err)
+	}
+	for _, f := range skills {
+		s, err := agentskill.LoadDir("skills/" + strings.TrimSuffix(f, "/SKILL.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !workflow.HasSkillBody(s) {
+			t.Errorf("%s does not open with workflow.SkillBody", f)
+		}
+	}
+}
+
 const maxRead = 12000
 
 type readArgs struct {

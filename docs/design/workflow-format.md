@@ -19,7 +19,8 @@ description: Review a pull request against what was asked for.
 metadata:
   agentflow: WORKFLOW.md
 ---
-Prose telling a reader, or a model, how to do this by hand.
+This skill is an agentflow workflow. The file that `metadata.agentflow`
+names in the frontmatter above defines it: …
 ```
 
 ```
@@ -35,13 +36,34 @@ pr-review/
   never turns a skill into something that executes.
 - A catalog can list workflows apart from other skills without reading
   any file.
-- A host with no workflow support loads an ordinary skill and follows the
-  body. Authors should write the body so that works.
+- A host with no workflow support loads an ordinary skill and its model
+  follows the body; see [below](#the-body).
 - A marker naming a missing or invalid file is an error. An aware host
   must not fall back to the body on an explicit invocation.
 - The workflow is named for the skill. A script path is within the skill.
 - A marked workflow that gives no `description` of its own takes the
   skill's.
+
+### The body
+
+A host that runs workflows never shows a model a workflow skill's body.
+A host that does not shows it as it shows any skill's, so the body is
+written for that model. It opens with `workflow.SkillBody()`, the text
+of `workflow/body.md`:
+
+- It points at the file `metadata.agentflow` names, and names no skill,
+  so every workflow skill carries it unchanged.
+- It tells a model with a tool that runs workflows to start the workflow
+  with it, and any other to follow the file by hand as agentflow reads
+  it: the diagram from its first node, each kind of step, outcomes and
+  edges, values, documents and limits, and which settings to leave to a
+  host.
+- A person step stays the person's to answer.
+- It names every key of the frontmatter and of a section's settings; a
+  test holds it to that.
+
+An author may add notes after it. `workflow.HasSkillBody(skill)` says
+whether a body opens with it. Loading does not check the body.
 
 ### Loading
 
@@ -393,7 +415,7 @@ calls and is not linked.
 | `dir` | a literal is relative and clean, with no `..`; a reference has a value on every path and, where its schema is known, is a string; `optional(...)` is an error |
 | `model`, `thinking` | `thinking` is one of the levels; with the host option `Models`, every step's model, every workflow's default and the judge's are names the host serves |
 | `tools`, `exclude_tools` | `tools: all` with a list; naming and excluding the same tool, directly or through the workflow; a judge naming a tool its workflow excludes; excluding the program's own tools |
-| `skills` | on anything but a model step; a skill that cannot be found, whose instructions cannot be read, or that says nothing; naming one when loading with `Load`, which has nothing to find skills with |
+| `skills` | on anything but a model step; a skill that cannot be found, whose instructions cannot be read, that says nothing, or that is a workflow; naming one when loading with `Load`, which has nothing to find skills with |
 | `files` | a workspace path that is not relative, clean and inside the workspace; a reference whose known schema is not a path or a list of paths; a `./` file that is not in the skill, is a directory, leaves the skill, is over 256 KiB or is not UTF-8 text |
 | `documents` | an undeclared document in a list, a `write` or a reference; `read` or `edit` on anything but a model step; `write` on anything but a script or tool step; a `from` that is not a clean path in the skill, or not in it; an `input` that is not a text input of the workflow; a written member no outcome declares, or that is not text |
 | `show` | on a model step, a person step or a call; a member no outcome of the step declares; a member named twice; naming members without declared outputs; `show: []`, or a value that is neither `none` nor a list |

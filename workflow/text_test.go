@@ -56,6 +56,22 @@ func TestAWorkflowSaysWhatItsSkillSays(t *testing.T) {
 	}
 }
 
+func TestASkillBodyIsRecognised(t *testing.T) {
+	load := func(body string) *agentskill.Skill {
+		s, err := agentskill.Load(fstest.MapFS{"SKILL.md": {Data: []byte("---\nname: tidy\ndescription: Tidy a change.\nmetadata:\n  agentflow: WORKFLOW.md\n---\n" + body)}}, "tidy")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	if !workflow.HasSkillBody(load(workflow.SkillBody() + "\nTidy only what changed.\n")) {
+		t.Error("a body that opens with the text, and adds a note, is not recognised")
+	}
+	if workflow.HasSkillBody(load("Tidy by hand.\n")) {
+		t.Error("a body of the author's own is taken for the text")
+	}
+}
+
 const skilled = "# t\n\n```mermaid\nflowchart TD\n  fix[fix]\n```\n\n## fix\n```yaml\nskills: [go-style]\n```\nFix it.\n"
 
 // plainSkill writes a skill that is not a workflow under dir.
@@ -132,6 +148,14 @@ func TestAStepsSkillsMustBeFound(t *testing.T) {
 	}
 	if _, err := workflow.LoadWith(root, workflow.FromCatalog(catalog)); err == nil || !strings.Contains(err.Error(), `node "fix" names the skill go-style: no such skill`) {
 		t.Errorf("an unknown skill: %v", err)
+	}
+	skill(t, dir, "go-style", map[string]string{"WORKFLOW.md": "# g\n\n```mermaid\nflowchart TD\n  go[go]\n```\n\n## go\nGo.\n"})
+	catalog, err = agentskill.DiscoverDirs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workflow.LoadWith(root, workflow.FromCatalog(catalog)); err == nil || !strings.Contains(err.Error(), `node "fix" names the skill go-style, which is a workflow; a step calls one with flow`) {
+		t.Errorf("a workflow named as a skill: %v", err)
 	}
 	person := strings.Replace(skilled, "fix[fix]", "fix([fix])", 1)
 	if _, err := workflow.Parse("t", []byte(person)); err == nil || !strings.Contains(err.Error(), "skills are a model step's") {

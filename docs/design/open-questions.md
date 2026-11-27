@@ -99,6 +99,10 @@ These are in the code as it stands.
 Each of these is tested with scripted models only.
 
 - A question's timeout.
+- A model in a host without workflows following a workflow skill by
+  `workflow.SkillBody`: whether it reads the file, keeps to the diagram
+  and waits at a person step. Nothing tells it from a model that
+  improvises.
 - Cleanup on abort.
 - The token counts in a run's summary.
 - The tree's step bound, and the repeat rule.

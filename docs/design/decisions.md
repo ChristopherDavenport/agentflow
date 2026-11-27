@@ -20,6 +20,18 @@ files. A marker naming a missing or invalid file is an error: a host that
 knows workflows must not follow the prose instead on an explicit
 invocation.
 
+**A workflow skill's body is one generic text, not the author's prose.**
+Prose that says how to do the work by hand is a second definition,
+which drifts from the file that runs and which no load checks. The
+generic text points the model at that file and says how agentflow reads
+it, so a host without workflows follows the same steps, outcomes and
+questions. It names no skill, so it is one text for every skill, tested
+against the format once.
+
+**A step's `skills` cannot name a workflow.** A workflow skill's body
+tells its reader to follow the definition, which the working model never
+reads. A step runs a workflow by calling it with `flow`.
+
 **Values go into text in one place only: a person's question.** A model
 step's prompt that holds an expression is a load error. A model is given
 values through `with`, which its instructions show as inputs, so a prompt
