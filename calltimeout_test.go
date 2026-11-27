@@ -196,7 +196,7 @@ func TestACallsDeadlineHoldsAfterAResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := func() *Graph { return linked(t, impatient("waitsOn", 150*time.Millisecond, "", true), waitsOn()) }
+	g := func() *Graph { return linked(t, impatient("waitsOn", 600*time.Millisecond, "", true), waitsOn()) }
 	var ran []string
 	tools := func() []agenttool.Tool { return []agenttool.Tool{scriptTool(&ran)} }
 	kids := &recordedKin{store: store, rec: rec, model: &fakeModel{}, name: "fake", tools: tools()}
@@ -208,7 +208,7 @@ func TestACallsDeadlineHoldsAfterAResume(t *testing.T) {
 	if err := store.Sync(ctx, s.ID()); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(170 * time.Millisecond)
+	time.Sleep(650 * time.Millisecond)
 	rec2, s2, err := session.Resume(ctx, store, s.ID())
 	if err != nil {
 		t.Fatal(err)

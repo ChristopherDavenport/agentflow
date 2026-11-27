@@ -293,3 +293,54 @@ func notice(m *openresponses.Message) bool {
 	}
 	return slices.ContainsFunc(prefixes, func(p string) bool { return strings.HasPrefix(m.Text(), p) })
 }
+
+// hiddenCalls are the IDs of the calls in t no working model may read:
+// flow_start, which holds the whole definition, a judge's criteria among
+// it, the program's clock, a judge's look at an answer it judged unseen,
+// and a result a flow_shown shows in its place.
+func hiddenCalls(t openresponses.Items) map[string]bool {
+	out := maps.Clone(veiled(t))
+	for _, item := range t {
+		if c, ok := item.(*openresponses.FunctionCall); ok && hidden(c) {
+			if out == nil {
+				out = map[string]bool{}
+			}
+			out[c.CallID] = true
+		}
+	}
+	return out
+}
+
+// without is t with neither the calls ids names nor their outputs.
+func without(t openresponses.Items, ids map[string]bool) openresponses.Items {
+	if len(ids) == 0 {
+		return t
+	}
+	return slices.DeleteFunc(slices.Clone(t), func(item openresponses.Item) bool {
+		switch it := item.(type) {
+		case *openresponses.FunctionCall:
+			return ids[it.CallID]
+		case *openresponses.FunctionCallOutput:
+			return ids[it.CallID]
+		}
+		return false
+	})
+}
+
+// withoutHidden is t as a working model may read it.
+func withoutHidden(t openresponses.Items) openresponses.Items { return without(t, hiddenCalls(t)) }
+
+// hidden says no working model may read c.
+func hidden(c *openresponses.FunctionCall) bool {
+	if !strings.HasPrefix(c.CallID, reserved) {
+		return false
+	}
+	// flow_start holds the definition; flow_clock holds only the
+	// program's deadline, and a model that reads it takes it for a call
+	// of its own.
+	if c.Name == startTool || c.Name == clockTool {
+		return true
+	}
+	var a callArgs
+	return c.Name == judgeTool && decode([]byte(c.Arguments), &a) == nil && a.Mode == Shadow.String()
+}

@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/ChristopherDavenport/agenttool"
-	"github.com/ChristopherDavenport/openresponses"
 )
 
 // Judge says a model may answer a Person node, and how. It permits only:
@@ -243,16 +242,12 @@ func (f *flow) ruled(ctx context.Context, st State) bool {
 // judgeCall is the call that has a judge look at st's question in a
 // child: the question's inputs, and nothing of the answer a person may
 // have given.
-func (f *flow) judgeCall(st State) (callArgs, error) {
+func (f *flow) judgeCall(st State, key string) (callArgs, error) {
 	n := st.Node
 	j := st.g.judgeGraph(n)
 	with, err := st.resolveAll(n.With)
 	if err != nil {
 		return callArgs{}, fmt.Errorf("agentflow: step %q: %w", n.ID, err)
-	}
-	key, err := newKey()
-	if err != nil {
-		return callArgs{}, err
 	}
 	mode := f.mode(st)
 	if st.Held != nil {
@@ -276,39 +271,6 @@ func askedText(st State, n *Node) (string, error) {
 		return "", fmt.Errorf("agentflow: step %q: question: %w", n.ID, err)
 	}
 	return text, nil
-}
-
-// checkJudgeCall holds a judge's call to the look st's question wants.
-func checkJudgeCall(st State, c *openresponses.FunctionCall) error {
-	n := st.Node
-	j := st.g.judgeGraph(n)
-	var a callArgs
-	switch {
-	case c.Name != judgeTool || c.CallID != st.judgeID():
-		return fmt.Errorf("a judge looks at step %q first", n.ID)
-	case decode([]byte(c.Arguments), &a) != nil:
-		return errors.New("the call is not readable")
-	case a.Context != ContextFresh || a.Workflow != j.Name || a.Digest != j.OwnDigest() || a.Step != n.ID ||
-		!keyPattern.MatchString(a.Run) || a.Spawn != a.Run || a.Child != "":
-		return fmt.Errorf("a judge of step %q looks in a child of its own", n.ID)
-	case a.Result != nil || a.Failure != "" || a.Verdict != nil:
-		return errors.New("a verdict is the program's to give, when the judge has looked")
-	case st.Held != nil && a.Mode != Shadow.String():
-		return errors.New("a held answer is judged unseen")
-	case a.MaxSteps != st.left():
-		return fmt.Errorf("a judge of step %q is given the %d steps its tree has left", n.ID, st.left())
-	}
-	with, err := st.resolveAll(n.With)
-	if err != nil {
-		return err
-	}
-	if !sameJSON(a.With, with) {
-		return fmt.Errorf("a judge of step %q is given the question's inputs", n.ID)
-	}
-	if text, err := askedText(st, n); err != nil || a.Question != text {
-		return fmt.Errorf("a judge of step %q reads the question as it is asked", n.ID)
-	}
-	return nil
 }
 
 // judgeInstructions tells a judge, in its child, what it weighs.
