@@ -53,7 +53,7 @@ func TestARunEndsWithASummary(t *testing.T) {
 		t.Errorf("usage = %+v", s.Usage)
 	}
 	// The same summary reads back from the record.
-	runs, err := Runs(a.State().Transcript, nil)
+	runs, err := Runs(a.State().Transcript, under(a))
 	if err != nil || runs[0].Summary == nil || !reflect.DeepEqual(runs[0].Summary.Usage, s.Usage) {
 		t.Errorf("runs: %v, %+v", err, runs[0].Summary)
 	}

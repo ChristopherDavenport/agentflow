@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
 
-	"github.com/ChristopherDavenport/agentsession/jsonl"
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
 	"github.com/ChristopherDavenport/openresponses"
@@ -45,23 +46,40 @@ func tidyOut() *Graph {
 	}}
 }
 
-// abandoned answers the pending question with a refusal, as a host does
-// before it prompts, and prompts with an invocation of g.
-func abandoned(t *testing.T, g *Graph, a *agentturn.Agent, end *agentturn.RunEnd) *agentturn.RunEnd {
+// abandoned asks for a new run of g over the ones under way, as a host
+// does with Invoke: the children's runs are abandoned in their sessions,
+// and the calls that wait on them refused.
+func abandoned(t *testing.T, g *Graph, a *agentturn.Agent, _ *agentturn.RunEnd) *agentturn.RunEnd {
 	t.Helper()
-	var outs openresponses.Items
-	for _, p := range end.Pending {
-		outs = append(outs, openresponses.NewFunctionCallOutput(p.Call.CallID, abandonedText))
-	}
-	inv, err := g.Invocation(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	next, err := a.Prompt(context.Background(), append(outs, inv)...)
+	next, _, err := Invoke(context.Background(), g, a, nil)
 	if next == nil {
 		t.Fatal(err)
 	}
 	return next
+}
+
+// endingOf is the ending of the last run of workflow that ended in t.
+func endingOf(t *testing.T, items agentturn.Transcript, workflow string) Ending {
+	t.Helper()
+	runs := map[string]string{}
+	for _, item := range items {
+		if c, ok := item.(*openresponses.FunctionCall); ok && c.Name == startTool {
+			var p startPayload
+			if json.Unmarshal([]byte(c.Arguments), &p) == nil {
+				runs[p.Run] = p.Workflow
+			}
+		}
+	}
+	var out *Ending
+	for _, e := range endings(items) {
+		if runs[e.Instance] == workflow {
+			out = &e
+		}
+	}
+	if out == nil {
+		t.Fatalf("no ending of %s", workflow)
+	}
+	return *out
 }
 
 // endings are the endings written in t, in order.
@@ -98,11 +116,11 @@ func TestAnAbandonedStackCleansUpInnermostFirst(t *testing.T) {
 	if q := question(t, end); q.Step != "wait" {
 		t.Fatalf("question = %+v", q)
 	}
-	ends := endings(a.State().Transcript)
-	if len(ends) != 2 || ends[0].Status != Abandoned || ends[0].Cleanup != "done" || ends[1].Status != Abandoned || ends[1].Cleanup != "done" {
-		t.Fatalf("ends = %+v", ends)
+	in, out := endingOf(t, whole(a), "tidyin"), endingOf(t, whole(a), "tidyout")
+	if len(endings(whole(a))) != 2 || in.Status != Abandoned || in.Cleanup != "done" || out.Status != Abandoned || out.Cleanup != "done" {
+		t.Fatalf("ends = %+v", endings(whole(a)))
 	}
-	runs, err := Runs(a.State().Transcript, nil)
+	runs, err := Runs(a.State().Transcript, under(a))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,9 +147,9 @@ func TestACleanupThatFailsStillEnds(t *testing.T) {
 	if q := question(t, end); q.Step != "wait" {
 		t.Fatalf("question = %+v", q)
 	}
-	ends := endings(a.State().Transcript)
-	if len(ends) != 2 || !strings.HasPrefix(ends[0].Cleanup, "failed at undo: ") || !strings.Contains(ends[0].Cleanup, "cannot undo") || ends[1].Cleanup != "done" {
-		t.Fatalf("ends = %+v", ends)
+	in, out := endingOf(t, whole(a), "tidyin"), endingOf(t, whole(a), "tidyout")
+	if len(endings(whole(a))) != 2 || !strings.HasPrefix(in.Cleanup, "failed at undo: ") || !strings.Contains(in.Cleanup, "cannot undo") || out.Cleanup != "done" {
+		t.Fatalf("ends = %+v", endings(whole(a)))
 	}
 }
 
@@ -147,11 +165,11 @@ func TestASecondAbandonEndsACleanup(t *testing.T) {
 	if q := question(t, end); q.Step != "wait" {
 		t.Fatalf("question = %+v", q)
 	}
-	ends := endings(a.State().Transcript)
+	in, out := endingOf(t, whole(a), "tidyin"), endingOf(t, whole(a), "tidyout")
 	// The question the cleanup waited on was refused as the host abandoned
 	// the run again, which cuts the cleanup short there: it did not fail.
-	if len(ends) != 2 || ends[1].Cleanup != cutShort || ends[0].Cleanup != "done" || !slices.Equal(ran, []string{"inner", "outer"}) {
-		t.Fatalf("ends = %+v, ran %v", ends, ran)
+	if len(endings(whole(a))) != 2 || out.Cleanup != cutShort || in.Cleanup != "done" || !slices.Equal(ran, []string{"inner", "outer"}) {
+		t.Fatalf("ends = %+v, ran %v", endings(whole(a)), ran)
 	}
 }
 
@@ -189,48 +207,71 @@ func TestACleanupPathIsCheckedAtLoad(t *testing.T) {
 	}
 }
 
+// An abandon cleans the callee up in its child session, then the caller.
+// A process killed in the caller's cleanup leaves the callee's done, and
+// a new one goes on from the store: the cleanup that was cut off, not the
+// one that finished.
 func TestACleanupCutOffByAKillGoesOn(t *testing.T) {
 	g := func() *Graph { return linked(t, tidyOut(), tidyIn()) }
-	var ran []string
-	childCfg := func() agentturn.Config {
+	ctx := context.Background()
+	if dir := os.Getenv(childEnv); dir != "" {
 		var mine []string
-		cfg, err := Apply(g(), agentturn.Config{Model: &fakeModel{}, ModelName: "fake", Tools: []agenttool.Tool{
-			undoTool(&mine, func(who string) bool {
-				if who == "outer" {
-					die()
-				}
-				return false
-			})}})
+		h := hosted(t, dir, "", g(), &fakeModel{}, []agenttool.Tool{undoTool(&mine, func(who string) bool {
+			if who == "outer" {
+				die()
+			}
+			return false
+		})}, false)
+		if err := os.WriteFile(dir+"/id", []byte(h.id), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		first, err := h.a.Prompt(ctx, openresponses.UserText("go"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		return cfg
-	}
-	a := killedRecord(t, childCfg, func(store *jsonl.Store, id string) agentturn.Config {
-		cfg, err := Apply(g(), agentturn.Config{Model: &fakeModel{}, ModelName: "fake", Tools: []agenttool.Tool{undoTool(&ran, nil)}}, recordOf(store, id))
-		if err != nil {
-			t.Fatal(err)
+		if end, _, err := Drive(ctx, h.g, h.a, first, h.hist); err != nil || question(t, end).Step != "wait" {
+			t.Fatalf("end = %+v, %v", end, err)
 		}
-		return cfg
-	}, func(t *testing.T, a *agentturn.Agent) {
 		// Abandoned while it waits, it dies in the outer cleanup.
-		abandoned(t, g(), a, start(t, a))
-	})
-	p := a.State().Pending
+		_, _, err = Invoke(ctx, h.g, h.a, nil, h.hist)
+		t.Fatalf("not killed: %v", err)
+	}
+	dir := t.TempDir()
+	child := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
+	child.Env = append(os.Environ(), childEnv+"="+dir)
+	out, err := child.CombinedOutput()
+	id, readErr := os.ReadFile(dir + "/id")
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != -1 || readErr != nil {
+		t.Fatalf("child was not killed: err = %v, read = %v\n%s", err, readErr, out)
+	}
+	var ran []string
+	h := hosted(t, dir, string(id), g(), &fakeModel{}, []agenttool.Tool{undoTool(&ran, nil)}, false)
+	p := h.a.State().Pending
 	if len(p) != 1 || p[0].Call.Name != "undo" {
 		t.Fatalf("pending = %+v", p)
 	}
 	// The undo may have run: the person says it did not.
-	end, err := a.Resume(context.Background(), agentturn.OutcomeUnknown(p[0].Call.CallID))
+	end, _, err := Resume(ctx, h.g, h.a, []agentturn.Answer{agentturn.OutcomeUnknown(p[0].Call.CallID)}, h.hist)
 	if end == nil {
 		t.Fatal(err)
 	}
-	// The cleanup step failed, so the cleanup is over and the run ends.
+	// The cleanup step failed, so the cleanup is over, the run ends, and
+	// the run the abandon asked for begins: its callee waits on a person.
 	if q := question(t, end); q.Step != "wait" {
 		t.Fatalf("question = %+v", q)
 	}
-	ends := endings(a.State().Transcript)
-	if len(ends) != 2 || ends[0].Cleanup != "done" || !strings.HasPrefix(ends[1].Cleanup, "failed at undo") {
-		t.Fatalf("ends = %+v", ends)
+	// The callee's cleanup was done before the kill and did not run again.
+	if len(ran) != 0 {
+		t.Errorf("ran %v", ran)
+	}
+	runs := h.runs(t)
+	if got, want := tree(runs), []string{"tidyout:abandoned:", " tidyin:abandoned:", "tidyout:running:", " tidyin:running:"}; !slices.Equal(got, want) {
+		t.Fatalf("tree = %v, want %v", got, want)
+	}
+	outer := endings(pathItems(h.session(t, "")))
+	inner := endings(pathItems(h.session(t, runs[0].Children[0].Spawn)))
+	if len(outer) != 1 || !strings.HasPrefix(outer[0].Cleanup, "failed at undo") || len(inner) != 1 || inner[0].Cleanup != "done" {
+		t.Fatalf("ends = %+v, %+v", outer, inner)
 	}
 }

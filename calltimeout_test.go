@@ -98,7 +98,7 @@ func TestACallInContextThatRunsPastItsTimeoutFails(t *testing.T) {
 	if len(st.Steps) != 2 || st.Steps[0].Result.Outcome != Failed {
 		t.Errorf("steps = %+v", st.Steps)
 	}
-	runs, err := Runs(a.State().Transcript, nil)
+	runs, err := Runs(a.State().Transcript, under(a))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestAFreshCallThatRunsPastItsTimeoutFails(t *testing.T) {
 				t.Errorf("ran %v", ran)
 			}
 			for _, child := range kids.agents {
-				runs, err := Runs(child.State().Transcript, nil)
+				runs, err := Runs(child.State().Transcript, under(child))
 				if err != nil || len(runs) != 1 || runs[0].Status != Abandoned || !strings.HasPrefix(runs[0].Reason, timedOutPrefix) {
 					t.Errorf("child runs = %+v, %v", runs, err)
 				}
@@ -198,7 +198,9 @@ func TestACallsDeadlineHoldsAfterAResume(t *testing.T) {
 	}
 	g := func() *Graph { return linked(t, impatient("waitsOn", 150*time.Millisecond, "", true), waitsOn()) }
 	var ran []string
-	a := nestedAgent(t, g(), &fakeModel{}, []agenttool.Tool{scriptTool(&ran)})
+	tools := func() []agenttool.Tool { return []agenttool.Tool{scriptTool(&ran)} }
+	kids := &recordedKin{store: store, rec: rec, model: &fakeModel{}, name: "fake", tools: tools()}
+	a := nestedAgent(t, g(), &fakeModel{}, tools(), kids.option(), recordOf(store, s.ID()))
 	rec.Attach(a)
 	if q := question(t, start(t, a)); q.Workflow != "waitsOn" {
 		t.Fatalf("question = %+v", q)
@@ -216,7 +218,8 @@ func TestACallsDeadlineHoldsAfterAResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	graph := g()
-	b := agentturn.New(must(Apply(graph, agentturn.Config{Model: &fakeModel{}, ModelName: "fake", Tools: []agenttool.Tool{scriptTool(&ran)}})), seed...)
+	kids2 := &recordedKin{store: store, rec: rec2, model: &fakeModel{}, name: "fake", tools: tools()}
+	b := agentturn.New(must(Apply(graph, agentturn.Config{Model: &fakeModel{}, ModelName: "fake", Tools: tools()}, kids2.option(), recordOf(store, s.ID()))), seed...)
 	rec2.Attach(b)
 	end, st, err := Drive(ctx, graph, b, nil)
 	if err != nil || end.Reason != agentturn.ReasonDone || st.Steps[0].Result.Outcome != Failed {
@@ -227,7 +230,7 @@ func TestACallsDeadlineHoldsAfterAResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkHashes(t, got)
-	runs, err := Runs(pathItems(got), nil)
+	runs, err := Runs(pathItems(got), childSessions(t, store))
 	if err != nil || len(runs) != 1 || runs[0].Problem != "" || len(runs[0].Children) != 1 || runs[0].Children[0].Status != Abandoned {
 		t.Errorf("runs = %+v, %v", runs, err)
 	}

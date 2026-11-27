@@ -12,19 +12,22 @@ Needs Go 1.26.
 ```go
 cfg, err := agentflow.Apply(graph, agentturn.Config{Model: model, ModelName: name, Tools: tools})
 a := agentturn.New(cfg)
-end, err := a.Prompt(ctx, openresponses.UserText("review this PR"))
 
-// A model that stops without finishing is reminded once.
-end, state, err := agentflow.Drive(ctx, graph, a, end)
+// Start a run and see it on: a model that stops without finishing is
+// reminded once, and a workflow it calls is worked in a child session.
+end, state, err := agentflow.Invoke(ctx, graph, a, nil) // or its inputs
 
 // At a person step the run ends input_required.
 answer, err := graph.Answer(end.Pending[0], agentflow.Result{Outcome: "fix"})
 end, state, err = agentflow.Resume(ctx, graph, a, []agentturn.Answer{answer})
 
 // Run it again in the same conversation.
-again, err := graph.Invocation(nil) // or its inputs
-end, err = a.Prompt(ctx, again)
+end, state, err = agentflow.Invoke(ctx, graph, a, nil)
 ```
+
+A graph that calls another workflow, or has a fresh step or a judge,
+needs `agentflow.Children`: see
+[host integration](docs/design/host-integration.md).
 
 Steps pass JSON. A script reads its `with` values on stdin and prints its
 result, so a program that emits JSON works as a step:

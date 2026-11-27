@@ -1,7 +1,9 @@
 package workflow_test
 
 import (
+	"cmp"
 	"context"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -96,13 +98,18 @@ func TestWorkflowsCallFilesAndOtherSkills(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ws.Close() })
-	cfg, err := agentflow.Apply(w.Graph, agentturn.Config{Model: &model{}, ModelName: "fake",
-		Tools: []agenttool.Tool{script.New(ws, time.Minute, script.Files(w.Files), script.Skills(w.Skills))}}, agentflow.Unattended())
+	tools := []agenttool.Tool{script.New(ws, time.Minute, script.Files(w.Files), script.Skills(w.Skills))}
+	kids := map[string]*agentturn.Agent{}
+	cfg, err := agentflow.Apply(w.Graph, agentturn.Config{Model: &model{}, ModelName: "fake", Tools: tools},
+		agentflow.Unattended(), inMemoryOf(kids, &model{}, "fake", tools))
 	if err != nil {
 		t.Fatal(err)
 	}
 	a := agentturn.New(cfg)
 	end, err := a.Prompt(context.Background(), openresponses.UserText("go"))
+	if err == nil {
+		end, _, err = agentflow.Drive(context.Background(), w.Graph, a, end)
+	}
 	if err != nil || end.Reason != agentturn.ReasonDone {
 		t.Fatalf("end = %+v, %v", end, err)
 	}
@@ -112,12 +119,21 @@ func TestWorkflowsCallFilesAndOtherSkills(t *testing.T) {
 	}
 	// A script of another skill says which; one of the skill's own file
 	// does not.
+	// Each call ran in a child, which holds the scripts it ran after what
+	// it was seeded with.
 	var skills []string
-	for _, item := range a.State().Transcript {
-		if c, ok := item.(*openresponses.FunctionCall); ok && c.Name == agentflow.ScriptTool {
+	seen := map[string]bool{}
+	all := a.State().Transcript
+	for _, spawn := range slices.Sorted(maps.Keys(kids)) {
+		all = append(all, kids[spawn].State().Transcript...)
+	}
+	for _, item := range all {
+		if c, ok := item.(*openresponses.FunctionCall); ok && c.Name == agentflow.ScriptTool && !seen[c.CallID] {
+			seen[c.CallID] = true
 			skills = append(skills, c.Arguments)
 		}
 	}
+	slices.SortFunc(skills, func(x, y string) int { return cmp.Compare(strings.Count(x, `"skill"`), strings.Count(y, `"skill"`)) })
 	if len(skills) != 2 || strings.Contains(skills[0], `"skill"`) || !strings.Contains(skills[1], `"skill":"child"`) {
 		t.Errorf("script calls = %v", skills)
 	}

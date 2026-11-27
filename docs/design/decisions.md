@@ -44,12 +44,24 @@ host's workspace, and a step cannot move it. A script step can.
 
 ## The record
 
-**In a shared context, a call is written after its callee ends.**
-agentturn will not go on while a call is unanswered, providers refuse a
-request that holds an unanswered call, and a deferral ends the run. So a
-callee's work cannot sit between a call and its output: the callee's
-start names the calling call in advance, and the call and its result are
-written when the callee ends.
+**Every call runs in a child session, not as a run nested in its
+caller's transcript.** A nested run needed a second way to do everything
+a child does: to start and return, to time out, to be abandoned, to count
+steps, to sum up and to carry its callers' policies. It also left all of
+the callee's work in the caller's conversation for good. A child keeps
+one way of each, and the caller gets back only what the call returns, so
+what a callee puts into its caller's context is the workflow's to choose.
+
+**A child that shares its caller's context is a fork of the caller's
+session, not a copy handed to its agent.** A request that carries items
+its session never wrote cannot be hashed, and a copy has to be made again
+after every restart. A fork holds what it opened with, so its requests
+verify and it is rebuilt from its own session.
+
+**What a child opened with is not its record.** Reading it as the
+child's would make the caller's runs the child's, and the child's
+invocation would abandon them. The host says where the inherited items
+end, and position is read only past them.
 
 **Call IDs carry a run's key, not its workflow's name or its ancestry.**
 A name would need cutting and hashing to fit an ID. The start records

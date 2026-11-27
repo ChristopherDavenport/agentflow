@@ -302,7 +302,9 @@ the schema, is an error the model sees and can correct.
 
 A model step chooses what it reads with `context`:
 
-- `session`: the whole transcript.
+- `session`: the conversation of its run's session, every earlier turn
+  there. In a called workflow that begins with what the call's child
+  opened with ([calls-and-children.md](calls-and-children.md)).
 - `fresh`: a child session of its own. The step runs as a workflow of one
   step, named `<workflow>:<step>`, whose start, turns and finish are in
   the child. The caller holds a `flow_call` while it works and is given
@@ -314,7 +316,7 @@ differs from its workflow's frontmatter `model`, or that names one when
 the frontmatter names none, defaults to `fresh`. Another model would read
 a conversation it did not write, without the reasoning behind it, and
 take the earlier turns for its own. Saying `context: session` keeps it in
-the current context. This is decided from the definition alone, at load,
+its run's session. This is decided from the definition alone, at load,
 never from the host's config.
 
 A message the person sends while a fresh step works is not in what that
@@ -469,7 +471,7 @@ without a read.
   and its note, and the step fails with it. See
   [policy-and-trust.md](policy-and-trust.md).
 
-**Where the model sees them.** In context, the program's call and its
+**Where the model sees them.** For a `session` step, the program's call and its
 result are in the conversation, after the step's opening message, and the
 step's instructions say so. A compaction that folds them away does not
 lose them: they are read from the record and put back after the opening
@@ -562,13 +564,13 @@ file into it, so the digest covers it. After that, each change is a
 call's result that holds the whole text: the model's write, or the
 program step's result. A read's result holds the text too, so what the
 model was shown is in the record. Replay keeps the text by run, and a
-frame reads only its own documents.
+run reads only its own documents.
 
 **Into a call, and back.**
 
-- A workflow called in context gets a document's text as an input through
-  `with`, and may start a document of its own from it (`input:`). It
-  gives text back as an output, which the caller writes from its result.
+- A called workflow gets a document's text as an input through `with`,
+  and may start a document of its own from it (`input:`). It gives text
+  back as an output, which the caller writes from its result.
 - A fresh model step's call passes the texts of the documents the step
   reads into its child. The child's start records them, and the child's
   model reads and writes them by calls in its own session. The child's

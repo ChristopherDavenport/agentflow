@@ -31,6 +31,33 @@ func History(read func(context.Context) (agentturn.Transcript, error)) Option {
 	return func(f *flow) { f.history = read }
 }
 
+// Inherited gives a seeded child, see [Child.Seeded], the items its
+// session opened with: what its caller's held before the call, oldest
+// first, such as the item entries agentsession's Session.Prefix marks on
+// the path of a session agentturn/session's Recorder.ForkChild made. They
+// are no part of the child's record, and [History] returns none of them.
+// The child's model is shown them as its caller's was, without what no
+// model may read, and no position is read from them.
+//
+// It returns every such item, whatever a compaction has folded since, and
+// the same items each time.
+func Inherited(read func(context.Context) (agentturn.Transcript, error)) Option {
+	return func(f *flow) { f.inherited = read }
+}
+
+// prefix is what the session opened with, for a seeded child, and nil
+// for any other.
+func (f *flow) prefix(ctx context.Context) (agentturn.Transcript, error) {
+	if f.inherited == nil {
+		return nil, nil
+	}
+	t, err := f.inherited(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("agentflow: inherited: %w", err)
+	}
+	return t, nil
+}
+
 // record is what position is read from: the history, held to be at least
 // what local holds, or without one local itself.
 func (f *flow) record(ctx context.Context, local agentturn.Transcript) (agentturn.Transcript, error) {
@@ -41,8 +68,14 @@ func (f *flow) record(ctx context.Context, local agentturn.Transcript) (agenttur
 	if err != nil {
 		return nil, fmt.Errorf("agentflow: history: %w", err)
 	}
+	// A seeded child's agent also holds what its session opened with,
+	// which the record does not: its caller's.
+	before, err := f.prefix(ctx)
+	if err != nil {
+		return nil, err
+	}
 	calls, outputs := map[string]bool{}, map[string]bool{}
-	for _, item := range all {
+	for _, item := range slices.Concat(all, before) {
 		switch it := item.(type) {
 		case *openresponses.FunctionCall:
 			calls[it.CallID] = true
@@ -78,20 +111,28 @@ func (f *flow) read(ctx context.Context, local agentturn.Transcript) (State, age
 // visible drops from input what no model may read: flow_start, a
 // judge's look at an answer a person gave, which it judged unseen, and a
 // result a model sees only as its step's show says.
-func (f *flow) visible(input openresponses.Items, record agentturn.Transcript, st State) openresponses.Items {
+func (f *flow) visible(ctx context.Context, input openresponses.Items, record agentturn.Transcript, st State) (openresponses.Items, error) {
 	if f.history == nil {
-		return withoutHidden(input)
+		return withoutHidden(input), nil
+	}
+	// A seeded child's input opens with what its caller's session held,
+	// from which its model is kept what the caller's was.
+	before, err := f.prefix(ctx)
+	if err != nil {
+		return nil, err
 	}
 	// The input is a view of the record, so items are known by what they
 	// are rather than where.
-	shown := map[string]bool{}
-	for _, item := range withoutHidden(openresponses.Items(record)) {
-		shown[itemKey(item)] = true
-	}
 	hidden := map[string]bool{}
-	for _, item := range record {
-		if k := itemKey(item); !shown[k] {
-			hidden[k] = true
+	for _, part := range []agentturn.Transcript{before, record} {
+		shown := map[string]bool{}
+		for _, item := range withoutHidden(openresponses.Items(part)) {
+			shown[itemKey(item)] = true
+		}
+		for _, item := range part {
+			if k := itemKey(item); !shown[k] {
+				hidden[k] = true
+			}
 		}
 	}
 	// A result whose flow_shown is still to be made is not read whole
@@ -100,7 +141,7 @@ func (f *flow) visible(input openresponses.Items, record agentturn.Transcript, s
 		hidden["call "+u.of], hidden["output "+u.of] = true, true
 	}
 	if len(hidden) == 0 {
-		return input
+		return input, nil
 	}
 	out := make(openresponses.Items, 0, len(input))
 	for _, item := range input {
@@ -108,7 +149,7 @@ func (f *flow) visible(input openresponses.Items, record agentturn.Transcript, s
 			out = append(out, item)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // itemKey names an item the same wherever it is read from.
@@ -157,7 +198,10 @@ func (f *flow) transform(host func(context.Context, agentturn.Transcript) (agent
 		if all == nil {
 			return nil, err
 		}
-		view := f.visible(openresponses.Items(t), all, st)
+		view, err := f.visible(ctx, openresponses.Items(t), all, st)
+		if err != nil {
+			return nil, err
+		}
 		if u := st.show; u != nil {
 			// With a record the folds in force still apply, so the
 			// request is one the record rebuilds, and the whole result is
@@ -296,7 +340,7 @@ func note(c *openresponses.FunctionCall, result string, answered bool) string {
 		var a callArgs
 		_ = decode([]byte(c.Arguments), &a)
 		where := ""
-		if a.Context == ContextFresh {
+		if a.held() {
 			where = " in a session of its own"
 		}
 		return fmt.Sprintf("%sthe workflow, not the assistant, called the workflow %s%s, which came to: %s", recordPrefix, a.Workflow, where, result)

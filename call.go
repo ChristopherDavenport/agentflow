@@ -18,8 +18,8 @@ import (
 
 // callArgs is the arguments of flow_call, and of the flow_judge the
 // program makes: what a step that calls a workflow passed it, and which
-// run it was. In the current context the result is the run's ending.
-// For a run in a child, Context is fresh, Spawn names the child's
+// run it was. The run is in a child: Context says whether the child
+// began with its caller's view or with nothing, Spawn names the child's
 // session, and what came of the run is added when the call is let go.
 type callArgs struct {
 	Workflow string         `json:"workflow"`
@@ -63,6 +63,10 @@ type callArgs struct {
 	// Summary is what the child's end summed up.
 	Summary *Summary `json:"summary,omitempty"`
 }
+
+// held says the call waits on a child: one seeded with nothing, or with
+// what its caller saw.
+func (a callArgs) held() bool { return a.Context == ContextFresh || a.Context == ContextSession }
 
 // callFailure is the output of a child's call that failed: the failure,
 // and what the child spent, so its caller counts the steps a failed child
@@ -111,6 +115,10 @@ func (f *flow) rootStart(inputs any) (startPayload, error) {
 		Definition: json.RawMessage(definition), MaxDepth: f.depth(), MaxSteps: f.steps()}
 	if c := f.child; c != nil {
 		p.Run, p.Parent, p.Caller, p.Depth, p.Path, p.Context = c.Run, c.Parent, c.Caller, c.Depth, c.Path, ContextFresh
+		if c.Seeded {
+			// A seeded child's session opens with what its caller's held.
+			p.Context = ContextSession
+		}
 		p.MaxDepth, p.MaxSteps, p.Documents, p.Files, p.Question = c.maxDepth, c.maxSteps, c.documents, c.files, c.question
 	} else if p.Run, err = newKey(); err != nil {
 		return startPayload{}, err
@@ -153,28 +161,6 @@ func (f *flow) steps() int {
 // left is what st's tree has left of its steps, for a child to enter.
 func (st State) left() int { return max(0, st.maxSteps+st.Granted-st.Entries) }
 
-// callStart holds the start of a call to what the calling step makes.
-func callStart(st State, c *openresponses.FunctionCall) error {
-	n := st.Node
-	callee := st.g.Callees[n.Flow]
-	var p startPayload
-	switch {
-	case c.Name != startTool:
-		return fmt.Errorf("step %q calls %s and takes no other calls", n.ID, callee.Name)
-	case decode([]byte(c.Arguments), &p) != nil:
-		return errors.New("the start of a call is not readable")
-	case p.Workflow != callee.Name || p.Digest != callee.OwnDigest():
-		return fmt.Errorf("step %q calls %s as pinned, not %s", n.ID, callee.Name, p.Workflow)
-	case p.Parent != st.Instance || p.Caller != st.callID() || p.Depth != st.Depth+1:
-		return fmt.Errorf("a call of step %q starts under run %q from %s", n.ID, st.Instance, st.callID())
-	case p.Format != RecordFormat || p.Definition != nil || p.Definitions != nil:
-		return errors.New("a call's start pins nothing of its own")
-	case c.CallID != keyPrefix(p.Run)+"start" || len(p.Run) != 10:
-		return errors.New("a call's start is named by its key")
-	}
-	return nil
-}
-
 // callFresh holds a call into a child to what the calling step makes.
 func callFresh(st State, c *openresponses.FunctionCall) error {
 	n := st.Node
@@ -188,7 +174,7 @@ func callFresh(st State, c *openresponses.FunctionCall) error {
 		return fmt.Errorf("step %q runs in a child and takes no other calls", n.ID)
 	case decode([]byte(c.Arguments), &a) != nil:
 		return errors.New("the call is not readable")
-	case a.Context != ContextFresh || a.Workflow != want.Name || a.Digest != want.OwnDigest():
+	case a.Context != n.childContext() || a.Workflow != want.Name || a.Digest != want.OwnDigest():
 		return fmt.Errorf("step %q runs %s, as pinned, in a child", n.ID, want.Name)
 	case !keyPattern.MatchString(a.Run) || a.Child != n.Child || a.Step != "" || a.Mode != "":
 		return errors.New("the call is not one the step makes")
@@ -216,24 +202,6 @@ func callFresh(st State, c *openresponses.FunctionCall) error {
 }
 
 var keyPattern = regexp.MustCompile(`^[0-9a-f]{10}$`)
-
-// callReturn holds a flow_call to the run it reports: the one the step
-// started, with what that run was given.
-func callReturn(st State, c *openresponses.FunctionCall) error {
-	n := st.Node
-	var a callArgs
-	switch {
-	case c.Name != callTool || c.CallID != st.callID() || st.Returned == nil:
-		return fmt.Errorf("step %q is waiting on run %q", n.ID, st.Callee)
-	case decode([]byte(c.Arguments), &a) != nil:
-		return errors.New("the call is not readable")
-	case a.Run != st.Returned.Instance || a.Workflow != st.g.Callees[n.Flow].Name:
-		return fmt.Errorf("step %q called run %q", n.ID, st.Returned.Instance)
-	case !sameJSON(st.g.Callees[n.Flow].withDefaults(a.With), st.calleeInputs):
-		return fmt.Errorf("step %q passed run %q other inputs than it started with", n.ID, a.Run)
-	}
-	return nil
-}
 
 func sameJSON(a, b any) bool {
 	norm := func(v any) any {
@@ -276,7 +244,7 @@ func (f *flow) callTool() agenttool.Tool {
 		if err != nil {
 			return nil, err
 		}
-		if a.Context == ContextFresh {
+		if a.held() {
 			switch {
 			case a.Failure != "":
 				// The failure says what the child spent, which an error
@@ -289,11 +257,7 @@ func (f *flow) callTool() agenttool.Tool {
 			r.Entries, r.Granted, r.Summary = a.Entries, a.Granted, a.Summary
 			return r, nil
 		}
-		e := st.Returned
-		if st.Node == nil || st.Node.Flow == "" || e == nil || e.Instance != a.Run {
-			return nil, fmt.Errorf("agentflow: run %q has not ended", a.Run)
-		}
-		return returned(st.Node, a.Workflow, e)
+		return nil, fmt.Errorf("agentflow: step %q calls %s in a child, and this call names none", st.Node.ID, a.Workflow)
 	}, agenttool.WithReplay(safeReplay))
 }
 

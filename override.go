@@ -21,9 +21,9 @@ import (
 // writes, and the program applies it with a call, flow_override, whose
 // result says whether it was applied; replay reads both.
 type Override struct {
-	// Run is the key of the run to change. Retry and jump change the
-	// innermost run under way; abandon may name any run under way, and
-	// abandons it and every run it called.
+	// Run is the key of the run to change: one under way in the session
+	// the override is given to, or in a child a call there waits on.
+	// Abandon abandons it and every run it called.
 	Run    string `json:"run"`
 	Action string `json:"action"`
 	// Step is where a jump goes, and Note what the operator says of it,
@@ -92,18 +92,15 @@ func requested(text string) (Override, bool) {
 // target is the frame under way an override names, and why it cannot be
 // applied, if it cannot.
 func (r *replay) target(o Override) (*frame, error) {
-	k := slices.IndexFunc(r.stack, func(f *frame) bool { return f.st.Instance == o.Run })
-	if k < 0 {
+	f := r.cur
+	if f == nil || f.st.Instance != o.Run {
 		return nil, fmt.Errorf("run %q is not under way here", o.Run)
 	}
-	f := r.stack[k]
 	switch {
 	case r.abort != nil:
 		return nil, errors.New("the runs here are being abandoned")
 	case o.Action == OverrideAbandon:
 		return f, nil
-	case f != r.top():
-		return nil, fmt.Errorf("run %q waits on run %q, which it called: override that one, or abandon", o.Run, r.top().st.Instance)
 	case f.failed != nil || f.st.Done || f.st.Node == nil:
 		return nil, fmt.Errorf("run %q is at no step", o.Run)
 	}
@@ -165,7 +162,7 @@ func (r *replay) overridden(i int, c *openresponses.FunctionCall, out *openrespo
 			next = r.newRoot(nil)
 			next.st.Left, next.st.released = true, f.st.Instance
 		}
-		r.abandon(i, f, next, overriddenFor(o.Action))
+		r.abandon(i, next, overriddenFor(o.Action))
 		return
 	case OverrideRetry:
 		n := st.Node
@@ -180,8 +177,7 @@ func (r *replay) overridden(i int, c *openresponses.FunctionCall, out *openrespo
 		f.came = "an operator jumped to it"
 	}
 	st.Failure, st.Reached, st.Held, st.Advice = "", nil, nil, nil
-	st.Callee, st.Returned, st.calleeInputs = "", nil, nil
-	st.clocked, st.Deadline, st.asked, st.filed, st.timedOut = false, time.Time{}, 0, false, false
+	st.clocked, st.Deadline, st.asked, st.filed = false, time.Time{}, 0, false
 	if o.Action == OverrideJump {
 		f.jumped = true
 		r.enter(f, i, st.g.node(o.Step))
@@ -278,7 +274,7 @@ func (f *flow) overrule(ctx context.Context, a *agentturn.Agent, o Override) (*a
 		return nil, State{}, err
 	}
 	r := f.g.replay(all)
-	if slices.ContainsFunc(r.stack, func(fr *frame) bool { return fr.st.Instance == o.Run }) {
+	if r.cur != nil && r.cur.st.Instance == o.Run {
 		outs, err := f.setAside(ctx, a, overriddenText, overriddenFor(o.Action))
 		if err != nil {
 			return nil, State{}, err
@@ -295,7 +291,7 @@ func (f *flow) overrule(ctx context.Context, a *agentturn.Agent, o Override) (*a
 	if !ok {
 		return nil, st, fmt.Errorf("agentflow: run %q is not under way here, nor in a child a call waits on", o.Run)
 	}
-	c, err := f.childFor(st, p.Call, args)
+	c, err := f.childFor(ctx, a.State().Transcript, st, p.Call, args)
 	if err != nil {
 		return nil, st, err
 	}

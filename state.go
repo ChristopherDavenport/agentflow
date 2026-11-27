@@ -126,9 +126,9 @@ type Place struct {
 	Step     string `json:"step,omitempty"`
 }
 
-// State is where one run of a workflow stands. Runs can share a
-// transcript, one nested in another; [Graph.Replay] gives the innermost
-// under way.
+// State is where one run of a workflow stands. A transcript holds its
+// runs one after another, and a run another called is in a child
+// session; [Graph.Replay] gives the one under way.
 type State struct {
 	// Started says the transcript holds an instance, named by Instance,
 	// its key.
@@ -170,10 +170,6 @@ type State struct {
 	Held *Result
 	// Ended says flow_end has written down how this instance finished.
 	Ended bool
-	// Callee is the key of the run a Flow node started for this
-	// attempt, and Returned its ending once that is written.
-	Callee   string
-	Returned *Ending
 	// Entries counts the steps entered across the whole tree of runs
 	// this one belongs to, attempts and calls included, toward its bound:
 	// a visit a person paced is not counted. Granted is the steps a
@@ -193,8 +189,8 @@ type State struct {
 	// Steps are the finished nodes, oldest first.
 	Steps []Step
 
-	// Fresh says the run is in a child session of its own, which its
-	// caller's call holds.
+	// Fresh says the run is in a child session that began with nothing of
+	// its caller's. A run in a child has a Caller, fresh or not.
 	Fresh bool
 	// Left says the runs under way were abandoned with their caller, and
 	// none is to start until an invocation.
@@ -239,18 +235,10 @@ type State struct {
 	// and keptDir the directory each was started in.
 	kept    map[string]string
 	keptDir map[string]string
-	// callers are the calls the run is nested in, in the transcript,
-	// outermost first.
-	callers []caller
 	// clocked says the program has read the clock for this attempt, and
-	// asked counts the bounds asked about in it. timedOut says, for a call,
-	// that the program has recorded its time ran out.
-	clocked  bool
-	timedOut bool
-	asked    int
-	// callDue are the deadlines of the calls in this context the run is
-	// nested in, outermost first: a run is held to its callers' time too.
-	callDue []callClock
+	// asked counts the bounds asked about in it.
+	clocked bool
+	asked   int
 	// filed says the program has given the attempt's model step its
 	// files, and passedFiles are, for the step of a run in a child, the
 	// files its call passed in.
@@ -270,23 +258,12 @@ type State struct {
 	maxDepth int
 	// maxSteps is the tree's bound on step entries.
 	maxSteps int
-	// calleeInputs is what Callee was started with.
-	calleeInputs any
 	// docAt says, for each document written, how many steps had finished
 	// when it was, plus one: which is newer than which, for latest.
 	docAt map[string]int
 	// limit names the bound across the tree the run failed on, which no
 	// caller may retry or route on.
 	limit string
-}
-
-// caller is a call a run is nested in, with its policy as it stands
-// resolved from that run's record.
-type caller struct {
-	node     *Node
-	workflow string
-	policy   *Policy
-	err      error
 }
 
 // limits are the bounds a run can reach, by the name an ending records.
@@ -327,8 +304,11 @@ type startPayload struct {
 	// MaxSteps bounds the steps the tree may enter: for a run nobody
 	// called, the bound; for a child, what its caller had left.
 	MaxSteps int `json:"max_steps,omitempty"`
-	// Context is fresh for a run in a child session, whose caller's call
-	// holds it. Path is then the way to the call from the run nobody
+	// Context says, for a run in a child session, which its caller's call
+	// holds, what the child's model begins with: fresh for nothing, and
+	// session for what its caller's saw, which the child's session opens
+	// with and is no part of the child's record. It is empty for a run
+	// nobody called. Path is the way to the call from the run nobody
 	// called, so the child reads on its own.
 	Context string  `json:"context,omitempty"`
 	Path    []Place `json:"path,omitempty"`
@@ -449,7 +429,6 @@ type frame struct {
 	// end -1 while there is none.
 	start, end int
 	ending     *Ending
-	parent     *frame
 	// children are the calls it made into child sessions, in order.
 	children []freshCall
 	// path is where a run in a child stands in the tree it was called
@@ -485,9 +464,9 @@ type frame struct {
 
 // abortPlan is an abandon under way.
 type abortPlan struct {
-	// until is the outermost run it reaches, nil for every run under way,
-	// and next the run asked for once they have ended, nil for none.
-	until, next *frame
+	// next is the run asked for once those under way have ended, nil for
+	// none.
+	next *frame
 }
 
 // canClean says f has a cleanup path to run as it is abandoned: one it
@@ -500,26 +479,29 @@ func (f *frame) canClean() bool {
 type freshCall struct {
 	call                 string
 	workflow, run, spawn string
+	// fresh says the child began with nothing of its caller's.
+	fresh bool
 }
 
-// replay reads a transcript as a stack of runs.
+// replay reads a transcript as the runs it holds, one after another.
+// A run another called is in a session of its own.
 type replay struct {
 	g       *Graph
 	closure map[string]*Graph
 	calls   map[string]*openresponses.FunctionCall
 	at      map[string]int
-	// root is the run nobody called, started or about to be, and stack
-	// the runs under way, root first.
+	// root is the run started or about to be, and cur the one under way,
+	// nil while none is. frames are every run started, oldest first.
 	root    *frame
-	stack   []*frame
+	cur     *frame
 	frames  []*frame
 	entries int
 	// request is an operator's override waiting to be applied, and
 	// overrides counts the flow_override calls made, for the next one's ID.
 	request   *Override
 	overrides int
-	// abort is an abandon under way: the runs it reaches end, innermost
-	// first, each after its cleanup, before the run asked for starts.
+	// abort is an abandon under way: the run it reaches ends, after its
+	// cleanup, before the run asked for starts.
 	abort *abortPlan
 	// prefixes are those of every run started, of any workflow, so a
 	// call none of them made is known to have lost its start.
@@ -589,18 +571,18 @@ func (g *Graph) owners(t agentturn.Transcript) []string {
 }
 
 func (r *replay) newRoot(inputs any) *frame {
-	return newFrame(State{g: r.g, Workflow: r.g.Name, Inputs: inputs}, -1, nil)
+	return newFrame(State{g: r.g, Workflow: r.g.Name, Inputs: inputs}, -1)
 }
 
-func newFrame(st State, start int, parent *frame) *frame {
-	return &frame{st: st, visits: map[string]int{}, since: -1, start: start, end: -1, parent: parent,
+func newFrame(st State, start int) *frame {
+	return &frame{st: st, visits: map[string]int{}, since: -1, start: start, end: -1,
 		extra: map[string]int{}, repeats: map[string]int{}, paced: map[string]int{}, mark: map[string]int{}}
 }
 
-// top is the innermost run under way, or the root when none is.
+// top is the run under way, or the root when none is.
 func (r *replay) top() *frame {
-	if len(r.stack) > 0 {
-		return r.stack[len(r.stack)-1]
+	if r.cur != nil {
+		return r.cur
 	}
 	return r.root
 }
@@ -630,27 +612,11 @@ func (r *replay) state(f *frame) State {
 		st.Entries, st.Granted = f.entries, f.granted
 	}
 	st.Path = slices.Clone(r.root.path)
-	st.callers, st.callDue = nil, nil
-	for _, s := range r.stack {
-		// A call's time holds the runs it called in this context, until the
-		// program has said it ran out; while runs are being abandoned there
-		// is nothing more to stop.
-		if s != f && r.abort == nil && s.st.Node != nil && s.st.Node.Flow != "" && !s.st.Node.fresh() && !s.st.Deadline.IsZero() && !s.st.timedOut && s.st.Callee != "" {
-			st.callDue = append(st.callDue, callClock{run: s.st.Instance, workflow: s.st.Workflow, step: s.st.Node.ID, id: s.st.timeoutID(), timeout: s.st.Node.Timeout, deadline: s.st.Deadline})
-		}
-		p := Place{Workflow: s.st.Workflow, Run: s.st.Instance}
-		if s.st.Node != nil {
-			p.Step = s.st.Node.ID
-		}
-		st.Path = append(st.Path, p)
-		if s == f {
-			break
-		}
-		if n := s.st.Node; n != nil {
-			p, err := n.Policy.resolved(s.st)
-			st.callers = append(st.callers, caller{n, s.st.Workflow, p, err})
-		}
+	p := Place{Workflow: f.st.Workflow, Run: f.st.Instance}
+	if f.st.Node != nil {
+		p.Step = f.st.Node.ID
 	}
+	st.Path = append(st.Path, p)
 	return st
 }
 
@@ -682,7 +648,7 @@ func (r *replay) message(i int, m *openresponses.Message) {
 		if o, ok := requested(m.Text()); ok {
 			// An override waits for the program, which applies it or says
 			// why not; with no run under way it asks nothing.
-			if len(r.stack) > 0 {
+			if r.cur != nil {
 				r.request = &o
 			}
 			return
@@ -712,60 +678,54 @@ func (r *replay) message(i int, m *openresponses.Message) {
 	}
 }
 
-// invoke asks for a new run, abandoning every one under way, innermost
-// first. left says none is to start: the runs here were abandoned with
-// the run that called them.
+// invoke asks for a new run, abandoning the one under way. left says
+// none is to start: the run here was abandoned with the run that called
+// it.
 func (r *replay) invoke(i int, inputs any, left bool, why string) {
 	next := r.newRoot(inputs)
 	next.st.Left = left
 	// An override asked of the runs this abandons is asked of nothing now.
 	r.request = nil
-	r.abandon(i, nil, next, why)
+	r.abandon(i, next, why)
 }
 
-// abandon abandons the runs under way, innermost first, out to until or,
-// for nil, all of them, and then starts next, if any. Each run it reaches
-// runs its cleanup path, if it has one, before its end. A second abandon
-// over the first cuts any cleanup under way short and reaches the runs of
-// both. why is what the runs are abandoned for, which each one's end
-// records; the first reason given a run stands.
-func (r *replay) abandon(i int, until, next *frame, why string) {
+// abandon abandons the run under way, and then starts next, if any. The
+// run runs its cleanup path, if it has one, before its end. A second
+// abandon over the first cuts a cleanup under way short. why is what the
+// run is abandoned for, which its end records; the first reason given
+// stands.
+func (r *replay) abandon(i int, next *frame, why string) {
+	f := r.cur
 	if old := r.abort; old != nil {
-		for _, f := range r.stack {
+		if f != nil {
 			if f.cleaning && f.cleaned == "" {
 				f.cleaned = cutShort
 			}
 			f.cut = f.cut || f.aborting
 		}
-		if old.until == nil {
-			until = nil
-		}
 		if next == nil {
 			next = old.next
 		}
 	}
-	r.abort = &abortPlan{until: until, next: next}
-	for _, f := range slices.Backward(r.stack) {
+	r.abort = &abortPlan{next: next}
+	if f != nil {
 		f.aborting = true
 		if f.why == "" {
 			f.why = why
-		}
-		if f == until {
-			break
 		}
 	}
 	r.advance(i)
 }
 
-// advance moves an abandon on: the innermost run it reaches begins its
-// cleanup, or waits for its end to be written. Once every run it reaches
-// has ended, the run asked for is next.
+// advance moves an abandon on: the run under way begins its cleanup, or
+// waits for its end to be written. Once it has ended, the run asked for
+// is next.
 func (r *replay) advance(i int) {
 	p := r.abort
 	if p == nil {
 		return
 	}
-	if f := r.top(); len(r.stack) > 0 && f.aborting {
+	if f := r.cur; f != nil && f.aborting {
 		if f.canClean() {
 			r.clean(f, i)
 		}
@@ -774,7 +734,7 @@ func (r *replay) advance(i int) {
 	r.abort = nil
 	if p.next != nil {
 		// The next run's tree counts its own steps, and is granted its own.
-		r.stack, r.entries, r.granted, r.orphaned = nil, 0, 0, false
+		r.cur, r.entries, r.granted, r.orphaned = nil, 0, 0, false
 		r.root = p.next
 	}
 }
@@ -784,7 +744,7 @@ func (r *replay) advance(i int) {
 func (r *replay) clean(f *frame, i int) {
 	st := &f.st
 	f.cleaning = true
-	st.Failure, st.Reached, st.Callee, st.Returned, st.calleeInputs, st.Held, st.Advice = "", nil, "", nil, nil, nil, nil
+	st.Failure, st.Reached, st.Held, st.Advice = "", nil, nil, nil
 	f.came = "the run was abandoned"
 	r.enter(f, i, st.g.node(st.g.OnAbort))
 }
@@ -830,8 +790,8 @@ func (r *replay) call(i int, c *openresponses.FunctionCall) {
 	// it keeps is kept from then on, whatever comes of the call.
 	if f := r.top(); f.st.Started && strings.HasPrefix(c.CallID, f.st.prefix) && (c.Name == callTool || c.Name == judgeTool) {
 		var a callArgs
-		if decode([]byte(c.Arguments), &a) == nil && a.Context == ContextFresh {
-			f.children = append(f.children, freshCall{call: c.CallID, workflow: a.Workflow, run: a.Run, spawn: a.Spawn})
+		if decode([]byte(c.Arguments), &a) == nil && a.held() {
+			f.children = append(f.children, freshCall{call: c.CallID, workflow: a.Workflow, run: a.Run, spawn: a.Spawn, fresh: a.Context == ContextFresh})
 			if a.Child != "" {
 				if f.st.kept == nil {
 					f.st.kept = map[string]string{}
@@ -872,9 +832,6 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 		r.overridden(i, c, out)
 		return
 	}
-	if c != nil && c.Name == clockTool && strings.HasPrefix(c.CallID, reserved) && r.timesOut(i, out) {
-		return
-	}
 	f := r.top()
 	if c != nil && c.Name == startTool && strings.HasPrefix(c.CallID, reserved) {
 		r.started(i, f, c, out)
@@ -882,11 +839,6 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 	}
 	st := &f.st
 	if f.failed != nil || st.Done || !st.Started || c == nil {
-		return
-	}
-	// A question the host set aside because a call it is nested in ran out
-	// of time is not answered: the runs are abandoned next.
-	if out.Output.String() == timedOutText && c.Name == askTool && strings.HasPrefix(c.CallID, reserved) {
 		return
 	}
 	// What is not the run's is not its progress.
@@ -932,8 +884,7 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 		_ = json.Unmarshal([]byte(out.Output.String()), &answer)
 		if answer.Outcome == retryOutcome {
 			st.Attempt, st.Failure = st.Attempt+1, ""
-			st.Callee, st.Returned, st.calleeInputs = "", nil, nil
-			st.clocked, st.Deadline, st.asked, st.reasked, st.reask, st.filed, st.timedOut = false, time.Time{}, 0, 0, false, false, false
+			st.clocked, st.Deadline, st.asked, st.reasked, st.reask, st.filed = false, time.Time{}, 0, 0, false, false
 			if n.Kind == Agent {
 				// The step opens again, and what came before is not about
 				// this attempt.
@@ -1050,10 +1001,10 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 			return
 		}
 	default:
-		if out.CallID != st.callID() || n.Flow != "" && !n.fresh() && st.Returned == nil {
+		if out.CallID != st.callID() {
 			return
 		}
-		if n.fresh() {
+		if n.inChild() {
 			// What the child's runs spent counts toward this tree, however
 			// it came out, and a bound across the tree it failed on fails
 			// this run.
@@ -1103,8 +1054,8 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 	r.finish(f, i, Step{Result: res, Advice: st.Advice})
 }
 
-// started reads a flow_start: the root's, or that of a call nested in
-// the run under way.
+// started reads a flow_start: that of the run this session is to hold
+// next.
 func (r *replay) started(i int, f *frame, c *openresponses.FunctionCall, out *openresponses.FunctionCallOutput) {
 	var p startPayload
 	if decode([]byte(c.Arguments), &p) != nil {
@@ -1115,66 +1066,38 @@ func (r *replay) started(i int, f *frame, c *openresponses.FunctionCall, out *op
 		return json.Unmarshal([]byte(out.Output.String()), &res) == nil && res.Outcome == OK
 	}
 	prefix := strings.TrimSuffix(c.CallID, "start")
-	if p.Parent == "" || p.Context == ContextFresh {
-		// A run nobody called here: the root, or a child's, whose caller
-		// is in another session.
-		root := r.root
-		if f != root || root.st.Started || root.failed != nil || p.Workflow != r.g.Name {
-			return
-		}
-		switch {
-		case !ok():
-			root.failed = fmt.Errorf("%w: start: %s", ErrStepFailed, out.Output.String())
-			return
-		case p.Format != RecordFormat:
-			root.failed = fmt.Errorf("%w: record format %d, and this reads %d", ErrChanged, p.Format, RecordFormat)
-			return
-		case p.Digest != r.g.Digest():
-			root.failed = r.changed(p)
-			return
-		}
-		root.st = State{Started: true, Instance: p.Run, Workflow: r.g.Name, Inputs: p.Inputs, Parent: p.Parent, Caller: p.Caller,
-			Depth: p.Depth, Fresh: p.Context == ContextFresh, g: r.g, prefix: prefix, maxDepth: cmpDepth(p.MaxDepth)}
-		root.path = p.Path
-		root.st.Documents, root.st.docAt = initialDocuments(r.g, p.Inputs, p.Documents)
-		root.st.started = startedAt(out.Output.String())
-		root.st.passedFiles, root.st.question = p.Files, p.Question
-		root.start = r.at[c.CallID]
-		// A child is given what its caller's tree had left, none included.
-		r.maxSteps = p.MaxSteps
-		if p.Context != ContextFresh {
-			r.maxSteps = cmpSteps(p.MaxSteps)
-		}
-		r.stack = []*frame{root}
-		r.frames = append(r.frames, root)
-		r.enter(root, i, &r.g.Nodes[0])
+	// A run nobody called here: the root, or a child's, whose caller
+	// is in another session.
+	root := r.root
+	if f != root || root.st.Started || root.failed != nil || p.Workflow != r.g.Name {
 		return
 	}
-	// A call: the run under way must be at the node that makes it, and
-	// not have made it yet.
-	st := &f.st
-	n := st.Node
-	if f.failed != nil || !st.Started || st.Done || n == nil || n.Flow == "" || n.fresh() || st.Callee != "" || st.Failure != "" ||
-		p.Parent != st.Instance || p.Caller != st.callID() {
-		return
-	}
-	g := r.closure[p.Workflow]
 	switch {
-	case g == nil || g.OwnDigest() != p.Digest || st.g.Callees[n.Flow] != g:
-		f.failed = fmt.Errorf("%w: step %q started %s, which the run did not pin", ErrChanged, n.ID, p.Workflow)
-		return
 	case !ok():
-		st.Failure = "the call could not start: " + out.Output.String()
+		root.failed = fmt.Errorf("%w: start: %s", ErrStepFailed, out.Output.String())
+		return
+	case p.Format != RecordFormat:
+		root.failed = fmt.Errorf("%w: record format %d, and this reads %d", ErrChanged, p.Format, RecordFormat)
+		return
+	case p.Digest != r.g.Digest():
+		root.failed = r.changed(p)
 		return
 	}
-	st.Callee, st.calleeInputs = p.Run, p.Inputs
-	child := newFrame(State{Started: true, Instance: p.Run, Workflow: g.Name, Parent: p.Parent, Caller: p.Caller, Depth: p.Depth,
-		Inputs: p.Inputs, g: g, prefix: prefix, maxDepth: st.maxDepth}, r.at[c.CallID], f)
-	child.st.Documents, child.st.docAt = initialDocuments(g, p.Inputs, nil)
-	child.st.started = startedAt(out.Output.String())
-	r.stack = append(r.stack, child)
-	r.frames = append(r.frames, child)
-	r.enter(child, i, &g.Nodes[0])
+	root.st = State{Started: true, Instance: p.Run, Workflow: r.g.Name, Inputs: p.Inputs, Parent: p.Parent, Caller: p.Caller,
+		Depth: p.Depth, Fresh: p.Context == ContextFresh, g: r.g, prefix: prefix, maxDepth: cmpDepth(p.MaxDepth)}
+	root.path = p.Path
+	root.st.Documents, root.st.docAt = initialDocuments(r.g, p.Inputs, p.Documents)
+	root.st.started = startedAt(out.Output.String())
+	root.st.passedFiles, root.st.question = p.Files, p.Question
+	root.start = r.at[c.CallID]
+	// A child is given what its caller's tree had left, none included.
+	r.maxSteps = p.MaxSteps
+	if p.Caller == "" {
+		r.maxSteps = cmpSteps(p.MaxSteps)
+	}
+	r.cur = root
+	r.frames = append(r.frames, root)
+	r.enter(root, i, &r.g.Nodes[0])
 }
 
 // changed is the error of a root that started with another definition,
@@ -1230,9 +1153,7 @@ func (r *replay) ended(i int, c *openresponses.FunctionCall, out *openresponses.
 	e.id = out.CallID
 	f.ending, f.end = &e, r.at[out.CallID]
 	f.st.Ended = true
-	if f.parent == nil {
-		f.counted, f.entries, f.granted = true, r.entries, r.granted
-	}
+	f.counted, f.entries, f.granted = true, r.entries, r.granted
 	// A step that failed with nobody to ask is over only by saying so.
 	switch {
 	case e.Status == Failed && f.failed == nil && limits[e.Limit] != nil:
@@ -1240,16 +1161,7 @@ func (r *replay) ended(i int, c *openresponses.FunctionCall, out *openresponses.
 	case e.Status == Failed && f.failed == nil:
 		f.failed = fmt.Errorf("%w: %s", ErrStepFailed, e.Reason)
 	}
-	r.stack = r.stack[:len(r.stack)-1]
-	// The caller learns what came of the call.
-	if p := f.parent; p != nil && p.st.Callee == f.st.Instance {
-		p.st.Returned = &e
-		p.st.treeSteps += f.st.treeSteps
-		p.st.called = append(p.st.called, calledOf(p.st.Instance, f.st.Workflow, f.st.Instance, e.Status, e.Outcome, e.Summary)...)
-		if treeWide(e.Limit) && p.failed == nil {
-			p.failed, p.st.limit = &limitError{limits[e.Limit], e.Reason}, e.Limit
-		}
-	}
+	r.cur = nil
 	r.advance(i)
 }
 
@@ -1263,7 +1175,7 @@ func (r *replay) finish(f *frame, i int, step Step) {
 	step.Node, step.Visit = n.ID, st.Visit
 	st.Steps = append(st.Steps, step)
 	f.since, st.Nudges, st.Begun, st.Advice, st.Held, st.refused = i, 0, false, nil, nil, 0
-	st.Callee, st.Returned, st.calleeInputs, st.Note = "", nil, nil, ""
+	st.Note = ""
 	next := n.Next[step.Result.Outcome]
 	if next == "" && f.cleaning {
 		// The cleanup is over; the run's end is written next.
@@ -1418,7 +1330,7 @@ func (r *replay) enter(f *frame, i int, n *Node) {
 	f.mark[n.ID] = len(st.Steps)
 	st.Visit, st.Attempt, st.Paced = f.visits[n.ID], 1, f.paced[n.ID]
 	f.since = i
-	st.clocked, st.Deadline, st.asked, st.reasked, st.reask, st.filed, st.timedOut = false, time.Time{}, 0, 0, false, false, false
+	st.clocked, st.Deadline, st.asked, st.reasked, st.reask, st.filed = false, time.Time{}, 0, 0, false, false
 	if !paced {
 		r.entries++
 	}
@@ -1483,12 +1395,10 @@ func runOf(args string) string {
 	return a.Run
 }
 
-// callClock is the deadline of a call in the current context that a run
-// is nested in.
+// callClock is a call with a timeout.
 type callClock struct {
-	run, workflow, step, id string
-	timeout                 time.Duration
-	deadline                time.Time
+	workflow, step string
+	timeout        time.Duration
 }
 
 // why is what the runs a call abandons as its time runs out record.
@@ -1499,28 +1409,3 @@ func (c callClock) why() string {
 // timedOutPrefix starts the reason of a run a call abandoned as its time
 // ran out, so the call reads it as its failure.
 const timedOutPrefix = "timeout: "
-
-// timedOutText is the output a host gives a question it sets aside as a
-// call the question's run is nested in runs out of time.
-const timedOutText = "agentflow: timed out"
-
-// timesOut reads the program's word that a call's time ran out, at item
-// i: every run the call is waiting on is abandoned, innermost first, each
-// after its cleanup, and the call is left to say what came of it. It says
-// whether out was that word.
-func (r *replay) timesOut(i int, out *openresponses.FunctionCallOutput) bool {
-	if r.abort != nil {
-		return false
-	}
-	for k, s := range r.stack {
-		st := &s.st
-		if k+1 >= len(r.stack) || st.Node == nil || st.Node.Flow == "" || st.Node.fresh() || st.timedOut || out.CallID != st.timeoutID() {
-			continue
-		}
-		st.timedOut = true
-		c := callClock{run: st.Instance, workflow: st.Workflow, step: st.Node.ID, timeout: st.Node.Timeout}
-		r.abandon(i, r.stack[k+1], nil, c.why())
-		return true
-	}
-	return false
-}

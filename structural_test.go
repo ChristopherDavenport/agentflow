@@ -260,10 +260,10 @@ func TestAChildAbandonedBelowIsNotStartedAgain(t *testing.T) {
 }
 
 // What the program says on its own is recorded as the workflow's, not as
-// the person's who drove it: a call's timeout said to the runs it waits
-// on, and an abandon said to a child.
+// the person's who drove it: an abandon said to a child, whichever way
+// the child opened, when its call's time runs out.
 func TestTheProgramsPromptsAreRecordedAsTheWorkflows(t *testing.T) {
-	for _, c := range []struct{ context, said string }{{"", timedOutText}, {ContextFresh, abandonText}} {
+	for _, c := range []struct{ context, said string }{{"", abandonText}, {ContextFresh, abandonText}} {
 		t.Run("context "+c.context, func(t *testing.T) {
 			ctx := t.Context()
 			store, err := jsonl.Open(t.TempDir())

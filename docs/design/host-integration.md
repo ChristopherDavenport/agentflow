@@ -26,6 +26,16 @@ end, st, err = agentflow.Resume(ctx, graph, a, []agentturn.Answer{answer})
 config. What `Apply` adds, and how the program takes its turns, is in
 [record-and-replay.md](record-and-replay.md).
 
+A workflow that calls another, or has a fresh step or a judge, works in
+child sessions, and only agentflow's own entry points reach them:
+
+- `Prompt` alone ends `input_required` at every such call. `Invoke` and
+  `Drive` open the child and see it through.
+- The agent's own `Resume` answers a call its own session holds.
+  `agentflow.Resume` takes an answer down to the child that asked.
+- An invocation prompted by hand abandons the run it is prompted over,
+  not the children that run waits on. `Invoke` abandons those first.
+
 A host with script steps offers the script tool,
 `script.New(workspace, timeout, script.Files(w.Files))`, where `w` is
 what `workflow.Load` returned. Only the program calls it. `timeout` holds
@@ -42,7 +52,8 @@ them added, provided they are given the same `*Graph` value `Apply` was.
 | Option | What it gives |
 |---|---|
 | `History(read)` | the record: every item that has happened, oldest first, such as the item entries of a session's path. Position, step inputs and the gate are read from it. It must be current when called, and is called several times a turn |
-| `Children(open)` | the opener of child sessions. Needed by any graph with a fresh step or call, or a step the host lets a judge answer; `Apply` refuses such a graph without it |
+| `Inherited(read)` | for a child that opens with its caller's view, given to `Child.Apply`: every item its session opened with, oldest first, the same each time. No position is read from them, and its `History` holds none of them |
+| `Children(open)` | the opener of child sessions. Needed by any graph with a call, a fresh step, or a step the host lets a judge answer; `Apply` refuses such a graph without it |
 | `Models(names...)` | the models the host serves to children. `Apply` refuses a step, or a workflow default, that asks for another |
 | `JudgeModel(name)` | the model a judge's child is asked for, instead of the one that works |
 | `Delegate(mode, steps...)` | how far a judge may answer a judged step: `Shadow`, `Advise` or `Decide`. With no steps, every judged step. A step of a called workflow is named `<workflow>:<step>`. A later `Delegate` overrides an earlier one for the steps both name |
@@ -119,20 +130,41 @@ recorder finds a child's session from the context, and the agent.
 ```go
 func open(ctx context.Context, c agentflow.Child) (context.Context, *agentturn.Agent, error) {
 	cctx, err := rec.ContinueChild(ctx, c.Spawn)
-	if errors.Is(err, session.ErrNoSpawn) {
+	switch {
+	case errors.Is(err, session.ErrNoSpawn) && c.Seeded:
+		cctx, err = rec.ForkChildBefore(ctx, c.Spawn, c.Caller)
+	case errors.Is(err, session.ErrNoSpawn):
 		cctx, err = rec.StartChild(ctx, c.Spawn)
 	}
 	// ... build the child's workspace from c.Settings.Dir with script.Sub,
 	// its tools on that workspace, its model from c.Settings.Model ...
-	cfg, err := c.Apply(base, historyOf(session.SessionIDFromContext(cctx)))
-	// ... seed an agent from the child's session, and record it ...
+	id := session.SessionIDFromContext(cctx)
+	cfg, err := c.Apply(base, ownItems(id), inheritedItems(id))
+	// ... make the agent from the child's session with session.AgentOptions,
+	// and record it ...
 	return cctx, a, nil
 }
 ```
 
+What a host does for a child that opens with its caller's view
+(`c.Seeded`):
+
+- Forks the child's session from the caller's, before the call:
+  `ForkChildBefore(ctx, c.Spawn, c.Caller)`.
+- Makes the agent from the child's session and seeds nothing by hand; the
+  session holds what it opened with.
+- Gives `c.Apply` a `History` of the item entries of `session.OwnPath`
+  and an `Inherited` of the item entries of `session.PrefixPath`.
+- Reads the child for `Runs` from `OwnPath` too, or the caller's runs
+  appear as the child's.
+- With no store, seeds the child's agent with `c.Seed`, gives the same
+  items back as `Inherited`, and gives a `History` of what the agent
+  holds past them. Such a host cannot compact a seeded child.
+
 - `Child` names the run (`Run`), its session (`Spawn`), the call that
   holds it (`Caller`, `Parent`), what runs in it (`Workflow`, `Step`,
-  `Judge`), a kept child's name (`Kept`), and `Depth` and `Path`.
+  `Judge`), a kept child's name (`Kept`), `Depth` and `Path`, and whether
+  it opens with its caller's view (`Seeded`, `Seed`).
 - `Child.Settings` is what the step says of its child: `Dir`, `Model`,
   `Thinking`, `Instructions`, `Tools`, `AllTools` and `ExcludeTools`.
 - `c.Apply(cfg, opts...)` makes the child's config follow its workflow,
@@ -240,8 +272,8 @@ base.Instructions += catalog.Prompt() + "\n\n" + workflow.StartPrompt(flows, wor
 - **The host's policy must allow the program's tools.** The config's own
   `BeforeToolCall` sees every `flow_` call and `run_script`, so a policy
   that asks by default asks about them.
-- **`MaxTurns` counts the program's turns.** Three levels of nesting
-  around one model step take about 14.
+- **`MaxTurns` counts the program's turns,** in each session: a start,
+  an end and each program step are turns of the session they are in.
 - **The program's turns use nothing.** They are sent to the model name
   `agentflow/<workflow>`, answered by agentflow itself, and carry no
   usage. Cost and eval tools should skip them, not report an unpriced

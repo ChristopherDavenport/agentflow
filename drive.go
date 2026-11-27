@@ -98,22 +98,6 @@ func (f *flow) drive(ctx context.Context, a *agentturn.Agent, end *agentturn.Run
 			return end, st, end.Err
 		case err != nil:
 			return end, st, err
-		case end.Reason == agentturn.ReasonInputRequired && f.callExpired(st) != nil:
-			// A call the waiting run is nested in has run out of time: what
-			// waits is set aside, and the program says so, which abandons the
-			// runs the call waits on.
-			outs, err := f.setAside(ctx, a, timedOutText, f.callExpired(st).why())
-			if err != nil {
-				return end, st, err
-			}
-			// The program says so, not a person.
-			from := agentturn.ContextWithTrigger(ctx, agentturn.Trigger{Kind: TriggerKind, Ref: f.g.Name})
-			next, err := a.Prompt(from, outs...)
-			if next == nil {
-				return end, st, err
-			}
-			end = next
-			continue
 		case requested && req.Workflow != f.g.Name:
 			// Another workflow's config is the host's to apply.
 			return end, st, req
@@ -148,7 +132,7 @@ func (f *flow) drive(ctx context.Context, a *agentturn.Agent, end *agentturn.Run
 			if !ok {
 				return end, st, nil
 			}
-			ans, wait, wst, err := f.settle(ctx, st, p, args, nil)
+			ans, wait, wst, err := f.settle(ctx, a.State().Transcript, st, p, args, nil)
 			if ans == nil {
 				return wait, wst, err
 			}

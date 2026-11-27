@@ -58,6 +58,20 @@ These are in the code as it stands.
   name a tool the step offers, so a step cannot deny a tool that only
   another tool calls, except under `tools: all` or from a calling step.
 
+- **A seeded call's settings.** `instructions`, `child` and `dir` on a
+  call are load errors unless the call is `context: fresh`, though every
+  call now runs in a child that could take them.
+- **The cost of a seeded child's first request.** It repeats what its
+  caller's model had been sent, and a seeded child that calls repeats
+  that again. Whether a provider's cache takes most of it is not
+  measured.
+- **A seeded child with no store.** A host that keeps its agents in
+  memory copies the caller's items into the child's agent. Its requests
+  have no session to verify against, and it cannot compact.
+- **A call in a child's inherited part without its output** is pending in
+  the child. A fork before the calling call leaves that call out, but an
+  earlier unanswered call of the same response would still be there.
+
 ## Proposed, not built
 
 - **Approval by digest before a first run.** A workflow from a
@@ -105,6 +119,12 @@ Each of these is tested with scripted models only.
 - The quoting of reasons in what a summarizer is given.
 - A model step that uses tools over many turns, and a prompt that
   competes with the instruction to finish.
+- A call whose child opens with its caller's view: what a callee's model
+  makes of an inherited conversation, and of the caller's earlier steps
+  in it.
+
+Forked child sessions are tested on agentturn/session's memory and jsonl
+stores only, not on sqlite or cas, and not through its retry path.
 
 One run each of most other features says the machinery holds with a real
 model, not how often a model does the right thing.

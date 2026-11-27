@@ -429,7 +429,20 @@ func TestLiveNesting(t *testing.T) {
 
 // pathOf is the items of a session's path.
 func pathOf(s *agentsession.Session) (out agentturn.Transcript) {
-	for _, e := range s.Path(s.Leaf()) {
+	// A forked session's path opens with what its caller's held, which is
+	// no part of its record.
+	for _, e := range session.OwnPath(s) {
+		if item, ok := e.(*agentsession.ItemEntry); ok {
+			out = append(out, item.Item)
+		}
+	}
+	return out
+}
+
+// prefixOf is what a forked session opened with: the items another
+// session wrote.
+func prefixOf(s *agentsession.Session) (out agentturn.Transcript) {
+	for _, e := range session.PrefixPath(s) {
 		if item, ok := e.(*agentsession.ItemEntry); ok {
 			out = append(out, item.Item)
 		}
@@ -503,7 +516,13 @@ func (h *recordedHost) history(id string) agentflow.Option {
 func (h *recordedHost) open(ctx context.Context, c agentflow.Child) (context.Context, *agentturn.Agent, error) {
 	h.opened = append(h.opened, c)
 	cctx, err := h.rec.ContinueChild(ctx, c.Spawn)
-	if errors.Is(err, session.ErrNoSpawn) {
+	switch {
+	case errors.Is(err, session.ErrNoSpawn) && c.Seeded:
+		// A seeded child's session is a fork of its caller's before the
+		// call that waits on it, so it opens with what the caller's held
+		// and every request of it rebuilds.
+		cctx, err = h.rec.ForkChildBefore(ctx, c.Spawn, c.Caller)
+	case errors.Is(err, session.ErrNoSpawn):
 		cctx, err = h.rec.StartChild(ctx, c.Spawn)
 	}
 	if err != nil {
@@ -522,7 +541,19 @@ func (h *recordedHost) open(ctx context.Context, c agentflow.Child) (context.Con
 	if h.fold != nil {
 		base.Transform = h.fold(h.rec)
 	}
-	cfg, err := c.Apply(base, h.history(id))
+	// The child's record is what its session wrote itself; what a fork
+	// opened with is given apart.
+	inherited := agentflow.Inherited(func(ctx context.Context) (agentturn.Transcript, error) {
+		s, err := h.store.Open(ctx, id)
+		if errors.Is(err, agentsession.ErrNoSession) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		return prefixOf(s), nil
+	})
+	cfg, err := c.Apply(base, h.history(id), inherited)
 	if err != nil {
 		return nil, nil, err
 	}

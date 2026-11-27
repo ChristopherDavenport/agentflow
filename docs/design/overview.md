@@ -2,7 +2,8 @@
 
 A workflow is a graph that decides who takes each turn: the **program**,
 the **model** or a **person**. All three write to one transcript and one
-session. Handing a turn to the model or a person and continuing when they
+session; a workflow that one calls runs the same way in a child session
+of its own. Handing a turn to the model or a person and continuing when they
 finish is the same operation as any other step.
 
 Workflows are authored as Agent Skills that carry a `WORKFLOW.md`: a
@@ -72,7 +73,7 @@ recording, replay and fronts handle it as handle any tool call.
 | a run starts | `flow_start` | program |
 | a script step | `run_script` | program |
 | a tool step | the step's tool | program |
-| a call to a workflow, a fresh model step, a kept child's visit | `flow_call` | program; a child answers a fresh one |
+| a call to a workflow, a fresh model step, a kept child's visit | `flow_call` | program; the run in its child session answers it |
 | a model step finishes | `flow_finish` | the step's model |
 | a model step reports it is stuck | `flow_stuck` | the step's model |
 | a model step reads or writes a document | `flow_doc_read`, `flow_doc_write` | the step's model |
@@ -108,12 +109,11 @@ of the model's names its run and step in its arguments; see
 | result | what a step ends in: an outcome, data, who chose and why |
 | run, instance | one invocation of a workflow, from `flow_start` to `flow_end` |
 | key | the random name of a run, carried by its calls |
-| frame | a run on the stack of one session; a call in context pushes one |
 | visit | one entry of a step in a run |
 | attempt | one try at a visit; a retry is a new attempt |
 | record | every item of a session's path, whatever a model was later sent |
 | view | what a request sends a model of the record |
-| child | a session of its own, opened for a fresh step, a fresh call or a judge |
+| child | a session of its own, with a record of its own, opened for a call, a fresh step or a judge. A call's child opens with its caller's view or with nothing |
 | front | a program that shows a run to a person and takes their answers |
 | host | the program that builds the config, opens children and drives runs |
 

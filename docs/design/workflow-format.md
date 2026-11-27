@@ -201,7 +201,7 @@ settings and be none.
 | `model`, `thinking` | the defaults of the workflow's own model steps | [steps-and-data.md](steps-and-data.md#model-and-thinking) |
 | `timeout` | the default deadline of every script, tool and model step | [limits-failure-and-intervention.md](limits-failure-and-intervention.md) |
 | `exclude_tools` | tools no model step or judge of the workflow is offered | [steps-and-data.md](steps-and-data.md#tools) |
-| `context` | `fresh`: every call to this workflow runs in a child. No other value is allowed | [calls-and-children.md](calls-and-children.md) |
+| `context` | `fresh`: every call to this workflow opens its child with nothing of the caller's. No other value is allowed | [calls-and-children.md](calls-and-children.md) |
 | `hidden` | `true`: only a workflow that calls it runs it | [calls-and-children.md](calls-and-children.md) |
 | `on_abort` | the step a cleanup path starts at when the run is abandoned | [limits-failure-and-intervention.md](limits-failure-and-intervention.md) |
 | `max_depth` | how deep calls may nest below this workflow; 8 if absent | [limits-failure-and-intervention.md](limits-failure-and-intervention.md) |
@@ -227,7 +227,7 @@ settings and be none.
 | `skills` | model | skills whose instructions are added to the step's | [steps-and-data.md](steps-and-data.md#skills) |
 | `files` | model | files given to the step as context when it opens | [steps-and-data.md](steps-and-data.md#files) |
 | `model`, `thinking` | model; `model` also a fresh call | the model a step asks and how hard it reasons | [steps-and-data.md](steps-and-data.md#model-and-thinking) |
-| `context` | model, call | `session` or `fresh`, a child session | [steps-and-data.md](steps-and-data.md#context) |
+| `context` | model, call | `session` or `fresh`. On a model step, whether it works in its run's session or in a child of its own. On a call, whether its child opens with the caller's view or with nothing | [steps-and-data.md](steps-and-data.md#context), [calls-and-children.md](calls-and-children.md#context-what-a-child-opens-with) |
 | `dir` | fresh model, fresh call, script | the directory below the workspace's root the step works in: a path, or a reference to one | [calls-and-children.md](calls-and-children.md) |
 | `instructions` | fresh model, fresh call | a file of the skill added to the child's instructions | [calls-and-children.md](calls-and-children.md) |
 | `child` | fresh model | the name of a child kept across the visits and steps that name it | [calls-and-children.md](calls-and-children.md) |
@@ -409,7 +409,7 @@ is known which calls run fresh. See
 ### Against the host's config, at `Apply`
 
 - A tool a step names must be one the config offers: a program step's
-  `tool`, the `tools` of a model step working in the current context, the
+  `tool`, the `tools` of a model step working in its run's session, the
   script tool where a step runs a script, and the read tool where a step
   is given workspace files.
 - Every excluded tool name must be one the config offers.
@@ -419,9 +419,9 @@ is known which calls run fresh. See
   by hand that names one and gives no text, is refused.
 - A hidden workflow is refused as a root.
 
-These hold for the graph and what it calls in context. A workflow a fresh
-call runs works on its child's tools: `Child.Apply` makes the same checks
-against the child's config. A config with a `ToolProvider` names its
+These hold for the graph itself. A workflow it calls works on its
+child's tools: `Child.Apply` makes the same checks against the child's
+config. A config with a `ToolProvider` names its
 tools only as it runs, so its tool names and arguments are checked when
 each call is made.
 

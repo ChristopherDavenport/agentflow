@@ -103,7 +103,7 @@ func TestACallsPolicyFromTheRecordHoldsWhatItCalls(t *testing.T) {
 	if want := []string{`write {"path":"free/a"}`}; !slices.Equal(did, want) {
 		t.Errorf("did %v, want %v", did, want)
 	}
-	if got := refusals(a.State().Transcript); len(got) != 1 || !strings.Contains(got[0], `the policy of step "call" of outer: denied by write(locked/a)`) {
+	if got := refusals(whole(a)); len(got) != 1 || !strings.Contains(got[0], `the policy of step "call" of outer: denied by write(locked/a)`) {
 		t.Errorf("refusals = %q", got)
 	}
 }

@@ -45,8 +45,8 @@ own end with its own reason.
 | an operator's `abandon` | the run named and every run it called are abandoned, innermost first, each after its cleanup | the call that waited on the run named has failed; its caller asks whether to retry or routes on `failed` |
 | a person's new invocation | `abandoned`, innermost first, each after its cleanup | `abandoned` |
 | abort (the context is cancelled, `Agent.Abort`) | nothing is written; the run is still under way, and resumes | the same. A child's run is aborted, and its caller's call stays held |
-| a pending question | the run ends `input_required` on that run's `flow_ask` | in the same context, nothing more. Through a child, the caller is already `input_required` on its held `flow_call` |
-| resume | replay gives the chain of runs, and the current one continues | a held `flow_call` names its child's key. `Drive` reopens the child from the store, continues it, and answers the caller's call when it ends, through each child in turn |
+| a pending question | the run ends `input_required` on that run's `flow_ask` | the caller is already `input_required` on its held `flow_call` |
+| resume | replay gives the run's position, and it continues | a held `flow_call` names its child's key. `Drive` reopens the child from the store, continues it, and answers the caller's call when it ends, through each child in turn |
 
 ## Timeouts
 
@@ -100,28 +100,15 @@ A tool that ignores its context is not stopped.
 - Before a call with a timeout starts the run it calls, the program calls
   `flow_clock` under the calling run's key (`…-clock`). Its result is the
   call's deadline.
-- **In the current context**, every run the call waits on, at any depth,
-  is held to it: a model step's stream and tools are cut off at the
-  earlier of its own deadline and its callers', and a script or tool at
-  the earlier of its own timeout and theirs. When the time has run out,
-  the program's next turn, whoever's turn it would have been, calls
-  `flow_clock` with `expired` under the calling run's key (`…-timeout`).
-  Replay reads that as the word that the call ran out of time: every run
-  the call waits on is abandoned, innermost first, each after its
-  cleanup, and each one's end records the reason
+- **`Drive` holds the child's runs to the deadline:** they run with a
+  context that ends there, and so does every run they call, at any
+  depth. A child that has ended in time is read as it ended. One that
+  has not ended by the deadline, or that is waiting when `Drive` comes
+  back to it later, a question included, is abandoned, each run after
+  its cleanup, in its own session. Each one's end records the reason
   `timeout: call "<step>" of <workflow> ran past its timeout of <d>`. The
-  call is then made as any call is once its callee has ended, and reads
-  the abandoned ending as a failure.
-- **A question waiting** in a run the call waits on cannot stop it. When
-  `Drive` finds the run waiting and the call's time run out, it sets the
-  pending calls aside with `agentflow: timed out`, which replay does not
-  read as an answer, and the program's turn follows as above.
-- **In a child**, `Drive` holds the child's runs to the deadline: they
-  run with a context that ends there. A child that has ended in time is
-  read as it ended. One that has not ended by the deadline, or that is
-  waiting when `Drive` comes back to it later, is abandoned, each run
-  after its cleanup, in its own session. The held call is then approved
-  with the failure and with what the child spent.
+  held call is then approved with the failure and with what the child
+  spent.
 - **The failure is `failed`**, as any callee's is. A call that draws an
   edge for `failed` goes on there; one that does not has failed and asks
   to be retried, which reads the clock again for a new deadline.
@@ -147,7 +134,7 @@ its timeout has failed, and the retry question already asks.
 |---|---|---|---|---|---|
 | visits | `visits` | visits of one step in one run | 5 (`DefaultLoopVisits`) for a step on a loop | `max_visits` on any one node of the loop | the run's |
 | repeat | `repeat` | a script or tool step giving the same outcome and data in a row | 3 (`RepeatLimit`) | not settable | the run's |
-| depth | `depth` | how deeply calls nest; the root is 0 and each call adds 1, in context or fresh | 8 (`DefaultMaxDepth`) | `max_depth` in the root's frontmatter, `MaxDepth(n)`; the smaller wins | the tree's |
+| depth | `depth` | how deeply calls nest; the root is 0 and each call adds 1 | 8 (`DefaultMaxDepth`) | `max_depth` in the root's frontmatter, `MaxDepth(n)`; the smaller wins | the tree's |
 | steps | `steps` | every step entered across the tree | 200 (`DefaultMaxSteps`) | `max_steps` in the root's frontmatter, `MaxSteps(n)`; the smaller wins | the tree's |
 
 ### Visits
@@ -214,10 +201,9 @@ say `max_visits: person` (`Node.PersonPaced`, with `MaxVisits` 0).
 ### Steps across a tree
 
 - Every step entered counts once toward the tree's total: retries, jumps
-  and calling steps included, across every run of the tree, in context
-  and in children. Paced visits are the one exception.
+  and calling steps included, across every run of the tree. Paced visits are the one exception.
 - The root's start records the bound.
-- **A child is given what the tree has left.** A fresh call, a fresh step
+- **A child is given what the tree has left.** A call, a fresh step
   and a judge's look each pass `max_steps` in their `flow_call` or
   `flow_judge` arguments, and the gate holds it to the record. The
   child's start records it as its own bound, 0 included.
@@ -291,20 +277,17 @@ way, and resumes.
 
 The first reason a run is given stands.
 
-**Across a stack, innermost first.** The innermost run runs its cleanup
-under its own key and writes its end; then the run that called it does
-the same; and so on out. Only then does a run that was asked for start. A
-run that had already failed or finished writes its end as it stands, with
-no cleanup.
-
-**Through children.** A run in a child session is abandoned in its own
-session. The program tells the child `agentflow: abandon`, or
+**Across a tree, innermost first.** Each run is abandoned in its own
+session. The program tells a child `agentflow: abandon`, or
 `agentflow: abandon: <why>`, a developer message no model can write, sent
-under a trigger of kind `workflow`. The child ends its runs, innermost
-first, each after its cleanup, and starts none. The caller's held call is
-then answered `agentflow: abandoned` for an invocation,
-`agentflow: overridden` for an override, or with the timeout's failure,
-with what the child spent.
+under a trigger of kind `workflow`. The child first has its own children
+do the same, then runs its cleanup under its own key and writes its end,
+and starts nothing. The caller's held call is then answered
+`agentflow: abandoned` for an invocation, `agentflow: overridden` for an
+override, or with the timeout's failure, with what the child spent; then
+the caller runs its own cleanup and writes its end. Only then does a run
+that was asked for start. A run that had already failed or finished
+writes its end as it stands, with no cleanup.
 
 After an invocation the new run starts. After an operator abandons the
 run nobody called there is nothing to start until the workflow is invoked

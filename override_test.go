@@ -139,7 +139,7 @@ func TestAnOverrideAbandonsARunAndWhatItCalled(t *testing.T) {
 	if end.Reason != agentturn.ReasonDone || !slices.Equal(ran, []string{"inner", "outer"}) {
 		t.Fatalf("end = %+v, ran %v", end, ran)
 	}
-	runs, err := Runs(a.State().Transcript, nil)
+	runs, err := Runs(a.State().Transcript, under(a))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,28 +11,6 @@ import (
 	"github.com/ChristopherDavenport/agentturn"
 )
 
-// inContext is the workflows whose program steps run in this context, on
-// the config's tools: the graph and those it calls in context, not those
-// a fresh call runs in a child, whose tools are the opener's.
-func (g *Graph) inContext() map[string]*Graph {
-	out := map[string]*Graph{g.Name: g}
-	queue := []*Graph{g}
-	for len(queue) > 0 {
-		x := queue[0]
-		queue = queue[1:]
-		for i := range x.Nodes {
-			n := &x.Nodes[i]
-			c := x.Callees[n.Flow]
-			if n.Flow == "" || n.fresh() || c == nil || out[c.Name] != nil {
-				continue
-			}
-			out[c.Name] = c
-			queue = append(queue, c)
-		}
-	}
-	return out
-}
-
 // checkArgs holds each tool step's arguments, its args with its with
 // merged over them, to the parameters of the tool the config offers: a
 // required parameter given on every path, no name the tool does not take
@@ -50,9 +28,7 @@ func checkArgs(g *Graph, cfg agentturn.Config) error {
 		tools[t.Name()] = t
 	}
 	var errs []error
-	local := g.inContext()
-	for _, name := range slices.Sorted(maps.Keys(local)) {
-		x := local[name]
+	for _, x := range []*Graph{g} {
 		for i := range x.Nodes {
 			n := &x.Nodes[i]
 			t := tools[n.Tool]

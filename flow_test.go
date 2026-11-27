@@ -156,7 +156,81 @@ func start(t *testing.T, a *agentturn.Agent) *agentturn.RunEnd {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return end
+	return through(t, a, end)
+}
+
+// through works on the children a's calls to workflows wait on, as Drive
+// does, and goes on until a's run ends or something waits on a person. It
+// leaves a fresh step's child and a judge's to the test, and reminds no
+// model of a's.
+func through(t *testing.T, a *agentturn.Agent, end *agentturn.RunEnd) *agentturn.RunEnd {
+	t.Helper()
+	out, err := drift(a, end)
+	if out == nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// drift is through, with the error a child's work gave.
+func drift(a *agentturn.Agent, end *agentturn.RunEnd) (*agentturn.RunEnd, error) {
+	ctx := context.Background()
+	f, ok := a.Config().Model.(*flow)
+	for ok && f.children != nil && end != nil && end.Reason == agentturn.ReasonInputRequired {
+		p, args, held := heldChild(end.Pending)
+		if !held || args.Context != ContextSession {
+			break
+		}
+		st, _, err := f.read(ctx, a.State().Transcript)
+		if err != nil {
+			return nil, err
+		}
+		ans, wait, _, err := f.settle(ctx, a.State().Transcript, st, p, args, nil)
+		if ans == nil {
+			return wait, err
+		}
+		next, err := a.Resume(ctx, *ans)
+		if next == nil {
+			return nil, err
+		}
+		end = next
+	}
+	return end, nil
+}
+
+// carry answers what the tree under a waits on, wherever it waits, and
+// goes on as through does.
+func carry(t *testing.T, a *agentturn.Agent, ans agentturn.Answer) (*agentturn.RunEnd, error) {
+	t.Helper()
+	ctx := context.Background()
+	if slices.ContainsFunc(a.State().Pending, func(p agentturn.PendingCall) bool { return p.Call != nil && p.Call.CallID == ans.CallID }) {
+		end, err := a.Resume(ctx, ans)
+		if end == nil {
+			return nil, err
+		}
+		return through(t, a, end), err
+	}
+	f, ok := a.Config().Model.(*flow)
+	if !ok {
+		return a.Resume(ctx, ans)
+	}
+	st, _, err := f.read(ctx, a.State().Transcript)
+	if err != nil {
+		return nil, err
+	}
+	p, args, held := heldChild(a.State().Pending)
+	if !held {
+		return a.Resume(ctx, ans)
+	}
+	let, wait, _, err := f.settle(ctx, a.State().Transcript, st, p, args, []agentturn.Answer{ans})
+	if let == nil {
+		return wait, err
+	}
+	end, err := a.Resume(ctx, *let)
+	if end == nil {
+		return nil, err
+	}
+	return through(t, a, end), err
 }
 
 func TestNoQuestionWhenClean(t *testing.T) {
