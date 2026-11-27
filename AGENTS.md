@@ -39,3 +39,10 @@ the documents your change touches before writing code.
 ## Checks
 
 `GOWORK=off GOFLAGS=-mod=readonly make check`
+
+## Changelog and releases
+
+- Note user-visible changes under *Unreleased* in `CHANGELOG.md`, which
+  is in Keep a Changelog form.
+- `make release VERSION=vX.Y.Z` cuts an annotated tag; see
+  `CONTRIBUTING.md`.

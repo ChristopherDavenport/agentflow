@@ -5,9 +5,31 @@ a graph decides whether the program, the model or a person takes each
 turn.
 
 A workflow is a `WORKFLOW.md` in an Agent Skill, or a graph built in Go.
+The loop never learns workflows exist: `Apply` returns an ordinary
+`agentturn.Config`. Where a run stands is read from its record alone, so
+resuming needs the session and the definition and nothing else.
+
 The design is in [docs/design](docs/design/overview.md); what is not built
 or not settled is in [open questions](docs/design/open-questions.md).
+Before v1.0.0 the API and the `WORKFLOW.md` keys may change between minor
+versions.
+
+```sh
+go get github.com/ChristopherDavenport/agentflow
+```
+
 Needs Go 1.26.
+
+| Package | What it holds |
+| --- | --- |
+| `agentflow` | the graph, the Go builder and everything that drives a run |
+| `agentflow/workflow` | `WORKFLOW.md`: reading, writing and loading it from a skill |
+| `agentflow/script` | `run_script`, which runs script steps in an `agentworkspace` |
+| `agentflow/summary` | how a run went, read back from its record |
+| `agentflow/examples` | whole workflow skills and the tests that run them |
+
+## Using it
+
 
 ```go
 cfg, err := agentflow.Apply(graph, agentturn.Config{Model: model, ModelName: name, Tools: tools})
@@ -115,3 +137,19 @@ state, err := runs[0].At(record, i)       // where it stood after item i
 | [Host integration](docs/design/host-integration.md) | what a host supplies and calls |
 | [Decisions](docs/design/decisions.md) | what was chosen over what, and why |
 | [Open questions](docs/design/open-questions.md) | unbuilt, unsettled, and not yet tried with a model |
+
+## Development
+
+```sh
+make check
+```
+
+runs gofmt, `go mod tidy -diff`, vet, the dependency check, staticcheck,
+govulncheck and the race tests. Tests run offline against scripted models;
+the live trials skip unless `AGENTFLOW_LIVE_URL` and
+`AGENTFLOW_LIVE_MODEL` are set. The tests run shell scripts that need
+`jq` and `git`. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+MIT; see [LICENSE](LICENSE).
