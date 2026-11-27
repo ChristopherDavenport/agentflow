@@ -453,7 +453,17 @@ func (f *flow) settle(ctx context.Context, view agentturn.Transcript, st State, 
 	case end != nil && end.Reason == agentturn.ReasonInputRequired:
 		return nil, end, cst, nil
 	}
-	return nil, end, cst, fmt.Errorf("agentflow: child %s stopped without ending its run", c.Run)
+	// The child's agent stopped for a reason of its own, such as its turns
+	// or its output running out: the error says which, since the call it
+	// leaves held cannot.
+	why := ""
+	if end != nil {
+		why = ": its agent's run ended " + string(end.Reason)
+		if end.Cause != "" {
+			why += ", " + string(end.Cause)
+		}
+	}
+	return nil, end, cst, fmt.Errorf("agentflow: child %s stopped without ending its run%s", c.Run, why)
 }
 
 func inputsOrNil(with map[string]any) any {

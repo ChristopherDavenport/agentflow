@@ -152,7 +152,7 @@ func (r repository) run(t *testing.T, m *scripted, answers []agentflow.Result, o
 		t.Fatal(err)
 	}
 	end, err := a.Prompt(ctx, item)
-	if err == nil {
+	if end != nil {
 		end, _, err = agentflow.Drive(ctx, w.Graph, a, end)
 	}
 	for err == nil && end.Reason == agentturn.ReasonInputRequired {
