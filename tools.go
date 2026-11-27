@@ -32,8 +32,8 @@ func (g *Graph) checkOffer(n *Node) []error {
 	bad := func(format string, args ...any) {
 		errs = append(errs, fmt.Errorf("agentflow: node %q: "+format, append([]any{n.ID}, args...)...))
 	}
-	if (n.AllTools || n.ExcludeTools != nil) && n.Kind != Agent {
-		bad("tools: all and exclude_tools are a model step's")
+	if (n.AllTools || n.ExcludeTools != nil || len(n.Tools) > 0) && n.Kind != Agent {
+		bad("tools and exclude_tools are a model step's")
 	}
 	if n.AllTools && len(n.Tools) > 0 {
 		bad("tools is all, or a list of tools, not both")

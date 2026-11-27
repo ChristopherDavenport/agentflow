@@ -85,6 +85,18 @@ func (f *flow) clockCall(st State, expired bool) (id string, args clockArgs) {
 	return st.timeoutID(), args
 }
 
+type stepDeadlineKey struct{}
+
+// StepDeadline is when the program step a tool was called for must be
+// done by, where its step, its workflow or a call its run is in sets a
+// timeout. The context is cut then too. A tool with a limit of its own,
+// as the script tool has, gives way to it: the workflow's word on how
+// long its step may take is the one that holds.
+func StepDeadline(ctx context.Context) (time.Time, bool) {
+	due, ok := ctx.Value(stepDeadlineKey{}).(time.Time)
+	return due, ok
+}
+
 // timed bounds the host's tools by the time of the step a call is made
 // for: a script's or a tool's own timeout, or for a call a model makes,
 // what its step has left. A tool that runs past it is cut off through
@@ -111,9 +123,11 @@ func (f *flow) timed(tools []agenttool.Tool) []agenttool.Tool {
 			switch own := f.timeout(st); {
 			case n.Kind == Run && n.Flow == "" && call.ID == st.callID() && own > 0 && (calls.IsZero() || time.Now().Add(own).Before(calls)):
 				cut, stop = context.WithTimeout(ctx, own)
+				cut = context.WithValue(cut, stepDeadlineKey{}, time.Now().Add(own))
 				why = fmt.Sprintf("agentflow: step %q timed out after %s", n.ID, own)
 			case n.Kind == Run && n.Flow == "" && call.ID == st.callID() && !calls.IsZero():
 				cut, stop = context.WithDeadline(ctx, calls)
+				cut = context.WithValue(cut, stepDeadlineKey{}, calls)
 				why = fmt.Sprintf("agentflow: step %q ran out of the time of the call its run is in, at %s", n.ID, calls.Format(time.RFC3339))
 			case n.Kind == Agent && !strings.HasPrefix(call.ID, reserved) && !st.due().IsZero():
 				cut, stop = context.WithDeadline(ctx, st.due())

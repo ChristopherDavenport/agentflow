@@ -7,12 +7,25 @@ GOVULNCHECK ?= $(GO) run golang.org/x/vuln/cmd/govulncheck@latest
 build:
 	$(GO) build ./...
 
-# go list -deps without -test leaves the test dependencies out.
+# Each package builds from its own list: the root from the loop's
+# libraries, script with agentworkspace added, workflow with agentskill
+# and yaml added. agentturn/session is a module of its own, and no
+# package's. go list -deps without -test leaves the test dependencies out.
+OURS := github.com/ChristopherDavenport
+ROOT_DEPS := agentflow|agentpolicy|agenttool|agentturn|openresponses
+
 deps:
-	@deps=$$($(GO) list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./... \
-	  | grep -v '^go.yaml.in/yaml/v3$$' \
-	  | grep -Ev '^github.com/ChristopherDavenport/(agentflow|agentpolicy|agentskill|agenttool|agentturn|agentworkspace|openresponses)(/|$$)' || true); \
-	  test -z "$$deps" || { echo "module depends on: $$deps"; exit 1; }
+	@fail=0; \
+	check() { \
+	  deps=$$($(GO) list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' "$$1" \
+	    | awk -v allow="^($$2)(/|$$)" '$$0 ~ "^$(OURS)/agentturn/session(/|$$)" || $$0 !~ allow'); \
+	  test -z "$$deps" || { echo "$$1 depends on:"; echo "$$deps"; fail=1; }; \
+	}; \
+	check . '$(OURS)/($(ROOT_DEPS))'; \
+	check ./script '$(OURS)/($(ROOT_DEPS)|agentworkspace)'; \
+	check ./workflow '$(OURS)/($(ROOT_DEPS)|agentskill)|go.yaml.in/yaml/v3'; \
+	check ./examples '$(OURS)/($(ROOT_DEPS))'; \
+	exit $$fail
 
 test:
 	$(GO) test -race ./...

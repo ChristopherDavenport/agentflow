@@ -478,6 +478,9 @@ type frame struct {
 	// then: what the run reads as afterwards, whatever starts next.
 	counted          bool
 	entries, granted int
+	// jumped says an operator's jump makes the next entry, which no person
+	// paced: it counts, and is held to every bound.
+	jumped bool
 }
 
 // abortPlan is an abandon under way.
@@ -715,6 +718,8 @@ func (r *replay) message(i int, m *openresponses.Message) {
 func (r *replay) invoke(i int, inputs any, left bool, why string) {
 	next := r.newRoot(inputs)
 	next.st.Left = left
+	// An override asked of the runs this abandons is asked of nothing now.
+	r.request = nil
 	r.abandon(i, nil, next, why)
 }
 
@@ -768,7 +773,8 @@ func (r *replay) advance(i int) {
 	}
 	r.abort = nil
 	if p.next != nil {
-		r.stack, r.entries, r.orphaned = nil, 0, false
+		// The next run's tree counts its own steps, and is granted its own.
+		r.stack, r.entries, r.granted, r.orphaned = nil, 0, 0, false
 		r.root = p.next
 	}
 }
@@ -850,7 +856,11 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 	c := r.calls[out.CallID]
 	if c != nil && c.Name == shownTool && strings.HasPrefix(c.CallID, reserved) {
 		// A result is shown however the call went: it is a view, and the
-		// record holds the whole result either way.
+		// record holds the whole result either way. One the gate turned
+		// away was not the program's, and shows nothing.
+		if turnedAway(out, shownRefusal) {
+			return
+		}
 		r.unshown = slices.DeleteFunc(r.unshown, func(u unshown) bool { return u.id() == out.CallID })
 		return
 	}
@@ -1208,10 +1218,11 @@ func cmpDepth(d int) int {
 }
 
 // ended reads a flow_end. An ending counts however the call went: it is
-// what was found, and asking again would not make it more so.
+// what was found, and asking again would not make it more so. One the
+// gate turned away was not the program's, and ends nothing.
 func (r *replay) ended(i int, c *openresponses.FunctionCall, out *openresponses.FunctionCallOutput) {
 	f := r.top()
-	if !f.st.Started || f.ending != nil || out.CallID != f.st.endID() {
+	if !f.st.Started || f.ending != nil || out.CallID != f.st.endID() || turnedAway(out, endRefusal) {
 		return
 	}
 	var e Ending
@@ -1397,7 +1408,8 @@ func (r *replay) enter(f *frame, i int, n *Node) {
 	st := &f.st
 	// A visit a person paced is held to no bound, the tree's steps
 	// included. Every other visit is counted as any step's is.
-	paced := f.pacedEntry(n)
+	paced := !f.jumped && f.pacedEntry(n)
+	f.jumped = false
 	st.Node = n
 	f.visits[n.ID]++
 	if paced {

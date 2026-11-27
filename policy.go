@@ -110,8 +110,10 @@ func rules(list []PolicyRule) ([]agentpolicy.Rule, error) {
 // resolved is the policy with every rule from data made the rules its
 // values give, read from st's record: one for each path or command. A
 // policy with none is itself. A value that is no string or list of them,
-// a path that is not clean and below the workspace's root, or a command
-// the grammar cannot hold, is an error, which fails the step.
+// a path that is not clean and below the workspace's root or that the
+// grammar would read as a pattern, or a command the grammar cannot hold,
+// is an error, which fails the step. A command is the grammar's pattern,
+// wildcards and all.
 func (p *Policy) resolved(st State) (*Policy, error) {
 	if !p.fromData() {
 		return p, nil
@@ -153,6 +155,12 @@ func (p *Policy) resolved(st State) (*Policy, error) {
 			for _, spec := range specs {
 				if what == "path" && (!cleanPath(spec) || spec == ".") {
 					return nil, fmt.Errorf("rule %s: path %q: want a clean path below the workspace's root", r.Rule, spec)
+				}
+				// A path from data names one file: a specifier the grammar
+				// reads as a pattern or a carve-out would widen what whoever
+				// wrote the value was given to name.
+				if what == "path" && (strings.Contains(spec, "*") || strings.HasPrefix(spec, "!")) {
+					return nil, fmt.Errorf("rule %s: path %q: want one path, not a pattern", r.Rule, spec)
 				}
 				rule := r.Rule + "(" + spec + ")"
 				if parsed, err := agentpolicy.ParseRules(rule); err != nil || len(parsed) != 1 || parsed[0].Tool != r.Rule {

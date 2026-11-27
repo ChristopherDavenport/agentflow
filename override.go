@@ -119,8 +119,18 @@ func (r *replay) target(o Override) (*frame, error) {
 		if _, err := f.st.resolveAll(n.With); err != nil {
 			return nil, fmt.Errorf("step %q cannot run from here: %w", o.Step, err)
 		}
+		// Its choices, its question's text, its files, its directory and
+		// the rules it takes from data are read from the record as well.
+		values := append(n.questionValues(), n.Policy.dataValues()...)
+		values = append(values, n.Files...)
 		if c := n.Choices; c != nil {
-			if _, _, err := f.st.resolve(c.From); err != nil {
+			values = append(values, c.From)
+		}
+		if n.Dir.set() {
+			values = append(values, n.Dir)
+		}
+		for _, v := range values {
+			if _, _, err := f.st.resolve(v); err != nil {
 				return nil, fmt.Errorf("step %q cannot run from here: %w", o.Step, err)
 			}
 		}
@@ -173,6 +183,7 @@ func (r *replay) overridden(i int, c *openresponses.FunctionCall, out *openrespo
 	st.Callee, st.Returned, st.calleeInputs = "", nil, nil
 	st.clocked, st.Deadline, st.asked, st.filed, st.timedOut = false, time.Time{}, 0, false, false
 	if o.Action == OverrideJump {
+		f.jumped = true
 		r.enter(f, i, st.g.node(o.Step))
 	} else {
 		r.bounds(f)

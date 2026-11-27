@@ -221,8 +221,37 @@ func (f *flow) wants(st State) bool {
 	return st.Held != nil || f.mode(st) == Advise || f.mode(st) == Decide
 }
 
-// judging says the program's next call has a judge look, in a child.
-func (f *flow) judging(st State) bool { return f.wants(st) }
+// judging says the program's next call has a judge look, in a child. A
+// question the host's rules answer is not judged: the rules come first,
+// and a look nobody reads would be a child run and its steps spent.
+func (f *flow) judging(ctx context.Context, st State) bool {
+	return f.wants(st) && !(st.Held == nil && f.ruled(ctx, st))
+}
+
+// ruled says the host's rules answer st's question as it would be put
+// now. The rules are asked again when the question is put, and that
+// answer is the one taken: one they no longer give leaves the question
+// to whoever is next, unjudged.
+func (f *flow) ruled(ctx context.Context, st State) bool {
+	if f.reply == nil {
+		return false
+	}
+	name, args, err := f.call(st)
+	if err != nil || name != askTool {
+		return false
+	}
+	// The rules read the question as its call will hold it.
+	enc, err := json.Marshal(args)
+	if err != nil {
+		return false
+	}
+	var q Question
+	if err := json.Unmarshal(enc, &q); err != nil {
+		return false
+	}
+	res, ok := f.reply(ctx, q)
+	return ok && validAnswer(st.Node, q, res) == nil
+}
 
 // judgeCall is the call that has a judge look at st's question in a
 // child: the question's inputs, and nothing of the answer a person may
