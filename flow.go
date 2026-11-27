@@ -1290,32 +1290,41 @@ func (f *flow) endTool() agenttool.Tool {
 	}, agenttool.WithReplay(safeReplay))
 }
 
-// withoutHidden keeps from the model flow_start, which holds the whole
-// definition, a judge's criteria among it, a judge's look at an answer it
-// judged unseen, and a result a flow_shown shows in its place.
-func withoutHidden(t openresponses.Items) openresponses.Items {
-	dropped := map[string]bool{}
-	shown := veiled(t)
-	var out openresponses.Items
+// hiddenCalls are the IDs of the calls in t no working model may read:
+// flow_start, which holds the whole definition, a judge's criteria among
+// it, the program's clock, a judge's look at an answer it judged unseen,
+// and a result a flow_shown shows in its place.
+func hiddenCalls(t openresponses.Items) map[string]bool {
+	out := maps.Clone(veiled(t))
 	for _, item := range t {
-		switch it := item.(type) {
-		case *openresponses.FunctionCall:
-			if hidden(it) || shown[it.CallID] {
-				dropped[it.CallID] = true
-				continue
+		if c, ok := item.(*openresponses.FunctionCall); ok && hidden(c) {
+			if out == nil {
+				out = map[string]bool{}
 			}
-		case *openresponses.FunctionCallOutput:
-			if dropped[it.CallID] {
-				continue
-			}
+			out[c.CallID] = true
 		}
-		out = append(out, item)
-	}
-	if len(dropped) == 0 {
-		return t
 	}
 	return out
 }
+
+// without is t with neither the calls ids names nor their outputs.
+func without(t openresponses.Items, ids map[string]bool) openresponses.Items {
+	if len(ids) == 0 {
+		return t
+	}
+	return slices.DeleteFunc(slices.Clone(t), func(item openresponses.Item) bool {
+		switch it := item.(type) {
+		case *openresponses.FunctionCall:
+			return ids[it.CallID]
+		case *openresponses.FunctionCallOutput:
+			return ids[it.CallID]
+		}
+		return false
+	})
+}
+
+// withoutHidden is t as a working model may read it.
+func withoutHidden(t openresponses.Items) openresponses.Items { return without(t, hiddenCalls(t)) }
 
 // hidden says no working model may read c.
 func hidden(c *openresponses.FunctionCall) bool {

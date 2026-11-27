@@ -3,9 +3,9 @@ package agentflow
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -110,67 +110,26 @@ func (f *flow) read(ctx context.Context, local agentturn.Transcript) (State, age
 
 // visible drops from input what no model may read: flow_start, a
 // judge's look at an answer a person gave, which it judged unseen, and a
-// result a model sees only as its step's show says.
+// result a model sees only as its step's show says. The input is a view,
+// so what is hidden is read from the record, and for a seeded child from
+// what its session opened with, by call.
 func (f *flow) visible(ctx context.Context, input openresponses.Items, record agentturn.Transcript, st State) (openresponses.Items, error) {
 	if f.history == nil {
 		return withoutHidden(input), nil
 	}
-	// A seeded child's input opens with what its caller's session held,
-	// from which its model is kept what the caller's was.
 	before, err := f.prefix(ctx)
 	if err != nil {
 		return nil, err
 	}
-	// The input is a view of the record, so items are known by what they
-	// are rather than where.
 	hidden := map[string]bool{}
-	for _, part := range []agentturn.Transcript{before, record} {
-		shown := map[string]bool{}
-		for _, item := range withoutHidden(openresponses.Items(part)) {
-			shown[itemKey(item)] = true
-		}
-		for _, item := range part {
-			if k := itemKey(item); !shown[k] {
-				hidden[k] = true
-			}
-		}
-	}
+	maps.Copy(hidden, hiddenCalls(openresponses.Items(before)))
+	maps.Copy(hidden, hiddenCalls(openresponses.Items(record)))
 	// A result whose flow_shown is still to be made is not read whole
 	// either.
 	if u := st.show; u != nil {
-		hidden["call "+u.of], hidden["output "+u.of] = true, true
+		hidden[u.of] = true
 	}
-	if len(hidden) == 0 {
-		return input, nil
-	}
-	out := make(openresponses.Items, 0, len(input))
-	for _, item := range input {
-		if !hidden[itemKey(item)] {
-			out = append(out, item)
-		}
-	}
-	return out, nil
-}
-
-// itemKey names an item the same wherever it is read from.
-func itemKey(item openresponses.Item) string {
-	switch it := item.(type) {
-	case *openresponses.FunctionCall:
-		return "call " + it.CallID
-	case *openresponses.FunctionCallOutput:
-		return "output " + it.CallID
-	case *openresponses.Message:
-		if it.ID != "" {
-			return "message " + it.ID
-		}
-		return "said " + string(it.Role) + " " + it.Text()
-	case *openresponses.ReasoningItem:
-		if it.ID != "" {
-			return "reasoning " + it.ID
-		}
-	}
-	b, _ := json.Marshal(item)
-	return item.ItemType() + " " + string(b)
+	return without(input, hidden), nil
 }
 
 // transform runs the host's, which is given only what a model may read,
@@ -187,23 +146,11 @@ func (f *flow) transform(host func(context.Context, agentturn.Transcript) (agent
 		if err != nil {
 			return nil, err
 		}
-		if u := st.show; u != nil {
-			// Between a result a model sees only in part and the
-			// flow_shown that shows it, the program's turn comes first.
-			// The folds in force still apply, so the
-			// request is one the record rebuilds, and the whole result is
-			// left out of what the host is given, so no summary takes it
-			// in.
-			view = slices.DeleteFunc(slices.Clone(view), func(item openresponses.Item) bool {
-				switch it := item.(type) {
-				case *openresponses.FunctionCall:
-					return it.CallID == u.of
-				case *openresponses.FunctionCallOutput:
-					return it.CallID == u.of
-				}
-				return false
-			})
-		}
+		// Between a result a model sees only in part and the flow_shown
+		// that shows it, the program's turn comes first. The folds in
+		// force still apply, so the request is one the record rebuilds,
+		// and the whole result is out of the view the host is given, so
+		// no summary takes it in.
 		return host(ctx, agentturn.Transcript(view))
 	}
 }
@@ -227,16 +174,7 @@ func (f *flow) transform(host func(context.Context, agentturn.Transcript) (agent
 // and its hash.
 func SummaryFilter(t agentturn.Transcript) agentturn.Transcript {
 	items := agentturn.DefaultFilter(t)
-	shown := veiled(openresponses.Items(items))
-	items = slices.DeleteFunc(slices.Clone(items), func(item openresponses.Item) bool {
-		switch it := item.(type) {
-		case *openresponses.FunctionCall:
-			return shown[it.CallID]
-		case *openresponses.FunctionCallOutput:
-			return shown[it.CallID]
-		}
-		return false
-	})
+	items = agentturn.Transcript(without(openresponses.Items(items), veiled(openresponses.Items(items))))
 	outputs := map[string]string{}
 	others := map[string]bool{}
 	for _, item := range items {
