@@ -71,7 +71,9 @@ and decide nothing.
 - `flow: <name>` follows the workflow of the skill of that name, or of
   the file `./<path>.md` of this skill, in the same way, with `with` as
   its inputs. Its outcome is the step's, `failed` if it fails, and its
-  outputs are the step's data.
+  outputs are the step's data. A `dir` on the call is where the whole
+  called workflow works: every script of it runs there, `cd` into it
+  first, and every step of it reads and edits there.
 
 **`id[label]`, your step.** Its prose is your instructions and `with`
 is what you are handed. First read the `files`, the `instructions` file
@@ -93,18 +95,22 @@ and the skills under `skills` it names.
   to a separate agent given only those, do; otherwise do it yourself,
   from those alone. Never skip it. Steps with the same `child` go to the
   same agent.
-- **Stuck.** If you cannot do the step, do not make up a way round:
-  end it with the outcome `stuck` and data `{"reason": ...}`. Take its
-  `stuck` edge if the diagram draws one; if it draws none, the step has
-  failed.
+- **Stuck.** Do what the prose asks with the tools the step gives, and
+  no more. When that cannot succeed, such as a failure whose cause lies
+  outside what the step may change, end it at once with the outcome
+  `stuck` and data `{"reason": ...}`. Do not look further, try another
+  way or ask the person: a failure is the workflow's to route, and only
+  a question step asks. Take its `stuck` edge if the diagram draws one;
+  if it draws none, the step has failed.
 
 **`id([label])`, a question for the person.** Ask them its prose with
 `with` beside it, and offer its outcomes, each with what it needs: the
 data its `outputs` require, or the words `text` takes. `choices` are
 what they pick from; `text` names the outcome that takes their own
 words. Wait for the answer, and never give it yourself. `unattended` is
-the answer only when nobody can be asked. A `judge` changes nothing
-here: the person answers.
+the answer only when nobody can be asked, and while you are talking with
+a person, somebody can: ask them. A `judge` changes nothing here: the
+person answers.
 
 ## Values
 
