@@ -8,11 +8,9 @@
 package workflow
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"reflect"
 	"regexp"
@@ -202,21 +200,22 @@ type settings struct {
 	OnTimeout yaml.Node `yaml:"on_timeout"`
 }
 
-// strict decodes one YAML document, refusing keys it does not know.
+// strict decodes one YAML document, refusing keys it does not know. The
+// document is parsed once: knownKeys holds its keys to v's fields, and v
+// is decoded from the same nodes.
 func strict(src []byte, v any) error {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(src, &doc); err != nil {
 		return err
 	}
+	if doc.Kind == 0 {
+		// Nothing but comments or space: no settings.
+		return nil
+	}
 	if err := knownKeys(&doc, reflect.TypeOf(v)); err != nil {
 		return err
 	}
-	d := yaml.NewDecoder(bytes.NewReader(src))
-	d.KnownFields(true)
-	if err := d.Decode(v); err != nil && !errors.Is(err, io.EOF) {
-		return err
-	}
-	return nil
+	return doc.Decode(v)
 }
 
 // Parse reads a WORKFLOW.md as the workflow called name. The graph it
