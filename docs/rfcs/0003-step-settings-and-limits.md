@@ -54,7 +54,10 @@ timeout: 10m
   works on an attempt, the program calls `flow_clock` with
   `{run, step, timeout}` (ID `…_v<n>-clock`). Its result,
   `{"deadline": "<RFC 3339>"}`, is what the attempt is held to. Replay
-  reads the deadline from that result and never from the clock.
+  reads the deadline from that result and never from the clock. No
+  working model is sent a `flow_clock` call, as none is sent
+  `flow_start`, left out as an omission that keeps the request hash: in
+  a live trial a model that was sent one took it for a call of its own.
 - **Reaching the deadline:**
   - The model's stream is cut off at the deadline. It ends in
     `ErrStepTimeout`, which agentturn does not retry, and `Drive`

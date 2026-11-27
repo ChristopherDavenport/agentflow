@@ -626,3 +626,30 @@ func literalDir(p string) Value {
 	}
 	return Literal(p)
 }
+
+// The deadline a model step works to is the program's, read from its
+// flow_clock call: the model is not sent that call, which it took for
+// one of its own in a live trial.
+func TestAModelIsNotSentTheClock(t *testing.T) {
+	g := &Graph{Name: "think", Nodes: []Node{{ID: "work", Kind: Agent, Prompt: "Work.", Timeout: time.Minute}}}
+	m := &fakeModel{outcomes: []string{OK}}
+	a := nestedAgent(t, g, m, nil)
+	if end := start(t, a); end.Reason != agentturn.ReasonDone {
+		t.Fatalf("end = %s %v", end.Reason, end.Err)
+	}
+	clocked := false
+	for _, item := range a.State().Transcript {
+		if c, ok := item.(*openresponses.FunctionCall); ok && c.Name == clockTool {
+			clocked = true
+		}
+	}
+	if !clocked || len(m.requests) == 0 {
+		t.Fatalf("clocked %v, %d requests", clocked, len(m.requests))
+	}
+	for _, r := range m.requests {
+		b, _ := json.Marshal(r.Input)
+		if strings.Contains(string(b), clockTool) {
+			t.Errorf("a model was sent the clock: %s", b)
+		}
+	}
+}

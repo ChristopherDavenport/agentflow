@@ -1320,7 +1320,10 @@ func hidden(c *openresponses.FunctionCall) bool {
 	if !strings.HasPrefix(c.CallID, reserved) {
 		return false
 	}
-	if c.Name == startTool {
+	// flow_start holds the definition; flow_clock holds only the
+	// program's deadline, and a model that reads it takes it for a call
+	// of its own.
+	if c.Name == startTool || c.Name == clockTool {
 		return true
 	}
 	var a callArgs
