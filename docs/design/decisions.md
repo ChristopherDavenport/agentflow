@@ -122,20 +122,16 @@ reader takes it for the person's.
 **One reminder.** A model that stops again is `ErrStalled`; a person, if
 there is one, is better placed to say what is wrong.
 
-**Another model defaults to a fresh context.** A model reading a
-conversation another model wrote does not get that model's reasoning,
-which a request leaves out for any other model, and takes the earlier
-turns for its own. It is decided from the definition alone, never from
-the host's config, so position stays a function of the definitions and
-the record. The same holds for a call that names another model, and
-either may say `context: session` and read the conversation anyway.
-
-**Whose reasoning a request carries is the loop's to say, not the
-workflow's.** The loop already leaves out of a request the reasoning
-another model wrote, item by item, and its session records that. A child
-asked as another model is therefore opened under that model's name and
-nothing more: the workflow keeps no rule of its own, which could only be
-coarser, a whole inherited conversation with or without reasoning.
+**An inherited session keeps its model.** A step or a call on another
+model is fresh, and saying `context: session` with it is a load error,
+not a choice. Reasoning is signed for the model that wrote it, so
+another model cannot be sent it, and a conversation one model wrote is a
+poor opening for another: it reads the earlier turns as its own, without
+what was thought behind them. The loop can leave another model's
+reasoning out item by item, but that keeps the worse half. It is decided
+from the definitions alone, never from the host's config, so position
+stays a function of the definitions and the record; the cost is that a
+model named against a workflow with none is always another.
 
 **`SummaryFilter` keeps the workflow's own messages out of summaries and
 says whose each call was.** A summarizer cannot tell a call the program

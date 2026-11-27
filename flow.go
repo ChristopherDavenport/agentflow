@@ -284,6 +284,13 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 	}
 
 	cfg.Model = f
+	// The session is asked as its workflow's model where the workflow
+	// names one, and every step that stays in it is asked as that. The
+	// loop tells whose reasoning a request may carry by the config's
+	// name, so the config is given the name the steps are asked as.
+	if g.Model != "" {
+		cfg.ModelName = g.Model
+	}
 	f.due = &deadline{}
 	if transform := cfg.Transform; transform != nil {
 		// What a transform returns is a view, and position is not read
