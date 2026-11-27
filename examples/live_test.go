@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
@@ -388,19 +389,42 @@ func TestLiveNesting(t *testing.T) {
 			t.Fatal(err)
 		}
 		tools := []agenttool.Tool{prep.tool(), report.tool(), gate.tool()}
-		cfg, err := agentflow.Apply(outer, l.base(m, tools...), agentflow.Unattended())
+		// Each call runs in a child that opens with its caller's context:
+		// a fork of the caller's session, on a recorded host.
+		h := newRecordedHost(t, m, l.name, localWorkspace(t), func(agentworkspace.Workspace) []agenttool.Tool { return tools })
+		opts := []agentflow.Option{agentflow.Children(h.open), h.history(h.id), agentflow.Unattended()}
+		cfg, err := agentflow.Apply(outer, l.base(m, tools...), opts...)
 		if err != nil {
 			t.Fatal(err)
 		}
 		a := agentturn.New(cfg)
-		end, st, err := runLive(t, outer, a, map[string]any{"n": n}, nil, agentflow.Unattended())
+		h.rec.Attach(a)
+		end, st, err := runLive(t, outer, a, map[string]any{"n": n}, nil, opts...)
 		if err != nil || end.Reason != agentturn.ReasonDone {
 			s.check(false, "end %v: %v", end.Reason, err)
 			continue
 		}
-		tr := a.State().Transcript
-		tree := treeOf(t, tr, nil)
-		made, refused := finishes(tr)
+		sessions := h.sessions(t)
+		tree := treeOf(t, pathOf(sessions["root"]), h.openSpawn(t))
+		made, refused, checked, inherited := 0, 0, 0, 0
+		var bad []string
+		for spawn, sess := range sessions {
+			mk, rf := finishes(pathOf(sess))
+			made, refused = made+mk, refused+rf
+			c, b := hashes(t, sess)
+			checked, bad = checked+c, append(bad, b...)
+			if spawn != "root" && len(prefixOf(sess)) > 0 {
+				inherited++
+			}
+		}
+		seeded := 0
+		for _, c := range h.opened {
+			if c.Seeded {
+				seeded++
+			}
+		}
+		s.check(len(bad) == 0, "wrong hashes: %v", bad)
+		s.check(seeded == len(h.opened) && inherited == len(sessions)-1, "%d of %d children opened seeded, %d of %d sessions inherited a prefix", seeded, len(h.opened), inherited, len(sessions)-1)
 		want := "odd"
 		if n%2 == 0 {
 			want = "even"
@@ -420,9 +444,139 @@ func TestLiveNesting(t *testing.T) {
 		if len(s.notes) == before {
 			s.ok++
 		}
-		t.Logf("trial %d (n=%d, fail=%v): path %v tree %v finishes %d refused %d", i, n, fail, steps(st), tree, made, refused)
+		t.Logf("trial %d (n=%d, fail=%v): path %v tree %v finishes %d refused %d, %d sessions, %d hashes checked", i, n, fail, steps(st), tree, made, refused, len(sessions), checked)
 	}
 	s.report("nesting", l.trials)
+}
+
+// --- 1b. What a callee knows of its caller's context ----------------
+
+// keeperFlow has a model read a word no step's outputs carry, then calls
+// a workflow that is asked for it and given nothing. %s is the call's
+// context line.
+const keeperFlow = "```mermaid\nflowchart TD\n  learn[learn] --> ask[[ask]]\n  ask -->|ok| report[[report]]\n```\n\n" +
+	"## learn\n```yaml\ntools: [read_file]\noutputs:\n  ok:\n    read: {type: string, enum: [\"yes\"], required: true}\n```\n" +
+	"Read the file secret.txt with read_file, then finish with read yes. Do not repeat the file's text anywhere: not in your data and not in a reason.\n\n" +
+	"## ask\n```yaml\nflow: teller\n%s```\n\n" +
+	"## report\n```yaml\ntool: report\nwith:\n  word: ${{ steps.ask.outputs.word }}\n```\n"
+
+const tellerFlow = "---\noutputs:\n  word: ${{ steps.tell.outputs.word }}\n---\n" +
+	"```mermaid\nflowchart TD\n  tell[tell]\n```\n\n" +
+	"## tell\n```yaml\noutputs:\n  ok:\n    word: {type: string, required: true}\n```\n" +
+	"A file named secret.txt holds one word. You have no tools and cannot read it now. If what you can see above tells you the word, give it as data word. If nothing you can see tells you, give the word UNKNOWN. Do not guess.\n"
+
+// nonce is a word no model has seen, new each time.
+func nonce() string {
+	const syl = "bakodulimerovatunixepazo"
+	b := make([]byte, 0, 8)
+	for range 4 {
+		k := 2 * rand.IntN(len(syl)/2)
+		b = append(b, syl[k:k+2]...)
+	}
+	return string(b) + strconv.Itoa(100+rand.IntN(900))
+}
+
+func TestLiveCallerContext(t *testing.T) {
+	l := live(t)
+	for _, tc := range []struct {
+		name, line string
+		seeded     bool
+	}{
+		{"session", "", true},
+		{"fresh", "context: fresh\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &tally{t: t}
+			told, in, out := 0, 0, 0
+			for i := range l.trials {
+				s.trial = i
+				m := l.meter(t)
+				word := nonce()
+				ws := localWorkspace(t)
+				if err := os.WriteFile(filepath.Join(ws.Root(), "secret.txt"), []byte(word+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				report := &recorder{name: "report"}
+				g := parse(t, "keeper", fmt.Sprintf(keeperFlow, tc.line))
+				if err := g.Link(parse(t, "teller", tellerFlow)); err != nil {
+					t.Fatal(err)
+				}
+				tools := func(ws agentworkspace.Workspace) []agenttool.Tool { return append(fileTools(ws), report.tool()) }
+				h := newRecordedHost(t, m, l.name, ws, tools)
+				opts := []agentflow.Option{agentflow.Children(h.open), h.history(h.id), agentflow.Unattended()}
+				cfg, err := agentflow.Apply(g, l.base(m, tools(ws)...), opts...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				a := agentturn.New(cfg)
+				h.rec.Attach(a)
+				end, st, err := runLive(t, g, a, nil, nil, opts...)
+				m.mu.Lock()
+				in, out = in+m.in, out+m.out
+				m.mu.Unlock()
+				if err != nil || end.Reason != agentturn.ReasonDone {
+					s.check(false, "end %v: %v", end.Reason, err)
+					continue
+				}
+				before := len(s.notes)
+				var said string
+				if len(report.got) == 1 {
+					said = strings.TrimSpace(fmt.Sprint(report.got[0]["word"]))
+				}
+				knew := strings.EqualFold(said, word)
+				if knew {
+					told++
+				}
+				sessions := h.sessions(t)
+				root := pathOf(sessions["root"])
+				s.check(slices.Equal(steps(st), []string{"learn:ok", "ask:ok", "report:ok"}), "path %v", steps(st))
+				s.check(len(h.opened) == 1 && h.opened[0].Seeded == tc.seeded, "opened %d children, seeded %v, want one seeded %v", len(h.opened), len(h.opened) > 0 && h.opened[0].Seeded, tc.seeded)
+				// The caller's record holds its own step's finish and the
+				// call with its result, and nothing the callee did on the way.
+				rootMade, _ := finishes(root)
+				s.check(rootMade == 1, "the caller's session holds %d finishes, want its own one", rootMade)
+				s.check(len(sessions) == 2, "%d sessions, want the caller's and the callee's", len(sessions))
+				checked, childMade, inherited := 0, 0, false
+				var bad []string
+				for spawn, sess := range sessions {
+					c, b := hashes(t, sess)
+					checked, bad = checked+c, append(bad, b...)
+					if spawn == "root" {
+						continue
+					}
+					childMade, _ = finishes(pathOf(sess))
+					for _, item := range prefixOf(sess) {
+						if out, ok := item.(*openresponses.FunctionCallOutput); ok && strings.Contains(out.Output.String(), word) {
+							inherited = true
+						}
+					}
+					s.check((len(prefixOf(sess)) > 0) == tc.seeded, "the callee's session opened with %d items", len(prefixOf(sess)))
+					for _, item := range pathOf(sess) {
+						if call, ok := item.(*openresponses.FunctionCall); ok && call.Name == "read_file" {
+							s.check(false, "the callee read the file itself")
+						}
+					}
+				}
+				s.check(childMade == 1, "the callee's session holds %d finishes, want one", childMade)
+				s.check(inherited == tc.seeded, "the callee's session opened with the file's text: %v", inherited)
+				s.check(len(bad) == 0, "wrong hashes: %v", bad)
+				// A callee that opens with nothing must never have the word,
+				// whatever else the trial did.
+				if !tc.seeded && knew {
+					t.Errorf("trial %d: a fresh callee reported %q, which only its caller's context held", i, word)
+				}
+				if tc.seeded {
+					s.check(knew, "the callee said %q, want %q from its caller's context", said, word)
+				}
+				if len(s.notes) == before {
+					s.ok++
+				}
+				t.Logf("trial %d (%s): path %v callee said %q, knew %v, %d hashes checked, %d requests", i, word, steps(st), said, knew, checked, len(m.requests()))
+			}
+			t.Logf("%s: the callee had the word in %d of %d trials; %d tokens in, %d out", tc.name, told, l.trials, in, out)
+			s.report("caller context, "+tc.name, l.trials)
+		})
+	}
 }
 
 // --- Recorded hosts ------------------------------------------------
@@ -914,11 +1068,18 @@ func TestLiveLimits(t *testing.T) {
 			t.Fatal(err)
 		}
 		a := agentturn.New(cfg)
-		answered, limits := 0, 0
+		answered, limits, retries := 0, 0, 0
 		end, st, err := runLive(t, g, a, nil, func(q agentflow.Question) (agentflow.Result, bool) {
 			if q.Limit != "" {
 				limits++
 				return agentflow.Result{Outcome: "stop"}, true
+			}
+			if q.Retry {
+				// A step the model failed is run again: the trial is of
+				// the loop's pace, not of one request.
+				retries++
+				t.Logf("step %q failed and is retried: %s", q.Step, q.Question)
+				return agentflow.Result{Outcome: "retry"}, retries <= 3
 			}
 			answered++
 			if answered < 7 {
@@ -932,7 +1093,7 @@ func TestLiveLimits(t *testing.T) {
 				drafts++
 			}
 		}
-		t.Logf("end %v %v; %d drafts, %d answers, %d limit questions, paced %d", end.Reason, err, drafts, answered, limits, st.Paced)
+		t.Logf("end %v %v; %d drafts, %d answers, %d limit questions, %d retries, paced %d", end.Reason, err, drafts, answered, limits, retries, st.Paced)
 		if err != nil || drafts != 7 || limits != 0 || !st.Done {
 			t.Errorf("want 7 drafts past the default bound of 5 and no limit question")
 		}

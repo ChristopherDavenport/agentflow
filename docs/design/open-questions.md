@@ -119,9 +119,12 @@ Each of these is tested with scripted models only.
 - The quoting of reasons in what a summarizer is given.
 - A model step that uses tools over many turns, and a prompt that
   competes with the instruction to finish.
-- A call whose child opens with its caller's view: what a callee's model
-  makes of an inherited conversation, and of the caller's earlier steps
-  in it.
+- A call whose child opens with its caller's view, beyond one fact. A
+  callee's model reports a word its caller's step read from a file and
+  no output carries, and a fresh callee cannot. What a callee makes of a
+  long inherited conversation, of many earlier steps, of a caller's
+  folded context, or of what a callee two calls deep inherits, is not
+  tried.
 
 Forked child sessions are tested on agentturn/session's memory and jsonl
 stores only, not on sqlite or cas, and not through its retry path.
