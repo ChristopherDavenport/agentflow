@@ -307,16 +307,18 @@ func TestAPolicyLimitsAStepsTools(t *testing.T) {
 	for i, want := range []string{
 		`the policy of step "edit" of edit: denied by write(src/gen/*): generated; run go generate`,
 		`denied by read(.env)`,
-		`no rule allows bash: denied by default`,
+		// A call outside the step's allow-list names that list, the rule
+		// that refused it. A live trial found only "denied by default".
+		`no rule allows bash: denied by default on "git push"`,
 		`denied by bash(go test -exec:*)`,
-		`no rule allows write: denied by default`,
+		`no rule allows write: denied by default; it allows only calls matching read, write(src/*), bash(go test:*)`,
 		`could not be evaluated: a substitution cannot be read`,
 	} {
 		if i >= len(got) || !strings.Contains(got[i], want) {
 			t.Errorf("refusal %d = %q, want %q", i, got[min(i, len(got)-1)], want)
 		}
 	}
-	if len(got) != 6 {
+	if len(got) != 6 || !strings.HasSuffix(got[2], "; it allows only calls matching read, write(src/*), bash(go test:*)") {
 		t.Errorf("refusals = %q", got)
 	}
 	// The model was told its limits before it tried, notes and all.

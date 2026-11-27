@@ -187,8 +187,12 @@ policy:
 - **A refusal is the gate's block, and names the rule** in agentpolicy's
   words, after where it was set: `agentflow: step "build" refuses this
   call: the policy of step "build" of release: denied by
-  edit(src/gen/*): generated; run go generate`, or `…: no rule allows
-  bash: denied by default`. The model reads it and can go on.
+  edit(src/gen/*): generated; run go generate`. A call no rule matches,
+  outside a step's `allow`, is refused naming that list, the rule that
+  refused it: `…: no rule allows write_file: denied by default; it
+  allows only calls matching write_file(out/ok.txt)`. A live trial found
+  the bare "denied by default", which named nothing. The model reads it
+  and can go on.
 - **Children** take the policies of the calls and steps they are nested
   in (`Child` carries them), and add their own step's policy. This covers
   fresh steps, fresh calls, kept children and judges. A child's engines

@@ -440,11 +440,32 @@ func (f *flow) police(ctx context.Context, st State, info agentturn.ToolCallInfo
 		switch {
 		case err != nil:
 			return fmt.Sprintf("the policy of %s cannot decide this call: %v", r.from, err)
+		case v.Action != agentturn.Allow && v.Rule == nil && r.policy.Allow != nil:
+			// No rule fired: the call is outside what the step allows,
+			// which is the rule to name.
+			return fmt.Sprintf("the policy of %s: %s; it allows only calls matching %s", r.from, v.Reason, citeRules(r.policy.Allow))
 		case v.Action != agentturn.Allow:
 			return fmt.Sprintf("the policy of %s: %s", r.from, v.Reason)
 		}
 	}
 	return ""
+}
+
+// citeRules writes rules as the model is told them, each with its note.
+func citeRules(list []PolicyRule) string {
+	var out []string
+	for _, r := range list {
+		parsed, err := rules([]PolicyRule{r})
+		if err != nil {
+			continue
+		}
+		s := parsed[0].String()
+		if r.Note != "" {
+			s += " (" + r.Note + ")"
+		}
+		out = append(out, s)
+	}
+	return strings.Join(out, ", ")
 }
 
 // describe says what the policies in force allow, for the step's
@@ -453,21 +474,7 @@ func describe(policies []ruled) string {
 	if len(policies) == 0 {
 		return ""
 	}
-	cite := func(list []PolicyRule) string {
-		var out []string
-		for _, r := range list {
-			parsed, err := rules([]PolicyRule{r})
-			if err != nil {
-				continue
-			}
-			s := parsed[0].String()
-			if r.Note != "" {
-				s += " (" + r.Note + ")"
-			}
-			out = append(out, s)
-		}
-		return strings.Join(out, ", ")
-	}
+	cite := citeRules
 	var lines []string
 	for _, r := range policies {
 		if r.err != nil {
