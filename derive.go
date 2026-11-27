@@ -51,8 +51,8 @@ func (n *Node) checkSettings() []error {
 	}
 	call := n.Flow != ""
 	switch {
-	case n.Model != "" && n.Kind != Agent && !(call && (n.fresh() || n.unlinked())):
-		bad("model is a model step's, or a child's")
+	case n.Model != "" && n.Kind != Agent && !call:
+		bad("model is a model step's, or a call's")
 	case n.Thinking != "" && n.Kind != Agent:
 		bad("thinking is a model step's")
 	case n.Thinking != "" && !slices.Contains(thinkingLevels, n.Thinking):
@@ -132,13 +132,14 @@ func (g *Graph) checkKept() []error {
 	return errs
 }
 
-// fresh says the node's work runs in a child: it says context fresh, or
-// it is a model step that asks for another model than its workflow's and
-// does not say context session. The other model would otherwise read a
-// conversation another model wrote, without that model's reasoning.
+// fresh says the node's work begins with nothing of its caller's: it
+// says context fresh, or it is a model step or a call that asks for
+// another model than its workflow's and does not say context session. The
+// other model would otherwise read a conversation another model wrote,
+// without that model's reasoning.
 //
-// A call also runs in a child when the workflow it calls says context
-// fresh of itself, which linking finds.
+// A call is also fresh when the workflow it calls says context fresh of
+// itself, which linking finds.
 func (n *Node) fresh() bool {
 	return n.Context == ContextFresh || n.Context == "" && (n.otherModel || n.call != nil && n.call.g.Context == ContextFresh)
 }
@@ -158,10 +159,6 @@ func (n *Node) childContext() string {
 	}
 	return ContextFresh
 }
-
-// unlinked says n calls a workflow linking has not yet found, so where
-// it runs is not yet known: checks that turn on it wait for the link.
-func (n *Node) unlinked() bool { return n.Flow != "" && n.call == nil }
 
 // inputsOf is the inputs schema and the with of a workflow made from n,
 // which reads n's inputs as its own.
