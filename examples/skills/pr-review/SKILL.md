@@ -138,8 +138,10 @@ the working directory, and say where. It starts empty, from a file of
 this skill (`from`) or from an input (`input`).
 
 - A step reads the ones under its `documents.read`, and changes the
-  ones under `documents.edit` by writing their files. A step asked to
-  write into a document has not ended until it has.
+  ones under `documents.edit` by writing their files. That is the
+  step's to do whatever its `tools` say: they limit what it does to the
+  workspace, not its documents. A step asked to write into a document
+  has not ended until it has.
 - A program step's `documents.write` sets a document's file from a
   member of its result's data.
 - `${{ documents.<name> }}` is the file's text: a question that names
@@ -152,8 +154,11 @@ this skill (`from`) or from an input (`input`).
   step fails, stop and ask the person whether to go on.
 - A program step or your step that runs past its `timeout`, or the
   frontmatter's, has failed.
-- If the person stops the workflow and the frontmatter names
-  `on_abort`, follow the steps from that one to an end first.
+- If the person abandons the run part way, by leaving it rather than
+  by answering a question, and the frontmatter names `on_abort`, follow
+  the steps from that one to an end first. An outcome is never this,
+  whatever its name: `stop`, `drop` or `abort` takes its edge like any
+  other.
 
 A `description` is for people. The other settings, `model`,
 `thinking`, `show`, `hidden`, `on_timeout`, `max_depth` and
