@@ -265,8 +265,16 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 
 	var diagrams []block
 	for _, b := range preamble.blocks {
-		if b.info != nil && *b.info == "mermaid" {
+		if b.info == nil {
+			continue
+		}
+		if *b.info == "mermaid" {
 			diagrams = append(diagrams, b)
+		}
+		// A yaml block here would read as the workflow's settings and be
+		// none: those are the frontmatter.
+		if word, _, _ := strings.Cut(*b.info, " "); word == "yaml" || word == "yml" {
+			return nil, fmt.Errorf("workflow: line %d: a yaml block before the first section sets nothing; the workflow's settings are the frontmatter, and a node's the yaml block that opens its section", b.line)
 		}
 	}
 	if len(diagrams) != 1 {

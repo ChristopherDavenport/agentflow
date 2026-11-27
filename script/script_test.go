@@ -563,3 +563,29 @@ func TestAStepsProgressReachesTheLoop(t *testing.T) {
 		t.Errorf("updates = %q", seen)
 	}
 }
+
+// A step's own timeout is the one its script is held to: the tool's is
+// for a step that sets none.
+func TestAStepsTimeoutOutlastsTheTools(t *testing.T) {
+	g := &agentflow.Graph{Name: "slow", Nodes: []agentflow.Node{
+		{ID: "wait", Kind: agentflow.Run, Script: "wait.sh", Timeout: time.Minute},
+	}}
+	ws := workspace(t, map[string]string{"wait.sh": "sleep 1\necho '{}'"})
+	cfg, err := agentflow.Apply(g, agentturn.Config{Model: &model{}, ModelName: "fake", Tools: []agenttool.Tool{script.New(ws, 200*time.Millisecond)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := agentturn.New(cfg)
+	if end := invoke(t, g, a, nil); end.Reason != agentturn.ReasonDone {
+		t.Fatalf("end = %s %v\n%s", end.Reason, end.Err, strings.Join(transcript(a), "\n"))
+	}
+	// A step that sets none is held to the tool's.
+	g.Nodes[0].Timeout = 0
+	if cfg, err = agentflow.Apply(g, agentturn.Config{Model: &model{}, ModelName: "fake", Tools: []agenttool.Tool{script.New(ws, 200*time.Millisecond)}}); err != nil {
+		t.Fatal(err)
+	}
+	a = agentturn.New(cfg)
+	if end := invoke(t, g, a, nil); end.Reason != agentturn.ReasonInputRequired {
+		t.Fatalf("end = %s %v", end.Reason, end.Err)
+	}
+}

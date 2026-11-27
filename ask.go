@@ -379,10 +379,10 @@ func (f *flow) expire(pending []agentturn.PendingCall) ([]agentturn.Answer, erro
 
 // askClockDue says the program reads the clock before st's question is
 // put, so the question's deadline is recorded before anyone sees it.
-func (f *flow) askClockDue(st State) bool {
+func (f *flow) askClockDue(ctx context.Context, st State) bool {
 	n := st.Node
 	return n != nil && n.Kind == Person && n.Timeout > 0 && !st.clocked && st.Failure == "" && st.Reached == nil &&
-		st.Held == nil && !f.judging(st) && !(f.unattended && n.Unattended != "")
+		st.Held == nil && !f.judging(ctx, st) && !(f.unattended && n.Unattended != "")
 }
 
 // clockQuestion is the call that reads the clock for st's question.

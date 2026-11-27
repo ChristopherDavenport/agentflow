@@ -82,6 +82,9 @@ func Skills(skills map[string]map[string][]byte) Option {
 
 // New returns the tool a graph's script steps call, running them in ws.
 // A script is a path within the workspace, or within the [Files] given.
+// timeout is how long a script may run where its step, its workflow and
+// the calls its run is in set none; one of those, when set, is what the
+// script is held to instead ([agentflow.StepDeadline]).
 func New(ws agentworkspace.Workspace, timeout time.Duration, opts ...Option) agenttool.Tool {
 	var o options
 	for _, opt := range opts {
@@ -169,6 +172,12 @@ func run(ctx context.Context, ws agentworkspace.Workspace, timeout time.Duration
 			return res, fmt.Errorf("script %q: its files: %w", a.Run, err)
 		}
 		program, env = path.Join(dir, program), append(env, SkillDirEnv+"="+absolute(dir))
+	}
+	if due, ok := agentflow.StepDeadline(ctx); ok {
+		// The step's time is the workflow's to say. The context is cut at
+		// it, which is what stops the script and names the step; this only
+		// keeps the tool's own limit from stopping it first.
+		timeout = time.Until(due) + time.Second
 	}
 	watch := watchProgress(ctx, ws.FS(), progress)
 	out, err := ws.Exec(ctx, agentworkspace.Command{

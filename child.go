@@ -211,8 +211,12 @@ func (f *flow) childFor(st State, call *openresponses.FunctionCall, a callArgs) 
 		if st.Note != "" {
 			c.Settings.Instructions = strings.TrimSpace(c.Settings.Instructions + "\n\nNote from the operator: " + st.Note)
 		}
-		// The step's own policy is its node's in the child.
+		// The step's own policy is its node's in the child, unless it takes
+		// rules from the record, which only this run can resolve.
 		c.policies = f.chain(st)
+		if n.Policy.fromData() {
+			c.policies = f.policies(st)
+		}
 	default:
 		c.Settings = ChildSettings{Dir: a.Dir, Model: n.Model, Instructions: n.Instructions}
 		c.policies = f.policies(st)
@@ -247,6 +251,27 @@ func (f *flow) over(ctx context.Context, a *agentturn.Agent, run string) (*State
 	return &st, err
 }
 
+// past is the state at its end of a run the child's session holds and
+// is no longer at, nil for none: a kept child's earlier visit, or a run
+// abandoned there.
+func (f *flow) past(ctx context.Context, a *agentturn.Agent, run string) (*State, error) {
+	all, err := f.record(ctx, a.State().Transcript)
+	if err != nil {
+		return nil, err
+	}
+	runs, err := Runs(all, nil)
+	if err != nil {
+		return nil, err
+	}
+	for _, in := range runs {
+		if in.ID == run && in.End >= 0 {
+			st := in.State
+			return &st, nil
+		}
+	}
+	return nil, nil
+}
+
 // started says the child's session holds the run.
 func (f *flow) started(ctx context.Context, a *agentturn.Agent, run string) bool {
 	st, _, _ := f.read(ctx, a.State().Transcript)
@@ -258,18 +283,19 @@ func (f *flow) started(ctx context.Context, a *agentturn.Agent, run string) bool
 // answer that lets the call go, or the child's end and state while it
 // waits.
 func (f *flow) settle(ctx context.Context, st State, p agentturn.PendingCall, a callArgs, answers []agentturn.Answer) (*agentturn.Answer, *agentturn.RunEnd, State, error) {
-	// A call with a timeout holds its child to it: past it, the child's runs
-	// are abandoned and the call fails.
 	due := callDeadline(st, p)
-	if !due.IsZero() && !time.Now().Before(due) {
-		ans, err := f.expireChild(ctx, st, p, a)
-		return ans, nil, st, err
-	}
 	c, err := f.childFor(st, p.Call, a)
 	if err != nil {
 		return nil, nil, st, err
 	}
 	cctx, child, cf, err := f.open(ctx, c)
+	late := !due.IsZero() && !time.Now().Before(due)
+	if unfit := (*unfitChild)(nil); late && (errors.Is(err, ErrChildRefused) || errors.As(err, &unfit)) {
+		// Its time ran out over a child that cannot be opened: there is
+		// nothing there to read or to abandon, and the call times out.
+		ans, err := f.expireChild(ctx, st, p, a)
+		return ans, nil, st, err
+	}
 	if unfit := (*unfitChild)(nil); errors.As(err, &unfit) {
 		// The child cannot run its steps on the tools it was given: the call
 		// that waits on it fails, as the step's own call would.
@@ -286,6 +312,15 @@ func (f *flow) settle(ctx context.Context, st State, p agentturn.PendingCall, a 
 	if err != nil {
 		return nil, nil, st, err
 	}
+	// A call with a timeout holds its child to it: past it, the child's runs
+	// are abandoned and the call fails. A child whose run ended in time is
+	// not held to it, however late its caller comes to read the end.
+	if late {
+		if done, _ := cf.over(cctx, child, a.Run); done == nil {
+			ans, err := f.expireChild(ctx, st, p, a)
+			return ans, nil, st, err
+		}
+	}
 	var end *agentturn.RunEnd
 	var cst State
 	// The child's runs take the call's deadline; reading the child's
@@ -295,6 +330,19 @@ func (f *flow) settle(ctx context.Context, st State, p agentturn.PendingCall, a 
 		var stop context.CancelFunc
 		run, stop = context.WithDeadline(cctx, due)
 		defer stop()
+	}
+	// A run the child's session has ended and moved on from, abandoned
+	// there before this session heard of it, is read where it ended: its
+	// key is not started a second time.
+	if done, _ := cf.over(cctx, child, a.Run); done == nil {
+		past, err := cf.past(cctx, child, a.Run)
+		if err != nil {
+			return nil, nil, st, err
+		}
+		if past != nil {
+			ans, err := letGo(st, p, a, *past, nil)
+			return ans, nil, st, err
+		}
 	}
 	switch done, _ := cf.over(cctx, child, a.Run); {
 	case done != nil:
@@ -329,9 +377,14 @@ func (f *flow) settle(ctx context.Context, st State, p agentturn.PendingCall, a 
 		return ans, nil, st, err
 	case c.Judge && errors.Is(err, ErrStalled):
 		// A judge that will not give a verdict has given none, and its look
-		// still counts.
-		looked, _, _ := cf.read(cctx, child.State().Transcript)
-		ans, err := letGo(st, p, a, State{Entries: looked.Entries, Granted: looked.Granted}, err)
+		// still counts. Its run is ended where it stalled, so the child's
+		// record does not read as a look still under way.
+		stalled := err
+		var looked State
+		if looked.Entries, looked.Granted, looked.Summary, err = f.abandonChild(ctx, st, p, a, "the judge gave no verdict"); err != nil {
+			return nil, nil, st, err
+		}
+		ans, err := letGo(st, p, a, looked, stalled)
 		return ans, nil, st, err
 	case err != nil:
 		return nil, end, cst, err
@@ -561,13 +614,18 @@ func (f *flow) abandonChild(ctx context.Context, st State, p agentturn.PendingCa
 		return 0, 0, nil, err
 	}
 	if !cf.started(cctx, child, args.Run) {
-		return 0, 0, nil, nil
+		// Not under way there: it never started, and spent nothing, or an
+		// abandon cut off before this session heard of it has ended it
+		// already, and what it spent is on its record.
+		return cf.spentBy(cctx, child, args.Run)
 	}
 	inner, err := cf.abandon(cctx, child, why)
 	if err != nil {
 		return 0, 0, nil, err
 	}
-	end, err := child.Prompt(cctx, append(inner, abandonMessage(why))...)
+	// The abandon is the program's word to the child, not a person's.
+	from := agentturn.ContextWithTrigger(cctx, agentturn.Trigger{Kind: TriggerKind, Ref: c.Caller})
+	end, err := child.Prompt(from, append(inner, abandonMessage(why))...)
 	if end == nil {
 		return 0, 0, nil, err
 	}
@@ -581,7 +639,7 @@ func (f *flow) abandonChild(ctx context.Context, st State, p agentturn.PendingCa
 				refused = append(refused, openresponses.NewFunctionCallOutput(p.Call.CallID, abandonedText))
 			}
 		}
-		if end, err := child.Prompt(cctx, append(refused, abandonMessage(why))...); end == nil {
+		if end, err := child.Prompt(from, append(refused, abandonMessage(why))...); end == nil {
 			return 0, 0, nil, err
 		}
 	}

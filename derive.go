@@ -169,6 +169,12 @@ func (g *Graph) stepGraph(n *Node) *Graph {
 	step := Node{ID: n.ID, Kind: Agent, Description: n.Description, Prompt: n.Prompt, Tools: n.Tools, AllTools: n.AllTools, ExcludeTools: g.excluded(n), Outcomes: n.Outcomes, Data: n.Data, With: with,
 		Model: cmp.Or(n.Model, g.Model), Thinking: cmp.Or(n.Thinking, g.Thinking), Timeout: n.Timeout, Policy: n.Policy, Skills: n.Skills,
 		Ends: map[string]string{Stuck: Stuck}, Reads: n.Reads, Edits: n.Edits, SkillFiles: n.SkillFiles}
+	// A policy that takes its rules from the record is resolved where the
+	// record is, and reaches the child with its call: the child's own
+	// record holds none of the steps it names.
+	if step.Policy.fromData() {
+		step.Policy = nil
+	}
 	// The documents it reads are the child's, as its call passes them in.
 	var docs map[string]Document
 	for name := range g.Documents {

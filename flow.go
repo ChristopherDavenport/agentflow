@@ -90,7 +90,11 @@ type Option func(*flow)
 func Unattended() Option { return func(f *flow) { f.unattended = true } }
 
 // Reply answers questions by the host's own rules, before anyone is
-// asked. It returns false to leave a question to the person.
+// asked. It returns false to leave a question to the person. It may be
+// called more than once for a question: before a judge would look, so a
+// question the rules answer is not judged, and again when the question is
+// put, whose answer is the one taken. It should answer a question the
+// same way each time; if it does not, the later answer stands.
 func Reply(fn func(context.Context, Question) (Result, bool)) Option {
 	return func(f *flow) { f.reply = fn }
 }
@@ -917,12 +921,12 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 		id, args = f.clockCall(st, false)
 	case f.filesDue(st):
 		id, name, args = st.filesID(), filesTool, filesArgs{Run: st.Instance, Step: st.Node.ID, Files: st.fileList()}
-	case f.judging(st):
+	case f.judging(ctx, st):
 		id, name = st.judgeID(), judgeTool
 		if args, err = f.judgeCall(st); err != nil {
 			return err
 		}
-	case f.askClockDue(st):
+	case f.askClockDue(ctx, st):
 		name = clockTool
 		id, args = f.clockQuestion(st)
 	case st.Node.Flow != "" && !st.Node.fresh() && st.Callee == "":
@@ -988,6 +992,41 @@ func (f *flow) report(e *openresponses.Emitter, st State) error {
 	return msg.Close()
 }
 
+// finishesBefore says a finish of st's step waits for its result ahead of
+// the call id: the same response made both, the finish first.
+func finishesBefore(t agentturn.Transcript, st State, id string) bool {
+	waiting := false
+	for _, item := range t {
+		switch it := item.(type) {
+		case *openresponses.FunctionCall:
+			if it.CallID == id {
+				return waiting
+			}
+			if (it.Name == finishTool || it.Name == stuckTool) && runOf(it.Arguments) == st.Instance && finishStep(it.Arguments) == st.Node.ID {
+				waiting = true
+			}
+		case *openresponses.FunctionCallOutput:
+			// A result ends the response before it: a finish there was
+			// refused, or the step would be over.
+			waiting = false
+		}
+	}
+	return false
+}
+
+// What the gate says to a flow_end or a flow_shown that is not the
+// program's. Replay reads neither call where its output holds the
+// refusal: a call the gate turned away was nobody's to make.
+const (
+	endRefusal   = "only the workflow ends a run"
+	shownRefusal = "only the workflow shows a step's result"
+)
+
+// turnedAway says out is the gate's refusal, for reason.
+func turnedAway(out *openresponses.FunctionCallOutput, reason string) bool {
+	return strings.Contains(out.Output.String(), "agentflow: "+reason)
+}
+
 // gate keeps each turn to what the workflow is at. It returns nil to
 // leave the call to the config's own hook.
 func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agentturn.ToolDecision, error) {
@@ -1006,6 +1045,20 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 					return block(fmt.Sprintf("step %q may not be given this file: %s", st.Node.ID, why))
 				}
 			}
+			return nil, nil
+		}
+		// A call a model's tool makes is the model's work too, and is held
+		// to the step's policy as the tool's own call was: a tool the step
+		// offers does not carry the model past what the step refuses. The
+		// step's list of tools is not asked, since it says what the model
+		// is offered and a tool's own calls are how it is built. What a
+		// program step's tool calls is the workflow's own, as the step is.
+		if !strings.HasPrefix(info.Parent, reserved) {
+			if st, err := f.current(ctx); err == nil && st.Started && !st.Done && st.Node != nil && st.Node.Kind == Agent && st.Failure == "" && st.Reached == nil {
+				if why := f.police(ctx, st, info); why != "" {
+					return block(fmt.Sprintf("step %q refuses this call: %s", st.Node.ID, why))
+				}
+			}
 		}
 		return nil, nil
 	}
@@ -1017,13 +1070,13 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 	name, id := info.Call.Name, info.Call.CallID
 	if name == shownTool {
 		if st.show == nil || id != st.show.id() {
-			return block("only the workflow shows a step's result")
+			return block(shownRefusal)
 		}
 		return nil, nil
 	}
 	if name == endTool {
 		if over := f.overdue(st, err); over == nil || id != over.id {
-			return block("only the workflow ends a run")
+			return block(endRefusal)
 		}
 		return nil, nil
 	}
@@ -1066,7 +1119,7 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 			return nil, nil
 		}
 		return block("only the workflow reads the clock")
-	case f.judging(st):
+	case f.judging(ctx, st):
 		// The judge looks in a child, and the call waits on it.
 		if err := checkJudgeCall(st, info.Call); err != nil {
 			return block(err.Error())
@@ -1133,6 +1186,11 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 			if err := checkDocCall(st, name, info.Args); err != nil {
 				return block(err.Error())
 			}
+			// A write after the step's finish in one response would be
+			// answered as written and then not read, the step being over.
+			if name == docWriteTool && finishesBefore(t, st, id) {
+				return block(fmt.Sprintf("this write came after the step's finish in the same response, and was not kept: write a document before you finish step %q", n.ID))
+			}
 			return nil, nil
 		}
 		if name == stuckTool && n.canStick() {
@@ -1154,7 +1212,7 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 			return block(fmt.Sprintf("step %q refuses this call: %s", n.ID, why))
 		}
 	case n.Kind == Person && name == clockTool:
-		if id == st.clockID() && f.askClockDue(st) {
+		if id == st.clockID() && f.askClockDue(ctx, st) {
 			return nil, nil
 		}
 		return block("only the workflow reads the clock")
@@ -1247,8 +1305,10 @@ func (f *flow) ask(ctx context.Context, info agentturn.ToolCallInfo, st State) (
 		}
 	}
 	// With nobody there, the tool takes the node's default, and refuses
-	// a retry, which ends the workflow.
-	if f.unattended && (q.Retry || q.Limit != "" || n.Unattended != "") {
+	// a retry, which ends the workflow. A cleanup's question with no
+	// default cannot be answered either, which fails its step and ends the
+	// cleanup: a cleanup never holds up the abandon it is part of.
+	if f.unattended && (q.Retry || q.Limit != "" || n.Unattended != "" || st.Cleaning) {
 		return nil, nil
 	}
 	// A question asked after its time ran out, on a resume that came late,

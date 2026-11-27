@@ -236,6 +236,7 @@ func TestEverythingUnknownIsRefused(t *testing.T) {
 		"unknown type":        {edit("Well?", "```yaml\noutputs: {ok: {v: {type: date}}}\n```\nWell?"), "type"},
 		"unknown frontmatter": {"---\non: push\n---\n" + good, "frontmatter"},
 		"unclosed fence":      {good + "```\n", "never closed"},
+		"settings up front":   {edit("# t\n", "# t\n\n```yaml\nmax_steps: 3\n```\n"), "sets nothing"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := workflow.Parse("t", []byte(tc.src))

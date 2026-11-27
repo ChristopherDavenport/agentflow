@@ -50,12 +50,18 @@ func Drive(ctx context.Context, g *Graph, a *agentturn.Agent, end *agentturn.Run
 }
 
 // flowOf is the flow a follows for g, as Apply made it, with opts added.
+// g is the graph Apply was given or one of the same digest, loaded again,
+// say; an agent that follows another workflow is refused, as the options
+// it was applied with are not g's.
 func flowOf(g *Graph, a *agentturn.Agent, opts []Option) (*flow, error) {
 	var f *flow
-	if made, ok := a.Config().Model.(*flow); ok && made.g == g {
+	switch made, ok := a.Config().Model.(*flow); {
+	case ok && (made.g == g || made.g.Digest() == g.Digest()):
 		own := *made
 		f = &own
-	} else {
+	case ok:
+		return nil, fmt.Errorf("agentflow: the agent follows workflow %s (%s), not %s (%s): apply the workflow to drive it", made.g.Name, made.g.Digest(), g.Name, g.Digest())
+	default:
 		f = &flow{g: g}
 	}
 	for _, opt := range opts {
@@ -100,7 +106,9 @@ func (f *flow) drive(ctx context.Context, a *agentturn.Agent, end *agentturn.Run
 			if err != nil {
 				return end, st, err
 			}
-			next, err := a.Prompt(ctx, outs...)
+			// The program says so, not a person.
+			from := agentturn.ContextWithTrigger(ctx, agentturn.Trigger{Kind: TriggerKind, Ref: f.g.Name})
+			next, err := a.Prompt(from, outs...)
 			if next == nil {
 				return end, st, err
 			}

@@ -212,11 +212,9 @@ func (f *flow) readFile(ctx context.Context, p string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	text := res.Output.String()
-	if strings.HasPrefix(text, "Error: ") {
-		return "", errors.New(strings.TrimPrefix(text, "Error: "))
-	}
-	return text, nil
+	// A read that failed or was refused comes back as an error. The text
+	// is the file's, whatever it begins with.
+	return res.Output.String(), nil
 }
 
 func (f *flow) readTool() string {
