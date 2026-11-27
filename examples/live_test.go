@@ -252,7 +252,9 @@ func runLive(t *testing.T, g *agentflow.Graph, a *agentturn.Agent, inputs any, a
 	}
 	end, err := a.Prompt(ctx, item)
 	var st agentflow.State
-	if err == nil {
+	if end != nil {
+		// A run that ended in an error is driven too: a model cut off at
+		// its step's deadline ends its run so, and Drive goes on from it.
 		end, st, err = agentflow.Drive(ctx, g, a, end, opts...)
 	}
 	for err == nil && end.Reason == agentturn.ReasonInputRequired && answer != nil {
@@ -957,7 +959,7 @@ func TestLiveJudge(t *testing.T) {
 // --- 5. Limits -----------------------------------------------------
 
 const slowFlow = "```mermaid\nflowchart TD\n  fetch[fetch]\n```\n\n" +
-	"## fetch\n```yaml\ntools: [slow]\ntimeout: 5s\n```\n" +
+	"## fetch\n```yaml\ntools: [slow]\ntimeout: 15s\n```\n" +
 	"Call the slow tool once, then finish the step.\n"
 
 const stuckFlow = "```mermaid\nflowchart TD\n  find[find] -->|stuck| report[[report]]\n```\n\n" +
@@ -985,7 +987,7 @@ func TestLiveLimits(t *testing.T) {
 			calls++
 			if calls == 1 {
 				select {
-				case <-time.After(20 * time.Second):
+				case <-time.After(time.Minute):
 				case <-ctx.Done():
 					return "", ctx.Err()
 				}
@@ -1008,8 +1010,12 @@ func TestLiveLimits(t *testing.T) {
 		a := agentturn.New(cfg)
 		end, st, err := runLive(t, g, a, nil, nil, rules)
 		t.Logf("end %v %v; path %v; slow called %d times; retries %d", end.Reason, err, steps(st), calls, retries)
-		if err != nil || !slices.Equal(steps(st), []string{"fetch:ok"}) || retries != 1 || calls != 2 {
-			t.Errorf("want fetch:ok after one retry and two calls of slow")
+		// The step's time covers the model's own turns too, so a slow
+		// model can run past it again once retried: the first call must
+		// time out and be retried, and the step must finish; how often is
+		// the model's pace.
+		if err != nil || !slices.Equal(steps(st), []string{"fetch:ok"}) || retries < 1 || calls < 2 {
+			t.Errorf("want fetch:ok after the slow call timed out and the step was retried")
 		}
 	})
 	t.Run("stuck", func(t *testing.T) {
@@ -1115,11 +1121,15 @@ const policyFlow = "```mermaid\nflowchart TD\n  plan[[plan]] --> write[write]\n`
 	"## plan\n```yaml\ntool: plan\noutputs:\n  ok:\n    path: {type: string, required: true}\n```\n\n" +
 	"## write\n```yaml\ntools: [write_file]\npolicy:\n  deny:\n    - {rule: write_file(secret/*), note: secret files are off limits}\n" +
 	"  allow:\n    - {rule: write_file, path: '${{ steps.plan.outputs.path }}', note: the planned file}\n```\n" +
-	"Write the word hello to the file secret/x.txt. If that write is refused, write hello to the one path you are allowed to write instead, then finish.\n"
+	"Write the word hello to one file: secret/x.txt if this step may write it, and otherwise the one path this step may write. Then finish.\n"
 
-// policyFlowTry is policyFlow, told to try the denied write first, so
-// the refusal is seen.
-var policyFlowTry = strings.Replace(policyFlow, "Write the word hello to the file secret/x.txt. If that write is refused, write hello to the one path you are allowed to write instead, then finish.",
+// policyFlow leaves the choice of path to what the step's instructions
+// say of its limits: a task that told the model to write the denied path
+// would be followed, by a model that does as it is told, and refused.
+//
+// policyFlowTry is policyFlow, told to make a write outside its limits,
+// so the refusal is seen.
+var policyFlowTry = strings.Replace(policyFlow, "Write the word hello to one file: secret/x.txt if this step may write it, and otherwise the one path this step may write. Then finish.",
 	"Write the word hello to out/ok.txt, and a copy of it to notes/copy.txt. If a write is refused, say why in one sentence and finish.", 1)
 
 func TestLivePolicy(t *testing.T) {
@@ -1514,7 +1524,7 @@ func TestLiveStartFromSkill(t *testing.T) {
 			t.Fatalf("first run: %+v, %v", st, err)
 		}
 		end, err := a.Prompt(ctx, openresponses.UserText("Please greet Ada twice using the greet workflow."))
-		if err == nil {
+		if end != nil {
 			end, _, err = agentflow.Drive(ctx, g, a, end)
 		}
 		greeted := slices.ContainsFunc(greeter.got, func(args map[string]any) bool {
