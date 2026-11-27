@@ -30,9 +30,12 @@ reach it, to the end: not the first lines, and not only the diagram.
 
 ## Following it
 
-1. Take each input from the request. Ask the person for a required one
-   you cannot find; never guess it. An input left out takes its
-   `default`.
+1. Take each input from the request. An input's `description` says
+   what it holds, and whatever the request says that fits it fills it,
+   named or not: a request's constraint fills an input for what to keep
+   to. Ask the person for a required one you cannot find; never guess
+   it. Only an input the request says nothing for takes its `default`.
+   Say each input's value before the first step.
 2. Start at the first node the diagram names.
 3. Open the step with a line that names it, `Step <id>:`, and do it as
    its kind says below. A step you settle by judging what you were
