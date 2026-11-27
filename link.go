@@ -94,7 +94,8 @@ func (g *Graph) Link(flows ...*Graph) error {
 		}
 	}
 	for x, n := range calls {
-		n.call = &callee{g: x.Callees[n.Flow]}
+		c := x.Callees[n.Flow]
+		n.call = &callee{g: c, other: c.Model != "" && c.Model != x.Model}
 	}
 	// A workflow's outcomes are its ends, and a call that ends a
 	// workflow ends it with what the call ended with, so they are found
@@ -247,6 +248,10 @@ func (g *Graph) contract(n *Node) []error {
 	}
 	if c.Context == ContextFresh && n.Context == ContextSession {
 		bad("it says it runs in a child of its own, context: %s, and the call says %s", ContextFresh, ContextSession)
+	}
+	if n.call.other && n.Context == ContextSession {
+		bad("it names its own model, %q, which is not this workflow's%s, and the call says context: %s, which keeps the model of the session it reads: say context: %s",
+			c.Model, workflowModel(g), ContextSession, ContextFresh)
 	}
 	if len(n.Outcomes) > 0 {
 		own := slices.Sorted(slices.Values(n.Outcomes))
