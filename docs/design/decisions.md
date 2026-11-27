@@ -101,6 +101,12 @@ the tree by `parent`.
 its caller with the call's result, so a caller's summary needs no other
 session.
 
+**Usage is counted from the session's responses, not as requests are
+served.** A count kept in the process is lost at a restart, and a second
+count beside the record's can disagree with it. The responses are the
+record of what was used, so a host that wants usage in a summary gives
+them.
+
 ## Models
 
 **Each visit of a model step opens with a message naming the step.**

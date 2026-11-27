@@ -149,12 +149,10 @@ type flow struct {
 	// fileTool and fileField name the host's tool that reads a workspace
 	// file for a step's files, and its path argument.
 	fileTool, fileField string
-	// book counts what each run's model requests use, and prices prices
-	// it, for the summary a run's end records.
-	book   *usageBook
-	prices func(model string, u openresponses.Usage) (float64, bool)
 	// responses reads what the session's responses used, when the host
-	// gives it; without, the book counts them as they are served.
+	// gives it, and prices prices it, for the summary a run's end
+	// records.
+	prices    func(model string, u openresponses.Usage) (float64, bool)
 	responses func(ctx context.Context) ([]ResponseUsage, error)
 	// due is the deadline of the model step the last request was shaped
 	// for, so the model's stream is cut there.
@@ -287,9 +285,6 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 
 	cfg.Model = f
 	f.due = &deadline{}
-	if f.book == nil {
-		f.book = &usageBook{}
-	}
 	if transform := cfg.Transform; transform != nil {
 		// What a transform returns is a view, and position is not read
 		// from a view.

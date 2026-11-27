@@ -358,14 +358,12 @@ entries, which agentflow does not read on its own.
   own turns, prices the rest, and writes the sum into the end. A run that
   started before a restart counts every request it made. A child's opener
   gives the child's own `Responses` with `Child.Apply`.
-- **Without it**, the program counts each model request as it serves it,
-  for as long as the process lives. A run whose start this process wrote
-  counts every request. A run that started before a restart counts only
-  the requests since, and says so in `usage.partial`. A summary is never
-  padded or guessed.
-- Either way a run is partial if a run it called is: `partial` keeps the
-  first reason it meets, and a call whose end wrote no summary makes its
-  caller partial too.
+- **Without it** a summary counts no usage, and says so in
+  `usage.partial`. Its times, steps and calls are whole. A summary is
+  never padded or guessed.
+- A run is partial if a run it called is: `partial` keeps the first
+  reason it meets, and a call whose end wrote no summary makes its caller
+  partial too.
 
 ## Reading a session back
 

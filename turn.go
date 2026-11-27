@@ -125,7 +125,7 @@ func (f *flow) prepare(ctx context.Context, req *openresponses.Request) error {
 		return nil
 	}
 	if f.due != nil {
-		f.due.set(st.due(), st.Instance)
+		f.due.set(st.due())
 	}
 	req.Model = f.modelName
 	view, err := f.visible(ctx, req.Input, all, st)
@@ -328,7 +328,6 @@ func (f *flow) limitsText(b *strings.Builder, st State) {
 // its step. A stream cut there ends in [ErrStepTimeout], which no retry
 // mends, and the program records the step's failure on its next turn.
 func (f *flow) serve(ctx context.Context, req openresponses.Request, sink openresponses.EventSink) error {
-	sink = f.counting(sink, req.Model)
 	var due time.Time
 	if f.due != nil {
 		due = f.due.get()
@@ -476,11 +475,8 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 	if err != nil {
 		return err
 	}
-	switch a := args.(type) {
-	case *Ending:
-		a.Summary = f.summarize(ctx, st, all)
-	case startPayload:
-		f.book.started(a.Run)
+	if over, ok := args.(*Ending); ok {
+		over.Summary = f.summarize(ctx, st, all)
 	}
 	encoded, err := json.Marshal(args)
 	if err != nil {

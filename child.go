@@ -107,7 +107,7 @@ func (c Child) Apply(cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 	p := c.parent
 	f := &flow{g: c.g, maxDepth: p.maxDepth, maxSteps: p.maxSteps, unattended: p.unattended, reply: p.reply, delegations: p.delegations,
 		modes: p.modes, judgeName: p.judgeName, children: p.children, models: p.models, idle: p.idle, matchers: p.matchers, policyOpts: p.policyOpts,
-		book: p.book, prices: p.prices, fileTool: p.fileTool, fileField: p.fileField}
+		prices: p.prices, fileTool: p.fileTool, fileField: p.fileField}
 	own := c
 	f.child = &own
 	for _, opt := range opts {

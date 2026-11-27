@@ -63,7 +63,7 @@ them added, provided they are given the same `*Graph` value `Apply` was.
 | `MaxDepth(n)`, `MaxSteps(n)` | bounds on the tree, under the workflow's own; the smaller wins. The root's start records them |
 | `PolicyMatchers(matchers, opts...)` | what agentpolicy needs to read a step's policy: for each working directory, each tool's matcher. See [policy-and-trust.md](policy-and-trust.md) |
 | `FileReader(tool, field)` | the host's tool that reads a workspace file for a step's `files`, and its path argument: `read` and `path` unless given. `Apply` refuses a step given workspace files when the config does not offer it |
-| `Responses(read)` | the session's responses with what each used, so a run's summary is whole after a restart |
+| `Responses(read)` | the session's responses with what each used, which a run's summary counts its usage from; without it a summary counts none |
 | `Prices(price)` | `price(model, usage)` returns a cost and whether the model is priced, for a run's summary |
 
 ## Entry points

@@ -133,7 +133,7 @@ func (k *recordedKin) open(ctx context.Context, c Child) (context.Context, *agen
 	if k.fold != nil {
 		base.Transform = k.fold()
 	}
-	cfg, err := c.Apply(base, History(read(pathItems)), Inherited(read(prefixItems)))
+	cfg, err := c.Apply(base, History(read(pathItems)), Inherited(read(prefixItems)), recordedResponses(k.store, id))
 	if err != nil {
 		return nil, nil, err
 	}

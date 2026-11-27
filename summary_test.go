@@ -2,8 +2,8 @@ package agentflow
 
 import (
 	"context"
+	"errors"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 
@@ -49,7 +49,9 @@ func TestARunEndsWithASummary(t *testing.T) {
 	switch {
 	case s.Steps != 3 || s.Started == nil || s.Ended == nil || s.Ended.Before(*s.Started):
 		t.Errorf("summary = %+v", s)
-	case !reflect.DeepEqual(s.Usage, Usage{Requests: 1, InputTokens: 10, OutputTokens: 2, Cost: 0.005}):
+	// What the requests used is read from the host's responses, and this
+	// host gives none.
+	case s.Usage.Requests != 0 || !strings.Contains(s.Usage.Partial, "the host gave no Responses"):
 		t.Errorf("usage = %+v", s.Usage)
 	}
 	// The same summary reads back from the record.
@@ -90,12 +92,8 @@ func TestASummaryTakesInWhatTheRunCalled(t *testing.T) {
 			t.Errorf("call %d = %+v, depth %d", i, c, depth(c.Run))
 		}
 	}
-	// middle's model request is counted in middle, and in top through it;
-	// so are the countdown's steps, which middle's totals already hold.
+	// The countdown's steps are counted in middle, and in top through it.
 	middle := root.Calls[0]
-	if middle.Usage.Requests != 1 || root.Usage.Requests != 1 || root.Usage.Unpriced == nil || root.Usage.Unpriced[0] != "fake" {
-		t.Errorf("middle %+v, root %+v", middle.Usage, root.Usage)
-	}
 	if want := 2 + middle.Steps; root.Steps != want || middle.Steps < 6 {
 		t.Errorf("steps: root %d, want %d; middle %d", root.Steps, want, middle.Steps)
 	}
@@ -115,7 +113,7 @@ func TestASummaryTakesInAChild(t *testing.T) {
 	}
 	ends := endings(a.State().Transcript)
 	root := ends[len(ends)-1].Summary
-	if root == nil || len(root.Calls) != 2 || root.Calls[0].Workflow != "thinker" || !root.Calls[0].Summed || root.Usage.Requests != 1 {
+	if root == nil || len(root.Calls) != 2 || root.Calls[0].Workflow != "thinker" || !root.Calls[0].Summed {
 		t.Fatalf("root summary = %+v", root)
 	}
 	// The run two children down is listed too, under the one that called it.
@@ -124,34 +122,20 @@ func TestASummaryTakesInAChild(t *testing.T) {
 	}
 }
 
-func TestASummaryAfterAResumeSaysItIsPartial(t *testing.T) {
-	g := release()
-	var ran []string
-	a := killed(t,
-		func() agentturn.Config {
-			return apply(t, release(), killingModel{}, probeTool(agenttool.ReplayUnknown, func(string) {}))
-		},
-		apply(t, g, metered{&fakeModel{outcomes: []string{"clean"}}}, probeTool(agenttool.ReplayUnknown, func(n string) { ran = append(ran, n) })))
-	end, err := a.Continue(context.Background())
-	if err != nil || end.Reason != agentturn.ReasonDone {
-		t.Fatalf("end = %+v, %v", end, err)
-	}
-	ends := endings(a.State().Transcript)
-	s := ends[0].Summary
-	if s == nil || s.Usage.Requests != 1 || !strings.Contains(s.Usage.Partial, "started before this process") || !slices.Equal(s.Usage.Unpriced, []string{"fake"}) {
-		t.Errorf("summary = %+v", s)
-	}
-}
-
 // recordedResponses reads a session's responses back as a host does for
 // Responses: each with the items on the path before its own.
 func recordedResponses(store *jsonl.Store, id string) Option {
 	return Responses(func(ctx context.Context) ([]ResponseUsage, error) {
 		s, err := store.Open(ctx, id)
+		if errors.Is(err, agentsession.ErrNoSession) {
+			return nil, nil
+		}
 		if err != nil {
 			return nil, err
 		}
-		path := s.Path(s.Leaf())
+		// A session's record is its own entries: a fork's opens after what
+		// it inherited.
+		path := session.OwnPath(s)
 		first, n := map[string]int{}, 0
 		for _, e := range path {
 			if it, ok := e.(*agentsession.ItemEntry); ok {
@@ -230,8 +214,12 @@ func TestRecordedResponsesCountForTheRunTheyServed(t *testing.T) {
 	g := linked(t, top(), middle(), countdown())
 	var counts []int
 	var ran []string
-	a := nestedAgent(t, g, metered{&fakeModel{outcomes: []string{OK}}}, []agenttool.Tool{countTool(&counts), scriptTool(&ran)},
-		Unattended(), recordOf(store, s.ID()), recordedResponses(store, s.ID()))
+	tools := []agenttool.Tool{countTool(&counts), scriptTool(&ran)}
+	// Each run is in a session of its own, and its opener gives that
+	// session's responses.
+	kids := &recordedKin{store: store, rec: rec, model: metered{&fakeModel{outcomes: []string{OK}}}, name: "fake", tools: tools}
+	a := nestedAgent(t, g, metered{&fakeModel{outcomes: []string{OK}}}, tools,
+		kids.option(), Unattended(), recordOf(store, s.ID()), recordedResponses(store, s.ID()))
 	rec.Attach(a)
 	if end := start(t, a); end.Reason != agentturn.ReasonDone {
 		t.Fatalf("end = %+v", end)
