@@ -10,8 +10,15 @@ and this text says how to read it.
 
 If a tool you have runs agentflow workflows, start this one with it,
 giving its inputs, and stop: the program takes every step from there.
-Otherwise follow the file by hand, as below. Do what it defines, in the
-order it defines, and nothing it does not.
+Otherwise follow the file by hand, as below. You need nothing else: the
+file and every script it runs are in this skill's directory, the one
+this text is in, not in the working directory. Following the file is
+the task, however small the change looks; do not do the work some other
+way. Do what it defines, in the order it defines, and nothing it does
+not.
+
+Read the whole file first, and every workflow file a step calls when you
+reach it, to the end: not the first lines, and not only the diagram.
 
 ## The file
 
@@ -27,7 +34,10 @@ order it defines, and nothing it does not.
    you cannot find; never guess it. An input left out takes its
    `default`.
 2. Start at the first node the diagram names.
-3. Do the step, as its kind says below.
+3. Open the step with a line that names it, `Step <id>:`, and do it as
+   its kind says below. A step you settle by judging what you were
+   handed, without a tool, is done like any other: it opens and ends in
+   a line.
 4. End it with one of its `outcomes`, `ok` when it lists none, and data
    that fits the schema its `outputs` gives for that outcome. Say so in
    one line: the step, its outcome and its data.
@@ -35,8 +45,10 @@ order it defines, and nothing it does not.
    `name`. An edge into an end, `((name))`, ends the workflow with
    `name` as its outcome; an outcome with no edge ends it with that
    outcome.
-6. At the end, report the outcome and the frontmatter's `outputs`, or
-   its `outputs_by` for that outcome.
+6. At an end, say so in one line, `Workflow ended: <outcome>`, then
+   give each of the frontmatter's `outputs`, or its `outputs_by` for that
+   outcome, by name. A called workflow's end is said the same way, and
+   is the calling step's outcome.
 
 A branch is an outcome and nothing else. Skip no step, add none, and
 take no edge the diagram does not draw. Take one step at a time: start
