@@ -669,3 +669,7 @@ have not been run again with it as a child.
   own.
 - **The loop** learns nothing: children are agents a host makes, and the
   hold is an ordinary deferral.
+
+## Tried live (2026-11-26)
+
+Nesting, children, kept children, a `dir` from data and the judge as a child were tried live with claude-haiku-5.5 on 2026-11-26: see RFC 0001's "Live trials of RFCs 0002 to 0009". They found an unrouted `failed` counted as a way out (section 2), and a judge quoting its criteria into a verdict the working model reads (section 12); both are fixed.

@@ -953,6 +953,65 @@ The role of the reminder, qwen3:1.7b, one reminder, 40 trials a row:
 Not yet tested: a model step that uses tools over many turns, a prompt
 that competes with the finish instruction.
 
+### Live trials of RFCs 0002 to 0009 (2026-11-26)
+
+claude-haiku-5.5 through OpenRouter, with deepseek-v4.1-flash as the
+second model, run by the live tests in `examples/live_test.go` (they skip
+without `AGENTFLOW_LIVE_URL` and `AGENTFLOW_LIVE_MODEL`). Each test fixes
+what it expects before it runs and reads the outcome from the record:
+the path, `Runs`, the sessions' hashes and the requests sent, never what
+a model says. Small tasks, one to three trials a scenario, about 0.30M
+tokens in and 0.11M out in all, under 0.10 USD.
+
+| Scenario | Trials | Met expectations |
+|---|---|---|
+| nesting three deep, a model step in the leaf; an inner failure routed on `failed` | 4 | 4 |
+| a kept child at a `dir` from data, its second visit recalling the first with no tools; every hash in every session | 4 | 4 |
+| the judge as a child, shadow, advise and decide, a good and a bad plan | 24 | 9 of 12 before a wording change, 12 of 12 after; every verdict right |
+| a step naming another model runs in a child on it | 2 | 2 |
+| a model step cut at its timeout, retried by rules | 2 | 2 |
+| an impossible task: the model calls `flow_stuck` | 5 | 5 |
+| a visit bound answered by rules with a grant; `max_visits: person` past 5 | 4 | 4 |
+| policy stated up front: no forbidden write attempted | 5 | 5 |
+| documents edited and read by a script; skill and workspace files as context | 2 | 2 |
+| `show:` over 300 rows: answered from the summary, rows in no request | 2 | 2 |
+| a step's `skills:` followed | 2 | 2 |
+| a model starts `greet` from its skill, inputs right first time; a hidden one refused | 2 | 2 |
+| computed question text, choices, free text; one `version` across runs | 4 | 4 |
+| an override's jump note used by the next visit | 2 | 2 |
+| compaction across a nested call, a fresh step and a judge, a failure injected, a new agent from the store | 5 | path, scripts and folds right in 5; one response unhashed in each of 3 before a fix, none in 2 after |
+| `take-issue` end to end, the judge deciding | 2 | 2 |
+
+What they found, each fixed with a scripted test:
+
+- A call that does not route on `failed` was counted as a way out of its
+  workflow, so the flat form of `outputs` was refused at load.
+- A call outside a step's `allow` list was refused as "denied by
+  default", naming no rule. The refusal now names the list.
+- The program's turn between a result and its `flow_shown` skipped the
+  host's transform, folds in force included, so after a fold its request
+  was recorded without a hash. It now runs on the view without the whole
+  result: 13 and 14 folds, every response hashed.
+- A model sent the program's `flow_clock` call took it for its own ("I
+  made a call to a flow_clock tool that is not in my available tools").
+  It is now left out of model requests, as `flow_start` is.
+- Under advise and decide a judge's reason, which the working model
+  reads, quoted a reference token from its criteria. The judge is now
+  told not to quote what it weighs: 12 of 12 clean after. That is wording, not
+  a guarantee; the criteria themselves were in no working request.
+
+And what they show of the model rather than the machinery. With its
+limits stated, haiku never tried a forbidden write; told to write a
+second file outside them, it tried once in four, reported itself stuck
+once, and twice wrote only what it might. So a refusal was seen live
+only once, before its wording was fixed. It never needed to correct its
+inputs when starting a workflow, so that path is tested only scripted.
+A host's `MaxTurns` counts the program's turns: three levels of nesting
+around one model step took about 14. Question timeouts, cleanup on
+abort and the summaries' token counts were not tried live. One run each
+of most scenarios says the machinery holds with a real model, not how
+often a model does the right thing.
+
 ## Open questions
 
 1. **Compaction and resume without a record.** A host with no `History`

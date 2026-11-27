@@ -99,3 +99,7 @@ of it, so a person sees what the model did not.
   `History` that costs nothing: position and every `with` are read from
   the record. Without it, the transcript is the record, and a session
   rebuilt that way is refused as RFC 0001 says of any omission.
+
+## Tried live (2026-11-26)
+
+Tried live with claude-haiku-5.5 on 2026-11-26: over 300 rows the model answered from the shown summary in 2 of 2 and no request held a row; with compaction the showing turn's request was unhashed until the fix above, then every response hashed in 2 runs of 13 and 14 folds.

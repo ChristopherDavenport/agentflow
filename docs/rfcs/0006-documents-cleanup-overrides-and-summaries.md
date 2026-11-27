@@ -463,3 +463,7 @@ step asks to retry, as its own call failing would, or, for a judge's look,
 gives no verdict, so the person is asked. Unattended, the run fails with
 them. An opener returns `Child.Apply`'s error as it is or wrapped with
 `%w`.
+
+## Tried live (2026-11-26)
+
+Documents, files as context and an override's jump note were tried live with claude-haiku-5.5 on 2026-11-26, each 2 of 2: see RFC 0001's "Live trials of RFCs 0002 to 0009". Cleanup on abort and the summaries' token counts were not.

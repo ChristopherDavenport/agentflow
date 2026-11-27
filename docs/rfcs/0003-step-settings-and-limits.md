@@ -391,3 +391,7 @@ still at work.
 - A model step's deadline cuts only its stream and its tools' calls. A
   turn whose stream has just finished runs its tool calls under the
   deadline, and the program records the timeout on the next turn.
+
+## Tried live (2026-11-26)
+
+Timeouts, another model, policy, `flow_stuck`, a grant at a visit bound and `max_visits: person` were tried live with claude-haiku-5.5 on 2026-11-26: see RFC 0001's "Live trials of RFCs 0002 to 0009". They found a refusal outside an `allow` list that named no rule, and a model taking the program's `flow_clock` call for its own; both are fixed. The tree's step bound and the repeat rule were not reached live.

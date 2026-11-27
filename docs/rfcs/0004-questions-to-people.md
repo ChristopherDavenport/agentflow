@@ -159,3 +159,7 @@ on_timeout:             # or just: park
   deadline is absolute, in UTC, and the front's clock may differ.
 - Whether a pick may also carry a person's words, as a reason beside it,
   is left to `Result.Reason`, which every answer may carry.
+
+## Tried live (2026-11-26)
+
+Computed choices and free text, answered by rules and a scripted person, were tried live on 2026-11-26 with a model writing the list: a pick outside it went to the person. Timeouts were not tried live; the scripted tests cover them.
