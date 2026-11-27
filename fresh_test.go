@@ -301,7 +301,7 @@ func TestAnInvocationAbandonsChildren(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := tree(runs); !slices.Equal(got, []string{"outer:abandoned:", " asker:failed:", "outer:running:", " asker:running:"}) {
+	if got := tree(runs); !slices.Equal(got, []string{"outer:abandoned:", " asker:abandoned:", "outer:running:", " asker:running:"}) {
 		t.Errorf("tree = %v", got)
 	}
 }

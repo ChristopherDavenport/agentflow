@@ -97,9 +97,14 @@ the record, and a model cannot ask for one.
 A nested list would make the summary's type recursive. A reader rebuilds
 the tree by `parent`.
 
-**A run's summary is written into its end.** A child's end goes back to
-its caller with the call's result, so a caller's summary needs no other
-session.
+**A run's summary is read from the record, not written into it.** A
+summary in `flow_end` said again what the record already holds, and a
+child's had to ride back in its call's result so the caller could write
+its own. The record keeps only what a summary cannot be made without:
+the time of each start and end. The rest is read from `Runs` and each
+session's responses, by a package the core does not import, so asking
+twice gives the same answer and a restart changes nothing. The price is
+that summing a tree means reading every session of it.
 
 **Usage is counted from the session's responses, not as requests are
 served.** A count kept in the process is lost at a restart, and a second

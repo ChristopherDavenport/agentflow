@@ -243,8 +243,7 @@ import agentturn/session.
 
 The opener passes the child's config through `Child.Apply(cfg, opts...)`,
 which makes it follow the child's workflow with the caller's options and
-any the opener adds, such as a `History` and `Responses` for the child's
-own record.
+any the opener adds, such as a `History` for the child's own record.
 
 **A seeded child needs two things of its opener.** Its session holds
 items that are not its record, so `Child.Apply` refuses it without both:
@@ -324,7 +323,7 @@ finish, end.
 | results | the child's `flow_finish` gives the outcome and data, the child's end records them, and the parent's `flow_call` returns them. The parent routes on them as on any step |
 | request hashes | each request of the child's is the child's whole transcript, so every request keeps a verifiable hash, fold or no fold |
 | compaction | the child has its own `Transform`, from the host's opener. The parent's compaction never sees the child's turns. `SummaryFilter` serves both |
-| cost | recorded on the child's responses, and summed in the child's end, which goes back in the call's result |
+| cost | recorded on the child's responses, in the child's session. A summary reads each session's; nothing of it crosses the call |
 | timeout | the step's timeout bounds the child's model step; the made workflow carries its workflow's default timeout |
 | questions inside | a model step asks nothing, but a policy may hold one of its tool calls. The child's run then ends `input_required` and `Drive` surfaces the hold with its path |
 | resuming | from the store: the held call carries the child's key, and the key is the spawn ID |
@@ -477,14 +476,13 @@ go, and returned as its output:
 | `failure` | why the child failed, where the step does not route on `failed` |
 | `verdict` | a judge's verdict |
 | `entries`, `granted` | the steps the child's runs entered, its own children's included, and what a person granted there |
-| `summary` | what the child's end summed up |
 
-**Whatever came of the child, what it spent counts.** `entries`,
-`granted` and `summary` are carried however the child ended:
+**Whatever came of the child, what it spent counts.** `entries` and
+`granted` are carried however the child ended:
 
 - a result carries them beside its outcome;
 - a failure is the output `{"failure": "<reason>", "entries": n,
-  "granted": m, "summary": {…}}`, which is no result, so the step has
+  "granted": m}`, which is no result, so the step has
   failed and asks to be retried;
 - a judge's verdict carries them, so the judge's look counts toward the
   tree as its step;

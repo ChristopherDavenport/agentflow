@@ -107,7 +107,7 @@ func (c Child) Apply(cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 	p := c.parent
 	f := &flow{g: c.g, maxDepth: p.maxDepth, maxSteps: p.maxSteps, unattended: p.unattended, reply: p.reply, delegations: p.delegations,
 		modes: p.modes, judgeName: p.judgeName, children: p.children, models: p.models, idle: p.idle, matchers: p.matchers, policyOpts: p.policyOpts,
-		prices: p.prices, fileTool: p.fileTool, fileField: p.fileField}
+		fileTool: p.fileTool, fileField: p.fileField}
 	own := c
 	f.child = &own
 	for _, opt := range opts {
@@ -306,7 +306,6 @@ func (f *flow) past(ctx context.Context, a *agentturn.Agent, run string) (*State
 	for _, in := range runs {
 		if in.ID == run && in.End >= 0 {
 			st := in.State
-			st.Summary = in.Summary
 			return &st, nil
 		}
 	}
@@ -422,7 +421,7 @@ func (f *flow) settle(ctx context.Context, view agentturn.Transcript, st State, 
 		// record does not read as a look still under way.
 		stalled := err
 		var looked State
-		if looked.Entries, looked.Granted, looked.Summary, err = f.abandonChild(ctx, view, st, p, a, "the judge gave no verdict"); err != nil {
+		if looked.Entries, looked.Granted, err = f.abandonChild(ctx, view, st, p, a, "the judge gave no verdict"); err != nil {
 			return nil, nil, st, err
 		}
 		ans, err := letGo(st, p, a, looked, stalled)
@@ -482,7 +481,7 @@ func letGo(st State, p agentturn.PendingCall, a callArgs, done State, failed err
 	}
 	// What the child's runs spent counts toward the caller's tree, however
 	// they came out: a failed child's steps and a judge's look included.
-	a.Entries, a.Granted, a.Summary = done.Entries, done.Granted, done.Summary
+	a.Entries, a.Granted = done.Entries, done.Granted
 	args, err := json.Marshal(a)
 	if err != nil {
 		return nil, err
@@ -611,7 +610,7 @@ func (f *flow) setAside(ctx context.Context, a *agentturn.Agent, text, why strin
 			// buy steps by throwing a child's away.
 			let := callFailure{Failure: text}
 			var err error
-			if let.Entries, let.Granted, let.Summary, err = f.abandonChild(ctx, a.State().Transcript, st, p, args, why); err != nil {
+			if let.Entries, let.Granted, err = f.abandonChild(ctx, a.State().Transcript, st, p, args, why); err != nil {
 				return nil, err
 			}
 			b, err := json.Marshal(let)
@@ -628,24 +627,24 @@ func (f *flow) setAside(ctx context.Context, a *agentturn.Agent, text, why strin
 
 // abandonChild abandons the runs of the child p waits on, for why, each
 // after its cleanup, and says what the child's run spent: its tree's
-// steps, what a person granted there, and its summary. A child that never
-// started spent nothing.
+// steps and what a person granted there. A child that never started spent
+// nothing.
 //
 // Nor did one that cannot be opened as its call asks, refused by the host
 // or unfit for its tools: it never ran there, nothing in it can be
 // abandoned, and setting its call aside, or timing it out, must not fail
 // for that.
-func (f *flow) abandonChild(ctx context.Context, view agentturn.Transcript, st State, p agentturn.PendingCall, args callArgs, why string) (entries, granted int, summary *Summary, err error) {
+func (f *flow) abandonChild(ctx context.Context, view agentturn.Transcript, st State, p agentturn.PendingCall, args callArgs, why string) (entries, granted int, err error) {
 	c, err := f.childFor(ctx, view, st, p.Call, args)
 	if err != nil {
-		return 0, 0, nil, err
+		return 0, 0, err
 	}
 	cctx, child, cf, err := f.open(ctx, c)
 	if unfit := (*unfitChild)(nil); errors.Is(err, ErrChildRefused) || errors.As(err, &unfit) {
-		return 0, 0, nil, nil
+		return 0, 0, nil
 	}
 	if err != nil {
-		return 0, 0, nil, err
+		return 0, 0, err
 	}
 	if !cf.started(cctx, child, args.Run) {
 		// Not under way there: it never started, and spent nothing, or an
@@ -655,13 +654,13 @@ func (f *flow) abandonChild(ctx context.Context, view agentturn.Transcript, st S
 	}
 	inner, err := cf.setAside(cctx, child, abandonedText, why)
 	if err != nil {
-		return 0, 0, nil, err
+		return 0, 0, err
 	}
 	// The abandon is the program's word to the child, not a person's.
 	from := agentturn.ContextWithTrigger(cctx, agentturn.Trigger{Kind: TriggerKind, Ref: c.Caller})
 	end, err := child.Prompt(from, append(inner, abandonMessage(why))...)
 	if end == nil {
-		return 0, 0, nil, err
+		return 0, 0, err
 	}
 	// A cleanup that waits on a question in the child is cut short: the
 	// person is asked nothing in a session abandoned from above, and the
@@ -674,7 +673,7 @@ func (f *flow) abandonChild(ctx context.Context, view agentturn.Transcript, st S
 			}
 		}
 		if end, err := child.Prompt(from, append(refused, abandonMessage(why))...); end == nil {
-			return 0, 0, nil, err
+			return 0, 0, err
 		}
 	}
 	return cf.spentBy(cctx, child, args.Run)
@@ -690,7 +689,7 @@ func (f *flow) expireChild(ctx context.Context, view agentturn.Transcript, st St
 	c := callClock{workflow: st.Workflow, step: n.ID, timeout: n.Timeout}
 	why := c.why()
 	var err error
-	if a.Entries, a.Granted, a.Summary, err = f.abandonChild(ctx, view, st, p, a, why); err != nil {
+	if a.Entries, a.Granted, err = f.abandonChild(ctx, view, st, p, a, why); err != nil {
 		return nil, err
 	}
 	if n.routesFailure() {
@@ -716,22 +715,22 @@ func callDeadline(st State, p agentturn.PendingCall) time.Time {
 }
 
 // spentBy is what run spent in a's session, as its record says once its
-// end is written: the steps its tree entered, what a person granted there,
-// and its summary. A kept child's session holds a run for each visit, and
-// only run's are counted.
-func (f *flow) spentBy(ctx context.Context, a *agentturn.Agent, run string) (entries, granted int, summary *Summary, err error) {
+// end is written: the steps its tree entered and what a person granted
+// there. A kept child's session holds a run for each visit, and only
+// run's are counted.
+func (f *flow) spentBy(ctx context.Context, a *agentturn.Agent, run string) (entries, granted int, err error) {
 	all, err := f.record(ctx, a.State().Transcript)
 	if err != nil {
-		return 0, 0, nil, err
+		return 0, 0, err
 	}
 	runs, err := Runs(all, nil)
 	if err != nil {
-		return 0, 0, nil, err
+		return 0, 0, err
 	}
 	for _, in := range runs {
 		if in.ID == run {
-			return in.State.Entries, in.State.Granted, in.Summary, nil
+			return in.State.Entries, in.State.Granted, nil
 		}
 	}
-	return 0, 0, nil, nil
+	return 0, 0, nil
 }

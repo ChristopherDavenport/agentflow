@@ -166,8 +166,8 @@ say `max_visits: person` (`Node.PersonPaced`, with `MaxVisits` 0).
   the tree's steps: `State.Entries`, and the `entries` a child's result
   carries, leave it out. Only that entry is exempt. A retry of the step,
   an operator's override and every visit of a step that is not
-  `max_visits: person` count. A run's summary still counts every step
-  that ran.
+  `max_visits: person` count. `State.Entered`, which a run's summary
+  counts, still takes in every step that ran.
 - **Unaffected:** the repeat rule and timeouts.
 - **Read from the record.** Whether a visit was paced is read from the
   steps the run has finished, in a called run and in a child each in its

@@ -9,6 +9,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
@@ -20,7 +21,7 @@ import (
 // one it finds says so rather than guess. Every run is keyed, and every
 // call to a workflow runs in a child session, so a session holds no run
 // another of its runs called.
-const RecordFormat = 3
+const RecordFormat = 4
 
 // The statuses of an [Instance]. All but running are written down, by
 // flow_end, so that having left a workflow is not something to infer.
@@ -57,9 +58,6 @@ type Ending struct {
 	// Limit names the bound across the tree of runs the run failed on,
 	// such as depth, so every run it is nested in fails with it.
 	Limit string `json:"limit,omitempty"`
-	// Summary sums up how the run went: its time, its steps and what its
-	// model requests used, the runs it called included.
-	Summary *Summary `json:"summary,omitempty"`
 	// Cleanup says how an abandoned run's cleanup path went: done, or why
 	// it stopped. It is empty for a run with none.
 	Cleanup string `json:"cleanup,omitempty"`
@@ -114,19 +112,24 @@ type Instance struct {
 	Spawn string
 	Fresh bool
 	// Start is the item that called flow_start, and End the item that
-	// recorded the ending, -1 while there is none.
-	Start, End int
-	Status     string
-	Outcome    string
-	Reason     string
+	// recorded the ending, -1 while there is none. Stop is the first item
+	// past the run's span: where the session's next run starts, or the
+	// transcript's length. They index the transcript the run was read
+	// from, the child session's for a run called into one, and a run
+	// read only from its call's result has none: Start and End are -1.
+	Start, End, Stop int
+	// Started and Ended are when the run's start and its end were
+	// written, as their results say, zero where the record has none.
+	Started, Ended time.Time
+	Status         string
+	Outcome        string
+	Reason         string
 	// State is where the run got to.
 	State State
 	// Problem says the record cannot be read as it claims to be: an
 	// unknown format, a definition that does not match its digest, or a
 	// replay that disagrees with the recorded ending.
 	Problem string
-	// Summary is what its end summed up, nil while it has none.
-	Summary *Summary
 	// Children are the runs it called, in the order they started.
 	Children []*Instance
 
@@ -212,7 +215,7 @@ func rootRun(t agentturn.Transcript, at int, c *openresponses.FunctionCall, out 
 	if err := decode([]byte(c.Arguments), &p); err != nil {
 		return nil, fmt.Errorf("flow_start: %w", err)
 	}
-	run := &Instance{Workflow: p.Workflow, Digest: p.Digest, Inputs: p.Inputs, Start: at, End: -1, Status: Running, from: at, stop: len(t),
+	run := &Instance{Workflow: p.Workflow, Digest: p.Digest, Inputs: p.Inputs, Start: at, End: -1, Stop: len(t), Status: Running, from: at, stop: len(t),
 		ID: p.Run, Parent: p.Parent, Caller: p.Caller, Depth: p.Depth, Fresh: p.Context == ContextFresh}
 	var res Result
 	if json.Unmarshal([]byte(out.Output.String()), &res) != nil || res.Outcome != OK {
@@ -229,6 +232,7 @@ func rootRun(t agentturn.Transcript, at int, c *openresponses.FunctionCall, out 
 		return run, nil
 	}
 	run.Graph, run.root = g, g
+	run.Started = stampOf(out.Output.String())
 	// The run stops where another of its workflow starts. Where another
 	// is asked for, the run is abandoned: its cleanup and its ending, and
 	// its calls', come after that, before the next start.
@@ -269,8 +273,16 @@ func rootRun(t agentturn.Transcript, at int, c *openresponses.FunctionCall, out 
 			in.Children = append(in.Children, kid)
 		}
 	}
+	run.Stop = run.stop
 	if len(r.frames) > 0 && r.frames[0].end >= 0 {
 		run.End = at + r.frames[0].end
+		id := t[run.End].(*openresponses.FunctionCall).CallID
+		for i := run.End + 1; i < len(t); i++ {
+			if o, ok := t[i].(*openresponses.FunctionCallOutput); ok && o.CallID == id {
+				run.Ended = stampOf(o.Output.String())
+				break
+			}
+		}
 	}
 	return run, nil
 }
@@ -301,14 +313,23 @@ func childRun(t agentturn.Transcript, at int, fc freshCall, in *Instance, open f
 		if !ok || o.CallID != fc.call {
 			continue
 		}
-		var res Result
-		if decode([]byte(o.Output.String()), &res) == nil && res.Outcome != "" {
-			kid.Status, kid.Outcome = Done, res.Outcome
-			if res.Outcome == Failed {
-				kid.Status = Failed
-			}
-		} else {
-			kid.Status, kid.Reason = Failed, o.Output.String()
+		// What the call's result says of the run: how it came out, and
+		// what its tree spent of the steps.
+		var said struct {
+			Outcome string `json:"outcome"`
+			Failure string `json:"failure"`
+			Limit   string `json:"limit"`
+		}
+		_ = decode([]byte(o.Output.String()), &said)
+		kid.State.Entries, kid.State.Granted = spent(o.Output.String())
+		switch {
+		case said.Failure == abandonedText || said.Failure == overriddenText:
+			// Set aside as the runs were abandoned, or for an override.
+			kid.Status, kid.Reason = Abandoned, said.Failure
+		case said.Failure != "" || said.Limit != "" || said.Outcome == Failed || said.Outcome == "":
+			kid.Status, kid.Reason = Failed, cmp.Or(said.Failure, o.Output.String())
+		default:
+			kid.Status, kid.Outcome = Done, said.Outcome
 		}
 		break
 	}
@@ -325,7 +346,7 @@ func judge(in *Instance, f *frame) {
 	if e == nil {
 		return
 	}
-	in.Status, in.Reason, in.Outcome, in.Summary = e.Status, e.Reason, e.Outcome, e.Summary
+	in.Status, in.Reason, in.Outcome = e.Status, e.Reason, e.Outcome
 	ended := st.Done && st.Outcome != Failed
 	switch {
 	case !slices.Equal(pathOf(st.Steps), e.Path):

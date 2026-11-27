@@ -87,11 +87,10 @@ func TestAnOverrideCountsTheStepsOfTheChildItThrewAway(t *testing.T) {
 			if tc.o.Action != OverrideAbandon {
 				return
 			}
-			// The end's summary counts the same steps, and lists the child as
-			// abandoned, with what it spent.
-			s := root.Summary
-			if s == nil || s.Steps != tc.own+spent || len(s.Calls) != 1 || s.Calls[0].Status != Abandoned || s.Calls[0].Steps != spent {
-				t.Errorf("summary = %+v", s)
+			// The child is listed as abandoned, with what its call's result
+			// says it spent, though its session is not read here.
+			if len(root.Children) != 1 || root.Children[0].Status != Abandoned || root.Children[0].State.Entries != spent || root.Children[0].Start != -1 {
+				t.Errorf("child = %+v", root.Children)
 			}
 		})
 	}
@@ -248,14 +247,12 @@ func TestAnOverrideBeforeAKillIsCountedOnResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := runs[0]
-	if root.State.Entries != 2+3+3+1 || root.Summary == nil || root.Summary.Steps != root.State.Entries {
-		t.Fatalf("entries %d, summary %+v", root.State.Entries, root.Summary)
+	if root.State.Entries != 2+3+3+1 {
+		t.Fatalf("entries %d", root.State.Entries)
 	}
 	statuses := []string{}
-	for _, c := range root.Summary.Calls {
-		if c.Parent == root.ID {
-			statuses = append(statuses, c.Status)
-		}
+	for _, c := range root.Children {
+		statuses = append(statuses, c.Status)
 	}
 	if !slices.Equal(statuses, []string{Abandoned, Done}) {
 		t.Errorf("the calls' statuses are %v", statuses)

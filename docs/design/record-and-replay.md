@@ -68,11 +68,12 @@ ignored.
 | `context`, `path` | for a run in a child session: `session` or `fresh`, which is what the child opened with, and the way to its call from the run nobody called |
 | `files`, `documents`, `question` | for a run in a child: what its call passed in |
 
-The start's result holds the time the start was recorded. Nothing is
-decided by it; the run's summary reads it.
+The start's result holds the time the start was recorded, and the end's
+the time the end was. Nothing is decided by either; `Runs` reads them
+back as `Started` and `Ended`.
 
 ```json
-{"workflow": "pr-review", "digest": "sha256:…", "format": 3,
+{"workflow": "pr-review", "digest": "sha256:…", "format": 4,
  "run": "3fa9c2d1e0", "parent": "77b01c4a9e",
  "caller": "flow_77b01c4a9e_review_v1", "depth": 1, "context": "session",
  "inputs": {"pr": 812}}
@@ -288,7 +289,6 @@ A run's end is written, not inferred. Only the program may call
 | `step` | the step a failed run was at |
 | `limit` | the bound across the tree a run failed on, so every run it is nested in fails with it |
 | `cleanup` | how an abandoned run's cleanup went: `done`, `failed at <step>: <why>`, or `cut short: abandoned again`; empty with no cleanup path |
-| `summary` | the run's time, steps and usage |
 
 ### Statuses
 
@@ -316,54 +316,66 @@ invocation, so a run's span reaches past an invocation to its end.
 
 ### The summary
 
-Every `flow_end` carries a `summary`:
+A run's summary is not in the record. It is read from it afterwards,
+with the `summary` package, so it comes out the same whenever it is
+asked for, a restart or not:
+
+```go
+runs, err := agentflow.Runs(record, open)
+s := summary.Of(runs[0], summary.Options{Responses: responses, Price: price})
+```
 
 ```json
 {"started": "2026-11-26T10:00:00Z", "ended": "2026-11-26T10:04:12Z",
  "steps": 9,
  "usage": {"requests": 6, "input_tokens": 52000, "output_tokens": 4100, "cost": 0.21},
  "calls": [{"workflow": "pr-review", "run": "77b01c4a9e", "parent": "3fa9c2d1e0",
-            "status": "done", "outcome": "clean", "summed": true, "steps": 5,
+            "status": "done", "outcome": "clean", "read": true, "steps": 5,
             "usage": {"requests": 4, "input_tokens": 30000, "output_tokens": 2600, "cost": 0.12}}]}
 ```
 
-- **Time** comes from what is recorded: the start's result holds when the
-  start was recorded, and the program reads the clock once more as it
-  writes the end. Neither decides anything.
-- **Steps** are the step entries of the run, attempts and jumps included,
-  and of every run it called.
+- **Time** is the run's `Started` and `Ended`, as the results of its
+  start and its end hold them. A run under way has no end.
+- **Steps** are the steps the run entered itself (`State.Entered`),
+  attempts, jumps and person-paced visits included, and those of every
+  run it called.
 - **Usage** is what the run's model requests used, and the requests of
   every run it called. The program's own turns, sent to
-  `agentflow/<workflow>`, use nothing and are not counted.
+  `agentflow/<workflow>`, use nothing and are not counted
+  (`IsProgramModel`).
 - **Calls** lists every run below it, at any depth, each before the runs
   it called and with the key of the run that called it (`parent`). The
   list is flat, and a reader rebuilds the tree by `parent`. Each entry's
-  totals take in those below it. `summed` says the run's end wrote a
-  summary. A child set aside is listed as `abandoned`, with its steps.
-- **Cost** is the host's to price, with `Prices(func(model, usage) (cost,
-  ok))`. Requests of a model with no price are counted, left out of
-  `cost`, and their models listed in `unpriced`. With no `Prices`, every
+  totals take in those below it. A child set aside is listed as
+  `abandoned`, with its steps.
+- **Cost** is the caller's to price, with `Options.Price(model, usage)
+  (cost, ok)`. Requests of a model with no price are counted, left out of
+  `cost`, and their models listed in `unpriced`. With no `Price`, every
   model is unpriced.
 
-A child's summary goes back to its caller in the call's result, a failure
-included, so the caller's summary needs no other session.
-
-Usage is not in the record's items: it is on the session's response
+Usage is not in the record's items: it is on each session's response
 entries, which agentflow does not read on its own.
 
-- **With `Responses(read)`**, the host returns the session's responses as
-  `ResponseUsage`: the model, what it used, and how many of the record's
-  items come before the response's own. The program attributes each to
-  the run that was current at that point of the record, leaves out its
-  own turns, prices the rest, and writes the sum into the end. A run that
-  started before a restart counts every request it made. A child's opener
-  gives the child's own `Responses` with `Child.Apply`.
-- **Without it** a summary counts no usage, and says so in
-  `usage.partial`. Its times, steps and calls are whole. A summary is
-  never padded or guessed.
+- **`Options.Responses(spawn)`** returns a session's responses: the model,
+  what each used, and `At`, how many items of that session's record come
+  before the response's own. The empty spawn is the session the run was
+  read from, and any other names a child's, as the `open` given to `Runs`
+  names it. The record is the transcript `Runs` was given for that
+  session, so a forked child's is counted from its own first item.
+- **A response is a run's** when it falls inside the run's span: after
+  its `Start` and before its `End`, or before its `Stop` while it has no
+  end. A kept child's session holds a run for each visit, and each
+  counts its own.
+- **Without `Responses`** no usage is counted, and `usage.partial` says
+  so. Times, steps and calls are whole. A summary is never padded or
+  guessed.
+- **A run is read from its own session** when `Runs` was given an `open`
+  (`read` is true). One that was not is known only from its call's
+  result: its steps are what the result says its tree spent of the
+  tree's steps, which leaves out person-paced visits; the runs below it
+  are not listed; and no usage is counted for it.
 - A run is partial if a run it called is: `partial` keeps the first
-  reason it meets, and a call whose end wrote no summary makes its caller
-  partial too.
+  reason it meets.
 
 ## Reading a session back
 
@@ -376,10 +388,14 @@ the runs nobody called there, in the order they started, as
 - `Parent`, `Caller` and `Depth`, empty for a run nobody called;
 - `Spawn`, for a run in a child session, and `Fresh`, for one whose
   session began with nothing of its caller's;
-- `Start` and `End`, the items its span covers, `End` being -1 while the
-  run has none;
+- `Start` and `End`, the items that called its `flow_start` and its
+  `flow_end`, `End` being -1 while the run has none, and `Stop`, the
+  first item past its span: the session's next run's start, or the
+  record's length. They index the transcript the run was read from. A
+  run known only from its call's result has `Start` and `End` -1;
+- `Started` and `Ended`, when its start and its end were written, zero
+  where the record has none;
 - `Status`, `Outcome`, `Reason` and `State`;
-- `Summary`, as its end recorded it;
 - `Children`, the runs it called;
 - `Problem`.
 
@@ -391,7 +407,8 @@ guessed past.
 
 `open` reads a child's session by spawn ID. With it, a run called into a
 child is read from the child's session. Without it, the child is listed
-with the status its call's result gives. A child's session read on its
+with what its call's result gives: its status, with a child set aside
+read as `abandoned`, and in `State.Entries` the steps its tree spent. A child's session read on its
 own lists its runs as runs nobody called there, each naming its caller.
 
 `Instance.At(transcript, i)` gives the run's state after any item.
@@ -454,7 +471,7 @@ Resuming needs the store and the definitions. Nothing else was kept.
 
 ### Record format
 
-`RecordFormat` is 3. It versions what a workflow writes into a transcript
+`RecordFormat` is 4. It versions what a workflow writes into a transcript
 and how replay reads it: replay's meaning is part of the format, and a
 change to it changes the number. A start of any other format is refused
 with `ErrChanged`, and `Runs` reports it in `Problem`.

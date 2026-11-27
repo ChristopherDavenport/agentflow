@@ -21,7 +21,8 @@ the documents your change touches before writing code.
 - Go 1.26 is the floor, which `agentworkspace` sets.
 - The root package builds from `openresponses`, `agenttool`, `agentturn`,
   `agentpolicy` and the standard library; `script` adds `agentworkspace`;
-  `workflow` adds `agentskill` and `go.yaml.in/yaml/v3`.
+  `workflow` adds `agentskill` and `go.yaml.in/yaml/v3`; `summary`
+  adds nothing, and the root does not import it.
   A step's policy is agentpolicy's grammar and engine; agentflow keeps no
   matching of its own.
   `agentsession` and `agentturn/session` are test dependencies only.

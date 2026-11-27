@@ -444,7 +444,7 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 	if !strings.HasPrefix(req.Model, programPrefix) {
 		return f.serve(ctx, req, sink)
 	}
-	st, all, err := f.read(ctx, req.Input)
+	st, _, err := f.read(ctx, req.Input)
 	nt, err := f.next(ctx, st, err)
 	if err != nil {
 		return err
@@ -474,9 +474,6 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 	id, name, args, err := nt.call()
 	if err != nil {
 		return err
-	}
-	if over, ok := args.(*Ending); ok {
-		over.Summary = f.summarize(ctx, st, all)
 	}
 	encoded, err := json.Marshal(args)
 	if err != nil {

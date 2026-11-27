@@ -119,9 +119,6 @@ type Result struct {
 	Entries int    `json:"entries,omitempty"`
 	Granted int    `json:"granted,omitempty"`
 	Limit   string `json:"limit,omitempty"`
-	// Summary is, for a call into a child, what the child's end summed
-	// up, which the caller's summary takes in.
-	Summary *Summary `json:"summary,omitempty"`
 }
 
 // Step is one finished node.
@@ -222,14 +219,10 @@ type State struct {
 	// it stopped.
 	Cleaning bool
 	Cleanup  string
-	// Summary is what the run's end summed up, once it is written.
-	Summary *Summary
-	// started is when the run started, as its start's result says;
-	// treeSteps counts the steps it and the runs it called entered; and
-	// called are the runs it called, as each one's end summed it up.
-	started   time.Time
-	treeSteps int
-	called    []Called
+	// Entered counts the steps the run itself entered, attempts and
+	// person-paced visits included. Entries is what counts toward the
+	// tree's bound, and takes in what the run called.
+	Entered int
 	// Note is what an operator said with the override that brought the
 	// run to its step, or ran it again, until the step finishes.
 	Note string
@@ -565,20 +558,6 @@ func (r *replay) step(i int, item openresponses.Item) {
 	r.settle()
 }
 
-// owners says whose turn each point of t was: owners[k] is the key of the
-// run current once the first k items had happened, so a model request
-// made there was that run's.
-func (g *Graph) owners(t agentturn.Transcript) []string {
-	r := g.newReplay()
-	out := make([]string, len(t)+1)
-	out[0] = r.top().st.Instance
-	for i, item := range t {
-		r.step(i, item)
-		out[i+1] = r.top().st.Instance
-	}
-	return out
-}
-
 func (r *replay) newRoot(inputs any) *frame {
 	return newFrame(State{g: r.g, Workflow: r.g.Name, Inputs: inputs}, -1)
 }
@@ -600,10 +579,6 @@ func (r *replay) top() *frame {
 func (r *replay) state(f *frame) State {
 	st := f.st
 	st.Documents = maps.Clone(f.st.Documents)
-	st.called = slices.Clone(f.st.called)
-	if f.ending != nil {
-		st.Summary = f.ending.Summary
-	}
 	st.Cleaning, st.Cleanup, st.abandonedFor = f.cleaning && f.cleaned == "", f.cleaned, f.why
 	st.endNow = f.aborting && f.ending == nil && f.st.Started && (f.cleaned != "" || !f.cleaning)
 	if o := r.request; o != nil {
@@ -942,8 +917,6 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 		entries, granted := spent(out.Output.String())
 		r.entries += entries
 		r.granted += granted
-		st.treeSteps += entries
-		st.called = append(st.called, calledFresh(st.Instance, argsOf(c), out.Output.String())...)
 		v, ok := verdictOf(n, out)
 		switch {
 		case st.Held != nil:
@@ -1012,8 +985,6 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 			entries, granted := spent(out.Output.String())
 			r.entries += entries
 			r.granted += granted
-			st.treeSteps += entries
-			st.called = append(st.called, calledFresh(st.Instance, argsOf(c), out.Output.String())...)
 			var said Result
 			if decode([]byte(out.Output.String()), &said) == nil && said.Limit != "" {
 				f.failed, st.limit = &limitError{limits[said.Limit], said.Reason}, said.Limit
@@ -1088,7 +1059,6 @@ func (r *replay) started(i int, f *frame, c *openresponses.FunctionCall, out *op
 		Depth: p.Depth, Fresh: p.Context == ContextFresh, g: r.g, prefix: prefix, maxDepth: cmp.Or(max(p.MaxDepth, 0), DefaultMaxDepth)}
 	root.path = p.Path
 	root.st.Documents, root.st.docAt = initialDocuments(r.g, p.Inputs, p.Documents)
-	root.st.started = startedAt(out.Output.String())
 	root.st.passedFiles, root.st.question = p.Files, p.Question
 	root.start = r.at[c.CallID]
 	// A child is given what its caller's tree had left, none included.
@@ -1263,7 +1233,7 @@ func (r *replay) retry(f *frame, i int) {
 		f.since, st.Nudges, st.Begun, st.refused = i, 0, false, 0
 	}
 	r.entries++
-	st.treeSteps++
+	st.Entered++
 }
 
 // grant reads a person's answer to the bound f's run has reached: more
@@ -1335,7 +1305,7 @@ func (r *replay) enter(f *frame, i int, n *Node) {
 	if !paced {
 		r.entries++
 	}
-	st.treeSteps++
+	st.Entered++
 	r.bounds(f)
 }
 
