@@ -32,7 +32,8 @@ order it defines, and nothing it does not.
    its `outputs_by` for that outcome.
 
 A branch is an outcome and nothing else. Skip no step, add none, and
-take no edge the diagram does not draw.
+take no edge the diagram does not draw. Between steps do nothing: when
+a step ends, take its edge at once.
 
 ## Kinds of step
 
