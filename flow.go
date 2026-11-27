@@ -149,15 +149,31 @@ type flow struct {
 	// fileTool and fileField name the host's tool that reads a workspace
 	// file for a step's files, and its path argument.
 	fileTool, fileField string
-	// responses reads what the session's responses used, when the host
-	// gives it, and prices prices it, for the summary a run's end
-	// records.
-	prices    func(model string, u openresponses.Usage) (float64, bool)
-	responses func(ctx context.Context) ([]ResponseUsage, error)
 	// due is the deadline of the model step the last request was shaped
 	// for, so the model's stream is cut there.
 	due *deadline
 }
+
+// stamp is the data of a result that says when it was written.
+func stamp() map[string]any {
+	return map[string]any{"at": time.Now().UTC().Format(time.RFC3339Nano)}
+}
+
+// stampOf reads the time a start's or an end's result says it was
+// written, zero when it says none.
+func stampOf(output string) time.Time {
+	var res struct {
+		Data struct {
+			At time.Time `json:"at"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal([]byte(output), &res)
+	return res.Data.At
+}
+
+// IsProgramModel says name is the model name of a turn the program
+// took: agentflow answered it, and it used nothing.
+func IsProgramModel(name string) bool { return strings.HasPrefix(name, programPrefix) }
 
 // programPrefix starts the model name of a turn the program takes, so a
 // record never passes a program's call off as a model's.
@@ -600,15 +616,17 @@ func (f *flow) startTool() agenttool.Tool {
 		if err := checkData(g.Inputs, p.Inputs); err != nil {
 			return Result{}, fmt.Errorf("agentflow: inputs of %s: %w", g.Name, err)
 		}
-		// The time it started is a result, so a summary reads it back.
-		return Result{Outcome: OK, Data: map[string]any{"at": time.Now().UTC().Format(time.RFC3339Nano)}}, nil
+		// The time it started is a result, so a reader has it from the
+		// record.
+		return Result{Outcome: OK, Data: stamp()}, nil
 	}, agenttool.WithReplay(safeReplay))
 }
 
 // endTool writes down that a run is over. Its arguments are the record.
 func (f *flow) endTool() agenttool.Tool {
 	return agenttool.New(endTool, "End a workflow run.", func(context.Context, Ending) (Result, error) {
-		return Result{Outcome: OK}, nil
+		// The time it ended is a result, as the time it started is.
+		return Result{Outcome: OK, Data: stamp()}, nil
 	}, agenttool.WithReplay(safeReplay))
 }
 

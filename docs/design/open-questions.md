@@ -66,11 +66,6 @@ These are in the code as it stands.
 
 ## Proposed, not built
 
-- **A summary read from the record instead of written into it.** A
-  run's times, steps and calls can be worked out from `Runs`, and its
-  usage from each session's responses, so `flow_end` need not carry a
-  summary. That takes an end time on the ending, a run's span in its
-  session's record, and a reader of each child session's responses.
 - **Approval by digest before a first run.** A workflow from a
   repository is repository code that runs at fixed points. The digest is
   recorded; nothing yet asks for approval of it.

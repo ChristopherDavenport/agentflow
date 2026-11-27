@@ -63,8 +63,6 @@ them added, provided they are given the same `*Graph` value `Apply` was.
 | `MaxDepth(n)`, `MaxSteps(n)` | bounds on the tree, under the workflow's own; the smaller wins. The root's start records them |
 | `PolicyMatchers(matchers, opts...)` | what agentpolicy needs to read a step's policy: for each working directory, each tool's matcher. See [policy-and-trust.md](policy-and-trust.md) |
 | `FileReader(tool, field)` | the host's tool that reads a workspace file for a step's `files`, and its path argument: `read` and `path` unless given. `Apply` refuses a step given workspace files when the config does not offer it |
-| `Responses(read)` | the session's responses with what each used, which a run's summary counts its usage from; without it a summary counts none |
-| `Prices(price)` | `price(model, usage)` returns a cost and whether the model is priced, for a run's summary |
 
 ## Entry points
 
@@ -169,7 +167,7 @@ What a host does for a child that opens with its caller's view
   `Thinking`, `Instructions`, `Tools`, `AllTools` and `ExcludeTools`.
 - `c.Apply(cfg, opts...)` makes the child's config follow its workflow,
   with the caller's options and `opts` added. The opener gives the
-  child's own `History`, and its own `Responses` if the host gives one.
+  child's own `History`.
   It makes the same checks of the child's config that `Apply` makes of
   the root's.
 - An opener that cannot open the child where its call asks returns an
@@ -263,9 +261,17 @@ base.Instructions += catalog.Prompt() + "\n\n" + workflow.StartPrompt(flows, wor
 - **Progress:** a script's progress entries, live and kept. See
   [steps-and-data.md](steps-and-data.md).
 - **Runs:** `Runs(record, open)` gives each run's status, outcome, path,
-  summary and children. `Instance.At(record, i)` is where a run stood
+  times, span and children. `Instance.At(record, i)` is where a run stood
   after item `i`. `Instance.Problem` says a record cannot be read as it
   claims to be.
+- **A summary:** `summary.Of(run, summary.Options{Responses, Price})`,
+  from the `summary` package, sums up one of those runs with every run
+  below it: its times, steps, usage and cost. Nothing of it is in the
+  record. The host gives `Responses(spawn)`, each session's responses
+  with what each used and where in that session's record it falls, and
+  `Price`, its prices. Give `Runs` an `open`, or a child is summed up
+  only from its call's result. See
+  [record-and-replay.md](record-and-replay.md#the-summary).
 
 ## Operational notes
 
@@ -276,7 +282,8 @@ base.Instructions += catalog.Prompt() + "\n\n" + workflow.StartPrompt(flows, wor
   an end and each program step are turns of the session they are in.
 - **The program's turns use nothing.** They are sent to the model name
   `agentflow/<workflow>`, answered by agentflow itself, and carry no
-  usage. Cost and eval tools should skip them, not report an unpriced
+  usage. Cost and eval tools should skip them (`IsProgramModel` says
+  which they are), not report an unpriced
   model.
 - **Nothing wakes a sleeping host.** A question's deadline and a call's
   are on the record; the host drives the run when one comes.
