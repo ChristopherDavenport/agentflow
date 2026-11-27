@@ -60,6 +60,14 @@ These are in the code as it stands.
 - **A seeded child with no store.** A host that keeps its agents in
   memory copies the caller's items into the child's agent. Its requests
   have no session to verify against, and it cannot compact.
+- **A workflow followed by hand is only as faithful as its model.**
+  Nothing enforces `workflow.SkillBody` in a host without workflows. In
+  trials with Sonnet on `take-issue` and `migrate-api` it kept to the
+  diagram, the questions and the scripts, and ended a step it could not
+  do `stuck`. It also looked around between steps, added commands to a
+  script's, and once skipped a fresh step it could not hand to another
+  agent. A fresh step done by the same model is not independent, and a
+  model can read the scripts that check it.
 - **A call in a child's inherited part without its output** is pending in
   the child. A fork before the calling call leaves that call out, but an
   earlier unanswered call of the same response would still be there.
@@ -99,10 +107,6 @@ These are in the code as it stands.
 Each of these is tested with scripted models only.
 
 - A question's timeout.
-- A model in a host without workflows following a workflow skill by
-  `workflow.SkillBody`: whether it reads the file, keeps to the diagram
-  and waits at a person step. Nothing tells it from a model that
-  improvises.
 - Cleanup on abort.
 - The token counts in a run's summary.
 - The tree's step bound, and the repeat rule.

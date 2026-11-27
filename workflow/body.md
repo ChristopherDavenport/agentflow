@@ -35,8 +35,8 @@ order it defines, and nothing it does not.
 A branch is an outcome and nothing else. Skip no step, add none, and
 take no edge the diagram does not draw. Take one step at a time: start
 a step only once the one before it has ended and you have its outcome,
-never in the same command. Between steps do nothing: when a step ends,
-take its edge at once.
+never in the same command. Between steps do nothing, not even look
+around: when a step ends, take its edge at once.
 
 ## Kinds of step
 
@@ -46,7 +46,7 @@ The node's shape gives its kind.
 and decide nothing.
 
 - `run: <path>` runs that script, a path within this skill's
-  directory. Run the script itself, not commands of your own in its
+  directory. Run the script itself, and nothing with it or in its
   place. Run it in the working directory, or in `dir` below it, with
   `with` as one JSON object on stdin, `AGENTFLOW_SKILL_DIR` set to this
   skill's directory, `AGENTFLOW_OUTPUT` to a new empty file and
@@ -78,8 +78,9 @@ and the skills under `skills` it names.
   work, not part of it.
 - **`context: fresh`.** The step works from its `with`, its files and
   its prompt alone, as if it had seen nothing before. If you can hand it
-  to a separate agent given only those, do. Steps with the same `child`
-  go to the same agent.
+  to a separate agent given only those, do; otherwise do it yourself,
+  from those alone. Never skip it. Steps with the same `child` go to the
+  same agent.
 - **Stuck.** If you cannot do the step, do not make up a way round:
   end it with the outcome `stuck` and data `{"reason": ...}`. Take its
   `stuck` edge if the diagram draws one; if it draws none, the step has
@@ -118,7 +119,7 @@ this skill (`from`) or from an input (`input`).
 - A program step's `documents.write` sets a document's file from a
   member of its result's data.
 - `${{ documents.<name> }}` is the file's text: a question that names
-  one shows it to the person.
+  one shows the person that text, whole, not a path or a summary.
 
 ## Limits
 
