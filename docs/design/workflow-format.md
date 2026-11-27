@@ -186,7 +186,9 @@ and it declares no outputs.
 
 A section may open with one `yaml` block of settings. The rest is prose,
 which may hold headings below `##` and fenced blocks. The prose under a
-model or person node is its prompt. A `yaml` block anywhere else, in a
+model or person node is its prompt. A program node takes no prose, since
+no model or person reads it: what the step is for goes under
+`description`. A `yaml` block anywhere else, in a
 section or before the first one, is an error, since it would look like
 settings and be none.
 

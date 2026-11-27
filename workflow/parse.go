@@ -243,11 +243,9 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 		g.Description, g.OnAbort, g.ExcludeTools = strings.TrimSpace(fm.Description), fm.OnAbort, fm.ExcludeTools
 		g.Context, g.Hidden = fm.Context, fm.Hidden
 		if fm.Timeout != "" {
-			d, err := time.ParseDuration(fm.Timeout)
-			if err != nil || d <= 0 {
-				return nil, fmt.Errorf("workflow: frontmatter: timeout %q: want a duration such as 90s, 10m or 1h", fm.Timeout)
+			if g.Timeout, err = duration(fm.Timeout); err != nil {
+				return nil, fmt.Errorf("workflow: frontmatter: %w", err)
 			}
-			g.Timeout = d
 		}
 		for name, d := range fm.Documents {
 			if g.Documents == nil {
@@ -538,11 +536,9 @@ func node(n *agentflow.Node, s section) error {
 		return err
 	}
 	if set.Timeout != "" {
-		d, err := time.ParseDuration(set.Timeout)
-		if err != nil || d <= 0 {
-			return fmt.Errorf("timeout %q: want a duration such as 90s, 10m or 1h", set.Timeout)
+		if n.Timeout, err = duration(set.Timeout); err != nil {
+			return err
 		}
-		n.Timeout = d
 	}
 	if j := set.Judge; j != nil {
 		n.Judge = &agentflow.Judge{Criteria: strings.TrimSpace(j.Criteria), Outcomes: j.Outcomes, Tools: j.Tools, Returns: j.Returns, Policy: j.Policy.policy()}
@@ -581,6 +577,15 @@ func node(n *agentflow.Node, s section) error {
 		return err
 	}
 	return nil
+}
+
+// duration reads a timeout as it is written.
+func duration(s string) (time.Duration, error) {
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("timeout %q: want a duration such as 90s, 10m or 1h", s)
+	}
+	return d, nil
 }
 
 // fallback reads the answer a question takes with nobody to give one,

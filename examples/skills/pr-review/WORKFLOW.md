@@ -97,6 +97,9 @@ quoting the code that disproves it.
 
 ## disputed
 ```yaml
+description: >-
+  A dismissed finding is still reported, with why: whoever reads the
+  report decides, and nothing disappears on one model's say-so.
 run: scripts/disputed.sh
 with:
   title: ${{ steps.gather.outputs.title }}
@@ -104,8 +107,6 @@ with:
   findings: ${{ steps.review.outputs.findings }}
   reasons: ${{ steps.verify.outputs.reasons }}
 ```
-A dismissed finding is still reported, with why: whoever reads the
-report decides, and nothing disappears on one model's say-so.
 
 ## nothing
 ```yaml

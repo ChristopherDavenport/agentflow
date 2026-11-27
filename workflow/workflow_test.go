@@ -417,3 +417,16 @@ func withRun(req openresponses.Request, args string) string {
 	run, _, _ := strings.Cut(rest, `"`)
 	return `{"run":"` + run + `",` + args[1:]
 }
+
+// Prose under a program node would be a prompt nobody reads.
+func TestAProgramNodeTakesNoProse(t *testing.T) {
+	const src = "# t\n\n```mermaid\nflowchart TD\n  a[[a]]\n```\n\n## a\n```yaml\ntool: x\n```\nWhy this step is here.\n"
+	if _, err := workflow.Parse("t", []byte(src)); err == nil || !strings.Contains(err.Error(), `node "a": a program node has no prompt`) {
+		t.Errorf("err = %v", err)
+	}
+	described := strings.Replace(strings.Replace(src, "Why this step is here.\n", "", 1), "tool: x", "tool: x\ndescription: Why this step is here.", 1)
+	g, err := workflow.Parse("t", []byte(described))
+	if err != nil || g.Nodes[0].Description != "Why this step is here." {
+		t.Errorf("described: %v", err)
+	}
+}

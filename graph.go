@@ -526,6 +526,9 @@ func (g *Graph) Validate() error {
 			if n.Args != nil && !json.Valid(n.Args) {
 				bad("node %q: args are not JSON", n.ID)
 			}
+			if n.Prompt != "" {
+				bad("node %q: a program node has no prompt, since no model or person reads it; say what the step is for under description", n.ID)
+			}
 		case Agent, Person:
 			if n.Script != "" || n.Tool != "" || n.Args != nil || n.Flow != "" {
 				bad("node %q: only a program node has a script, a tool, args or a flow", n.ID)

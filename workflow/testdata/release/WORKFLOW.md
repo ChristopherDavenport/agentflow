@@ -18,11 +18,11 @@ flowchart TD
 
 ## gather
 ```yaml
+description: Stands in for `gh pr view --json files`.
 run: scripts/gather.sh
 with:
   pr: ${{ inputs.pr }}
 ```
-Stands in for `gh pr view --json files`.
 
 ## filter
 ```yaml

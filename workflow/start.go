@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"maps"
 	"slices"
 	"strings"
 
@@ -121,19 +122,10 @@ func workflowsOf(flows []*Workflow, invokes []string) (map[string]*Workflow, err
 	var errs []error
 	for _, name := range invokes {
 		if byName[name] == nil {
-			errs = append(errs, fmt.Errorf("workflow: ModelInvokes names %q, which is not a workflow given%s", name, agentflow.Suggest(name, mapKeys(byName))))
+			errs = append(errs, fmt.Errorf("workflow: ModelInvokes names %q, which is not a workflow given%s", name, agentflow.Suggest(name, slices.Sorted(maps.Keys(byName)))))
 		}
 	}
 	return byName, errors.Join(errs...)
-}
-
-func mapKeys(m map[string]*Workflow) []string {
-	var out []string
-	for k := range m {
-		out = append(out, k)
-	}
-	slices.Sort(out)
-	return out
 }
 
 // start meets a model's request for a workflow's skill, or says why it
