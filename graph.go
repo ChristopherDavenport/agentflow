@@ -2,7 +2,7 @@
 // each turn is taken by the program, the model or a person, and where
 // the workflow stands is read from the transcript alone.
 //
-// This is a spike for docs/rfcs/0001-agentflow.md. The API will change.
+// The design is in docs/design. The API will change.
 package agentflow
 
 import (
