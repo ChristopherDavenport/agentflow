@@ -316,6 +316,9 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 		case len(outcomes) == 0 && n.Flow != "":
 			// A call's outcomes are those of what it calls, known once
 			// the workflows are linked.
+		case e.outcome == agentflow.Stuck && n.Kind == agentflow.Agent:
+			// A model step ends with stuck when its model says so, and
+			// Validate holds the end to the step that may.
 		case len(outcomes) == 0:
 			outcomes = []string{agentflow.OK}
 			fallthrough

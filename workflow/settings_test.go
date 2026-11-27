@@ -41,6 +41,31 @@ func TestStepSettingsReadBack(t *testing.T) {
 	}
 }
 
+// A model step may end the workflow when its model is stuck, as it may
+// go on to a step; only a model step may.
+func TestAStuckModelMayEnd(t *testing.T) {
+	src := "# t\n\n```mermaid\nflowchart TD\n  fix[fix] --> done((done))\n  fix -->|stuck| failed((failed))\n```\n\n## fix\nFix it.\n"
+	g, err := workflow.Parse("t", []byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.Nodes[0].Ends[agentflow.Stuck] != agentflow.Failed {
+		t.Errorf("ends = %v", g.Nodes[0].Ends)
+	}
+	out, err := workflow.Format(g, "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back, err := workflow.Parse("t", out); err != nil || back.OwnDigest() != g.OwnDigest() {
+		t.Errorf("read back: %v\n%s", err, out)
+	}
+	script := strings.Replace(src, "fix[fix]", "fix[[fix]]", 1)
+	script = strings.Replace(script, "Fix it.\n", "```yaml\nrun: fix.sh\n```\n", 1)
+	if _, err := workflow.Parse("t", []byte(script)); err == nil || !strings.Contains(err.Error(), `undeclared outcome "stuck"`) {
+		t.Errorf("a script's stuck end: %v", err)
+	}
+}
+
 func TestStepSettingsAreChecked(t *testing.T) {
 	for change, want := range map[[2]string]string{
 		{"timeout: 90s", "timeout: soon"}:                                         "timeout \"soon\"",
