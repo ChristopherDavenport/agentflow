@@ -242,8 +242,8 @@ type Node struct {
 	// call is what linking learnt of the callee of a Flow node.
 	call *callee
 	// otherModel says a model step or a call names a model its workflow
-	// does not default to, which [Graph.Validate] works out: with no
-	// Context, its work is fresh.
+	// does not default to, which [Graph.Validate] works out: its work is
+	// fresh, and may not say it reads the session.
 	otherModel bool
 	// pick is the schema of one of a Person node's choices, as the list
 	// they come from declares it, nil when unknown.
@@ -261,7 +261,10 @@ type StepSkill struct {
 // callee is a Flow node's contract, as [Graph.Link] reads it from the
 // workflow it calls.
 type callee struct {
-	g        *Graph
+	g *Graph
+	// other says the workflow called names a model its caller's workflow
+	// does not default to: the call is fresh.
+	other    bool
 	outcomes []string
 	data     map[string]*agenttool.Schema
 }
@@ -529,10 +532,15 @@ func (g *Graph) Validate() error {
 			bad("node %q: context %q: want %q or %q", n.ID, n.Context, ContextSession, ContextFresh)
 		}
 		// A model step or a call that asks for another model than its
-		// workflow's reads nothing the other model wrote unless it says
-		// session: the definition alone decides, so position does not turn
-		// on the host.
+		// workflow's reads nothing the session's model wrote: a session
+		// keeps its model. The definition alone decides, so position does
+		// not turn on the host; a workflow that names no model has the
+		// host's, which no definition knows, so any model named is another.
 		n.otherModel = (n.Kind == Agent || n.Flow != "") && n.Model != "" && n.Model != g.Model
+		if n.otherModel && n.Context == ContextSession {
+			bad("node %q: context: %s keeps the model of the session it reads, and model %q is not the workflow's%s: say context: %s, or name no model",
+				n.ID, ContextSession, n.Model, workflowModel(g), ContextFresh)
+		}
 		errs = append(errs, n.checkChild()...)
 		errs = append(errs, n.checkSettings()...)
 		errs = append(errs, n.checkFiles()...)
@@ -693,4 +701,12 @@ func (g *Graph) closure() map[string]*Graph {
 		}
 	}
 	return out
+}
+
+// workflowModel says which model g's frontmatter names, for an error.
+func workflowModel(g *Graph) string {
+	if g.Model == "" {
+		return ", which names none and so has the host's"
+	}
+	return fmt.Sprintf(", %q", g.Model)
 }

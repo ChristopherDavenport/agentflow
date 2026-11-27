@@ -82,11 +82,14 @@ type ChildSettings struct {
 	// empty for the root: the one its call recorded, resolved from the
 	// record when the call was made. script.Sub makes a workspace of it.
 	Dir string
-	// Model names the model the child asks, empty for the caller's: a
+	// Model names the model the child asks, and the opener's config names
+	// it as its ModelName, which is how the loop tells whose reasoning a
+	// request may carry. A seeded child's is always its caller's: the
+	// model the session it opens with was asked as. A fresh child's is a
 	// step's, or for a call the model of the workflow called, and where
-	// that names none the call's. The opener's config names it as its
-	// ModelName, which is how the loop tells whose reasoning a request may
-	// carry. Thinking is how hard a fresh model step reasons.
+	// that names none the call's; empty, it is the host's own default,
+	// whatever the caller was asked as. Thinking is how hard a fresh model
+	// step reasons.
 	Model    string
 	Thinking string
 	// Instructions is added to the child's instructions.
@@ -244,15 +247,17 @@ func (f *flow) childFor(ctx context.Context, view agentturn.Transcript, st State
 		// names that model, so the loop knows whose reasoning each request
 		// may carry.
 		asked := cmp.Or(g.Model, n.Model)
-		c.Settings = ChildSettings{Dir: a.Dir, Model: asked, Instructions: n.Instructions}
 		c.policies = f.policies(st)
 		if a.Context == ContextSession {
+			// A child that opens with its caller's session keeps its
+			// caller's model, at any depth: loading refused any other.
+			asked = cmp.Or(st.g.Model, f.modelName)
 			c.Seeded = true
-			other := asked != "" && asked != cmp.Or(st.g.Model, f.modelName)
-			if c.Seed, err = seedFor(view, call.CallID, other); err != nil {
+			if c.Seed, err = seedFor(view, call.CallID); err != nil {
 				return Child{}, err
 			}
 		}
+		c.Settings = ChildSettings{Dir: a.Dir, Model: asked, Instructions: n.Instructions}
 	}
 	return c, nil
 }
@@ -263,12 +268,9 @@ func (f *flow) childFor(ctx context.Context, view agentturn.Transcript, st State
 // child reads no call without a result. What no model may read of it the
 // child's view leaves out, as the caller's did.
 //
-// A child asked as another model than its caller, other, is seeded
-// without the reasoning: that is its writer's alone to read. The loop
-// leaves it out of the requests of an agent made from a session, which
-// records who wrote what; a seed carries no such record, so it is left
-// out here.
-func seedFor(view agentturn.Transcript, id string, other bool) (openresponses.Items, error) {
+// The seed holds its caller's reasoning: a seeded child is asked as its
+// caller's model, whose reasoning it is.
+func seedFor(view agentturn.Transcript, id string) (openresponses.Items, error) {
 	at := slices.IndexFunc(view, func(item openresponses.Item) bool {
 		c, ok := item.(*openresponses.FunctionCall)
 		return ok && c.CallID == id
@@ -276,14 +278,7 @@ func seedFor(view agentturn.Transcript, id string, other bool) (openresponses.It
 	if at < 0 {
 		return nil, fmt.Errorf("agentflow: the call %s is not in its session's transcript", id)
 	}
-	seed := slices.Clone(openresponses.Items(view[:at]))
-	if other {
-		seed = slices.DeleteFunc(seed, func(item openresponses.Item) bool {
-			_, ok := item.(*openresponses.ReasoningItem)
-			return ok
-		})
-	}
-	return seed, nil
+	return slices.Clone(openresponses.Items(view[:at])), nil
 }
 
 // open asks the host for the child's agent, the context its runs take,

@@ -60,19 +60,6 @@ These are in the code as it stands.
 - **A seeded child with no store.** A host that keeps its agents in
   memory copies the caller's items into the child's agent. Its requests
   have no session to verify against, and it cannot compact.
-- **A model step asked as another model in its run's session is sent
-  the session model's reasoning.** The loop leaves another model's
-  reasoning out by the model its config names, before the program's hook
-  names the step's model and shapes the request, and does not do it
-  again. With `context: session` on such a step its request carries
-  reasoning it did not write, and a session recorder writes that
-  response without a request hash. A call's child is not affected: it is
-  opened under its own model's name. A step of a called workflow that
-  names a third model and says `session` is.
-- **A child that names no model is opened as the host's own,** not as
-  its caller's, where its caller was opened as another. The loop still
-  tells whose reasoning it reads, from its session; a host with no store
-  has only the seed, which keeps the caller's reasoning for it.
 - **A call in a child's inherited part without its output** is pending in
   the child. A fork before the calling call leaves that call out, but an
   earlier unanswered call of the same response would still be there.
@@ -130,11 +117,12 @@ Each of these is tested with scripted models only.
   long inherited conversation, of many earlier steps, of a caller's
   folded context, or of what a callee two calls deep inherits, is not
   tried.
-- A call in its caller's context asked as a model of another provider.
-  Haiku calling Sonnet and Sonnet calling Haiku are tried: the callee
-  reports the word and is sent none of its caller's reasoning. Sonnet
-  wrote no reasoning items in those runs, so Haiku has not been shown
-  going without Sonnet's, and no two providers have been tried.
+- A caller whose model writes reasoning other than Haiku. A call in its
+  caller's context is tried with thinking asked of the caller: Haiku's
+  reasoning reaches the callee, asked as Haiku, and every hash verifies.
+  Sonnet wrote no reasoning items in those runs. A fresh call on another
+  model is tried both ways between the two, and no two providers have
+  been tried.
 
 Forked child sessions are tested on agentturn/session's memory and jsonl
 stores only, not on sqlite or cas, and not through its retry path.

@@ -312,14 +312,9 @@ A model step chooses what it reads with `context`:
   carry what it needs.
 
 `session` is the default, with one exception: a model step whose `model`
-differs from its workflow's frontmatter `model`, or that names one when
-the frontmatter names none, defaults to `fresh`. Another model would read
-a conversation it did not write, without the reasoning behind it, and
-take the earlier turns for its own. Saying `context: session` keeps it in
-its run's session. This is decided from the definition alone, at load,
-never from the host's config. A call that names another model defaults
-to `fresh` the same way
-([calls-and-children.md](calls-and-children.md#context-what-a-child-opens-with)).
+is not its workflow's is `fresh`, and may not say `context: session`. A
+session keeps its model; the rule, and what counts as another model, is
+in [calls-and-children.md](calls-and-children.md#context-what-a-child-opens-with).
 
 A message the person sends while a fresh step works is not in what that
 step reads; the caller takes no prompt while it holds the call. A fresh

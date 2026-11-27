@@ -133,12 +133,12 @@ func TestAnUnattendedModelStepHasATimeout(t *testing.T) {
 func TestStepsAskForTheirModelAndThinking(t *testing.T) {
 	g := &Graph{Name: "models", Model: "big", Thinking: "low", Nodes: []Node{
 		{ID: "plan", Kind: Agent, Prompt: "Plan.", Next: map[string]string{OK: "check"}},
-		{ID: "check", Kind: Agent, Prompt: "Check.", Model: "small", Thinking: "max", Context: ContextSession},
+		{ID: "check", Kind: Agent, Prompt: "Check.", Model: "small", Thinking: "max"},
 	}}
 	m := &fakeModel{outcomes: []string{OK, OK}}
-	a := nestedAgent(t, g, m, nil, Models("big", "small"))
-	if end := start(t, a); end.Reason != agentturn.ReasonDone {
-		t.Fatalf("end = %s %v", end.Reason, end.Err)
+	a := nestedAgent(t, g, m, nil, Models("big", "small", "fake"))
+	if end, _, err := Drive(t.Context(), g, a, start(t, a)); err != nil || end.Reason != agentturn.ReasonDone {
+		t.Fatalf("end = %+v, %v", end, err)
 	}
 	if len(m.requests) != 2 {
 		t.Fatalf("requests = %d", len(m.requests))
@@ -175,16 +175,16 @@ func TestStepsAskForTheirModelAndThinking(t *testing.T) {
 func TestAnotherModelRunsInAChild(t *testing.T) {
 	g := &Graph{Name: "models", Model: "big", Nodes: []Node{
 		{ID: "plan", Kind: Agent, Prompt: "Plan.", Model: "big", Next: map[string]string{OK: "check"}},
-		{ID: "check", Kind: Agent, Prompt: "Check.", Model: "small", Next: map[string]string{OK: "stay"}},
-		{ID: "stay", Kind: Agent, Prompt: "Stay.", Model: "small", Context: ContextSession},
+		{ID: "check", Kind: Agent, Prompt: "Check.", Model: "small", Next: map[string]string{OK: "again"}},
+		{ID: "again", Kind: Agent, Prompt: "Again.", Model: "small", Context: ContextFresh},
 	}}
 	if err := g.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	// Decided by the definition: the workflow's own model stays, another
-	// goes to a child, and session keeps it here.
-	if g.node("plan").fresh() || !g.node("check").fresh() || g.node("stay").fresh() {
-		t.Fatalf("fresh: plan %v, check %v, stay %v", g.node("plan").fresh(), g.node("check").fresh(), g.node("stay").fresh())
+	// Decided by the definition: the workflow's own model stays, and
+	// another goes to a child, said or not.
+	if g.node("plan").fresh() || !g.node("check").fresh() || !g.node("again").fresh() {
+		t.Fatalf("fresh: plan %v, check %v, again %v", g.node("plan").fresh(), g.node("check").fresh(), g.node("again").fresh())
 	}
 	// With no default, any model a step names is another.
 	none := &Graph{Name: "models", Nodes: []Node{{ID: "check", Kind: Agent, Prompt: "Check.", Model: "small"}}}
@@ -201,8 +201,8 @@ func TestAnotherModelRunsInAChild(t *testing.T) {
 	if end, _, err := Drive(t.Context(), g, a, start(t, a)); err != nil || end.Reason != agentturn.ReasonDone {
 		t.Fatalf("end = %+v, %v", end, err)
 	}
-	if len(kids.agents) != 1 {
-		t.Errorf("children = %d, want the one for check", len(kids.agents))
+	if len(kids.agents) != 2 {
+		t.Errorf("children = %d, want one each for check and again", len(kids.agents))
 	}
 	var models []string
 	for _, r := range m.requests {

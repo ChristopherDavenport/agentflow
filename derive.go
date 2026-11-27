@@ -134,14 +134,16 @@ func (g *Graph) checkKept() []error {
 
 // fresh says the node's work begins with nothing of its caller's: it
 // says context fresh, or it is a model step or a call that asks for
-// another model than its workflow's and does not say context session. The
-// other model would otherwise read a conversation another model wrote,
-// without that model's reasoning.
+// another model than its workflow's. A session keeps its model: another
+// would read a conversation it did not write, without the reasoning,
+// which is its writer's alone to read.
 //
 // A call is also fresh when the workflow it calls says context fresh of
-// itself, which linking finds.
+// itself, or names a model the caller's workflow does not, which linking
+// finds. Validate and linking refuse context session with another model,
+// so a node that says session is never one of these.
 func (n *Node) fresh() bool {
-	return n.Context == ContextFresh || n.Context == "" && (n.otherModel || n.call != nil && n.call.g.Context == ContextFresh)
+	return n.Context == ContextFresh || n.Context == "" && (n.otherModel || n.call != nil && (n.call.g.Context == ContextFresh || n.call.other))
 }
 
 // inChild says the node's work runs in a child session: every call to a
