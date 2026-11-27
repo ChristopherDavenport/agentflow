@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ChristopherDavenport/agentturn"
@@ -89,95 +88,18 @@ func (s *Usage) add(u Usage) {
 }
 
 // Prices prices what a model's request used, for the summaries runs
-// write when they end. It returns false for a model it has no price for.
+// write when they end from the host's [Responses]. It returns false for a
+// model it has no price for.
 func Prices(price func(model string, u openresponses.Usage) (float64, bool)) Option {
 	return func(f *flow) { f.prices = price }
-}
-
-// usageBook counts what each run's model requests use, as they are
-// served, by run key. It lives as long as the process: what a run used
-// before a restart is in the record's responses, not here, so a run whose
-// start this process did not see counts short and says so.
-type usageBook struct {
-	mu   sync.Mutex
-	runs map[string]*tally
-}
-
-type tally struct {
-	Usage
-	// whole says this process saw the run start, so every request it made
-	// since was counted.
-	whole bool
-}
-
-func (b *usageBook) entry(run string) *tally {
-	if b.runs == nil {
-		b.runs = map[string]*tally{}
-	}
-	t := b.runs[run]
-	if t == nil {
-		t = &tally{}
-		b.runs[run] = t
-	}
-	return t
-}
-
-// started says this process wrote the run's start.
-func (b *usageBook) started(run string) {
-	if b == nil {
-		return
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.entry(run).whole = true
-}
-
-// served counts one request of run's, priced by price when it can be.
-func (b *usageBook) served(run, model string, u *openresponses.Usage, price func(string, openresponses.Usage) (float64, bool)) {
-	if b == nil || run == "" {
-		return
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	t := b.entry(run)
-	t.Requests++
-	if u == nil {
-		return
-	}
-	t.InputTokens += u.InputTokens
-	t.OutputTokens += u.OutputTokens
-	if price != nil {
-		if cost, ok := price(model, *u); ok {
-			t.Cost += cost
-			return
-		}
-	}
-	if !slices.Contains(t.Unpriced, model) {
-		t.Unpriced = append(t.Unpriced, model)
-		slices.Sort(t.Unpriced)
-	}
-}
-
-// of is what run used, as far as this process saw.
-func (b *usageBook) of(run string) Usage {
-	if b == nil {
-		return Usage{Partial: "no usage was counted: the host's agent does not follow the workflow's config"}
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	t := b.entry(run)
-	u := t.Usage
-	u.Unpriced = slices.Clone(u.Unpriced)
-	if !t.whole {
-		u.Partial = "the run started before this process, and the requests it made before then are not counted"
-	}
-	return u
 }
 
 // summarize sums up the run st is, as its end is written, from all, the
 // record.
 func (f *flow) summarize(ctx context.Context, st State, all agentturn.Transcript) *Summary {
-	own := f.book.of(st.Instance)
+	// What the requests used is read from the session's responses, which
+	// only the host can give.
+	own := Usage{Partial: "no usage was counted: the host gave no Responses"}
 	if f.responses != nil {
 		own = f.recorded(ctx, all, st.Instance)
 	}
@@ -216,13 +138,12 @@ type ResponseUsage struct {
 
 // Responses gives the responses the session the record is of holds, with
 // what each used, as a host reads them from its session's response
-// entries. A run's summary then counts what its requests used from them,
-// each by the run that was current where it falls in the record, and is
-// never partial for a restart: a run started before one counts every
-// request it made. It must be current when called, as [History] must;
-// for a child, the opener gives the child's own with Child.Apply. Without
-// it, requests are counted as they are served, and a run that started
-// before this process says its counts are partial.
+// entries. A run's summary counts what its requests used from them, each
+// by the run that was current where it falls in the record, so a run that
+// started before a restart counts every request it made. It must be
+// current when called, as [History] must; for a child, the opener gives
+// the child's own with Child.Apply. Without it a summary counts no usage,
+// and says so.
 func Responses(read func(ctx context.Context) ([]ResponseUsage, error)) Option {
 	return func(f *flow) { f.responses = read }
 }
@@ -255,30 +176,6 @@ func (f *flow) recorded(ctx context.Context, all agentturn.Transcript, run strin
 		}
 	}
 	return u
-}
-
-// counting passes a model's stream to sink, and counts what its response
-// used toward the run the request was for.
-func (f *flow) counting(sink openresponses.EventSink, model string) openresponses.EventSink {
-	run := ""
-	if f.due != nil {
-		run = f.due.forRun()
-	}
-	return openresponses.EventSinkFunc(func(ev openresponses.StreamEvent) error {
-		var resp *openresponses.Response
-		switch e := ev.(type) {
-		case *openresponses.ResponseCompletedEvent:
-			resp = e.Response
-		case *openresponses.ResponseIncompleteEvent:
-			resp = e.Response
-		case *openresponses.ResponseFailedEvent:
-			resp = e.Response
-		}
-		if resp != nil {
-			f.book.served(run, model, resp.Usage, f.prices)
-		}
-		return sink.Send(ev)
-	})
 }
 
 // startedAt reads the time a flow_start's result says the run started.

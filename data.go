@@ -274,14 +274,14 @@ func (g *Graph) checkRefs() []error {
 		}
 		if r.doc != "" {
 			if _, ok := g.Documents[r.doc]; !ok {
-				bad("no document %q%s", r.doc, suggest(r.doc, g.documentNames()))
+				bad("no document %q%s", r.doc, Suggest(r.doc, g.documentNames()))
 			}
 			return
 		}
 		if r.step == "" {
 			switch {
 			case g.Inputs == nil || !declares(g.Inputs, r.path[0]):
-				bad("not an input of the workflow%s", suggest(r.path[0], memberNames(g.Inputs)))
+				bad("not an input of the workflow%s", Suggest(r.path[0], memberNames(g.Inputs)))
 			case !g.certainInput(r.path[0]):
 				bad("not a required input of the workflow, nor one with a default")
 			}
@@ -290,7 +290,7 @@ func (g *Graph) checkRefs() []error {
 		from := g.node(r.step)
 		switch {
 		case from == nil:
-			bad("no step %q%s", r.step, suggest(r.step, g.nodeIDs()))
+			bad("no step %q%s", r.step, Suggest(r.step, g.nodeIDs()))
 		case !have[r.step]:
 			bad("some path gets here without running %q", r.step)
 		case len(r.path) > 0 && len(from.schemas()) > 0 && !have[r.step+"."+r.path[0]]:
@@ -451,19 +451,19 @@ func (g *Graph) checkAlternatives() []error {
 func (g *Graph) possible(r ref) error {
 	if r.doc != "" {
 		if _, ok := g.Documents[r.doc]; !ok {
-			return fmt.Errorf("no document %q%s", r.doc, suggest(r.doc, g.documentNames()))
+			return fmt.Errorf("no document %q%s", r.doc, Suggest(r.doc, g.documentNames()))
 		}
 		return nil
 	}
 	if r.step == "" {
 		if g.Inputs == nil || !declares(g.Inputs, r.path[0]) {
-			return fmt.Errorf("not an input of the workflow%s", suggest(r.path[0], memberNames(g.Inputs)))
+			return fmt.Errorf("not an input of the workflow%s", Suggest(r.path[0], memberNames(g.Inputs)))
 		}
 		return nil
 	}
 	n := g.node(r.step)
 	if n == nil {
-		return fmt.Errorf("no step %q%s", r.step, suggest(r.step, g.nodeIDs()))
+		return fmt.Errorf("no step %q%s", r.step, Suggest(r.step, g.nodeIDs()))
 	}
 	if len(r.path) == 0 {
 		return nil
@@ -477,7 +477,7 @@ func (g *Graph) possible(r ref) error {
 	for _, s := range n.schemas() {
 		members = append(members, memberNames(s)...)
 	}
-	return fmt.Errorf("no outcome of %q declares %q%s", r.step, r.path[0], suggest(r.path[0], members))
+	return fmt.Errorf("no outcome of %q declares %q%s", r.step, r.path[0], Suggest(r.path[0], members))
 }
 
 func declares(s *agenttool.Schema, name string) bool {

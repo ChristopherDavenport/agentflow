@@ -107,7 +107,7 @@ func (c Child) Apply(cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 	p := c.parent
 	f := &flow{g: c.g, maxDepth: p.maxDepth, maxSteps: p.maxSteps, unattended: p.unattended, reply: p.reply, delegations: p.delegations,
 		modes: p.modes, judgeName: p.judgeName, children: p.children, models: p.models, idle: p.idle, matchers: p.matchers, policyOpts: p.policyOpts,
-		book: p.book, prices: p.prices, fileTool: p.fileTool, fileField: p.fileField}
+		prices: p.prices, fileTool: p.fileTool, fileField: p.fileField}
 	own := c
 	f.child = &own
 	for _, opt := range opts {
@@ -574,7 +574,7 @@ func Invoke(ctx context.Context, g *Graph, a *agentturn.Agent, inputs any, opts 
 	if err != nil {
 		return nil, State{}, err
 	}
-	outs, err := f.abandon(ctx, a, "")
+	outs, err := f.setAside(ctx, a, abandonedText, "")
 	if err != nil {
 		return nil, State{}, err
 	}
@@ -584,13 +584,6 @@ func Invoke(ctx context.Context, g *Graph, a *agentturn.Agent, inputs any, opts 
 		return nil, st, err
 	}
 	return f.drive(ctx, a, end)
-}
-
-// abandon abandons the children a's pending calls wait on, for why, and
-// returns outputs refusing every pending call, to open the next prompt
-// with.
-func (f *flow) abandon(ctx context.Context, a *agentturn.Agent, why string) (openresponses.Items, error) {
-	return f.setAside(ctx, a, abandonedText, why)
 }
 
 // setAside abandons the children a's pending calls wait on, and returns
@@ -660,7 +653,7 @@ func (f *flow) abandonChild(ctx context.Context, view agentturn.Transcript, st S
 		// already, and what it spent is on its record.
 		return cf.spentBy(cctx, child, args.Run)
 	}
-	inner, err := cf.abandon(cctx, child, why)
+	inner, err := cf.setAside(cctx, child, abandonedText, why)
 	if err != nil {
 		return 0, 0, nil, err
 	}

@@ -1,6 +1,7 @@
 package agentflow
 
 import (
+	"cmp"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -70,6 +71,22 @@ const DefaultMaxSteps = 200
 // RepeatLimit is how many times in a row a program step may give the
 // same outcome and data before the loop it is on is stopped.
 const RepeatLimit = 3
+
+// attempt is what the program has done in one attempt of a step.
+type attempt struct {
+	// clocked says the program has read the clock for this attempt, and
+	// asked counts the bounds asked about in it.
+	clocked bool
+	asked   int
+	// filed says the program has given the attempt's model step its
+	// files.
+	filed bool
+	// reasked counts the retry questions put again after an override
+	// that was refused, and reask says a question waits to be put again
+	// should the override waiting on it be refused.
+	reasked int
+	reask   bool
+}
 
 // Reached is a bound a run has come to, which a person may raise.
 type Reached struct {
@@ -200,11 +217,11 @@ type State struct {
 	// the model's, as after a run that finished.
 	released string
 
-	// Aborting says the run has been abandoned and is ending, and Cleaning
-	// that its cleanup path runs first. Cleanup says how that went, once
-	// over: done, or why it stopped.
-	Aborting, Cleaning bool
-	Cleanup            string
+	// Cleaning says the run has been abandoned and its cleanup path runs
+	// before it ends. Cleanup says how that went, once over: done, or why
+	// it stopped.
+	Cleaning bool
+	Cleanup  string
 	// Summary is what the run's end summed up, once it is written.
 	Summary *Summary
 	// started is when the run started, as its start's result says;
@@ -235,23 +252,15 @@ type State struct {
 	// and keptDir the directory each was started in.
 	kept    map[string]string
 	keptDir map[string]string
-	// clocked says the program has read the clock for this attempt, and
-	// asked counts the bounds asked about in it.
-	clocked bool
-	asked   int
-	// filed says the program has given the attempt's model step its
-	// files, and passedFiles are, for the step of a run in a child, the
-	// files its call passed in.
-	filed       bool
+	// attempt is what the program has done in this attempt of the step,
+	// which a new attempt or a new step starts again.
+	attempt
+	// passedFiles are, for the step of a run in a child, the files its
+	// call passed in.
 	passedFiles []fileRef
 	// question is, for a judge's run, the text of the question it judges as
 	// the person is asked it, which its call passed in.
 	question string
-	// reasked counts the retry questions put again after an override
-	// that was refused, and reask says a question waits to be put again
-	// should the override waiting on it be refused.
-	reasked int
-	reask   bool
 
 	g        *Graph
 	prefix   string
@@ -595,7 +604,7 @@ func (r *replay) state(f *frame) State {
 	if f.ending != nil {
 		st.Summary = f.ending.Summary
 	}
-	st.Aborting, st.Cleaning, st.Cleanup, st.abandonedFor = f.aborting, f.cleaning && f.cleaned == "", f.cleaned, f.why
+	st.Cleaning, st.Cleanup, st.abandonedFor = f.cleaning && f.cleaned == "", f.cleaned, f.why
 	st.endNow = f.aborting && f.ending == nil && f.st.Started && (f.cleaned != "" || !f.cleaning)
 	if o := r.request; o != nil {
 		own := *o
@@ -883,15 +892,7 @@ func (r *replay) output(i int, out *openresponses.FunctionCallOutput) {
 		var answer Result
 		_ = json.Unmarshal([]byte(out.Output.String()), &answer)
 		if answer.Outcome == retryOutcome {
-			st.Attempt, st.Failure = st.Attempt+1, ""
-			st.clocked, st.Deadline, st.asked, st.reasked, st.reask, st.filed = false, time.Time{}, 0, 0, false, false
-			if n.Kind == Agent {
-				// The step opens again, and what came before is not about
-				// this attempt.
-				f.since, st.Nudges, st.Begun, st.refused = i, 0, false, 0
-			}
-			r.entries++
-			st.treeSteps++
+			r.retry(f, i)
 			r.bounds(f)
 		} else {
 			f.failed = fmt.Errorf("%w: %s: %s", ErrStepFailed, n.ID, st.Failure)
@@ -1084,7 +1085,7 @@ func (r *replay) started(i int, f *frame, c *openresponses.FunctionCall, out *op
 		return
 	}
 	root.st = State{Started: true, Instance: p.Run, Workflow: r.g.Name, Inputs: p.Inputs, Parent: p.Parent, Caller: p.Caller,
-		Depth: p.Depth, Fresh: p.Context == ContextFresh, g: r.g, prefix: prefix, maxDepth: cmpDepth(p.MaxDepth)}
+		Depth: p.Depth, Fresh: p.Context == ContextFresh, g: r.g, prefix: prefix, maxDepth: cmp.Or(max(p.MaxDepth, 0), DefaultMaxDepth)}
 	root.path = p.Path
 	root.st.Documents, root.st.docAt = initialDocuments(r.g, p.Inputs, p.Documents)
 	root.st.started = startedAt(out.Output.String())
@@ -1093,7 +1094,7 @@ func (r *replay) started(i int, f *frame, c *openresponses.FunctionCall, out *op
 	// A child is given what its caller's tree had left, none included.
 	r.maxSteps = p.MaxSteps
 	if p.Caller == "" {
-		r.maxSteps = cmpSteps(p.MaxSteps)
+		r.maxSteps = cmp.Or(max(p.MaxSteps, 0), DefaultMaxSteps)
 	}
 	r.cur = root
 	r.frames = append(r.frames, root)
@@ -1124,20 +1125,6 @@ func (r *replay) changed(p startPayload) error {
 		return ErrChanged
 	}
 	return fmt.Errorf("%w: %s", ErrChanged, strings.Join(names, ", "))
-}
-
-func cmpSteps(n int) int {
-	if n <= 0 {
-		return DefaultMaxSteps
-	}
-	return n
-}
-
-func cmpDepth(d int) int {
-	if d <= 0 {
-		return DefaultMaxDepth
-	}
-	return d
 }
 
 // ended reads a flow_end. An ending counts however the call went: it is
@@ -1265,6 +1252,20 @@ func (r *replay) bounds(f *frame) {
 	}
 }
 
+// retry opens f's step again as a new attempt, at item i.
+func (r *replay) retry(f *frame, i int) {
+	st := &f.st
+	st.Attempt, st.Failure = st.Attempt+1, ""
+	st.attempt, st.Deadline = attempt{}, time.Time{}
+	if st.Node.Kind == Agent {
+		// The step opens again, and what came before is not about this
+		// attempt.
+		f.since, st.Nudges, st.Begun, st.refused = i, 0, false, 0
+	}
+	r.entries++
+	st.treeSteps++
+}
+
 // grant reads a person's answer to the bound f's run has reached: more
 // of it, or a stop, which fails the run on it.
 func (r *replay) grant(f *frame, output string) {
@@ -1330,7 +1331,7 @@ func (r *replay) enter(f *frame, i int, n *Node) {
 	f.mark[n.ID] = len(st.Steps)
 	st.Visit, st.Attempt, st.Paced = f.visits[n.ID], 1, f.paced[n.ID]
 	f.since = i
-	st.clocked, st.Deadline, st.asked, st.reasked, st.reask, st.filed = false, time.Time{}, 0, 0, false, false
+	st.attempt, st.Deadline = attempt{}, time.Time{}
 	if !paced {
 		r.entries++
 	}

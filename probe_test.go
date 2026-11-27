@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -166,10 +167,10 @@ func TestKillDuringModelTurn(t *testing.T) {
 	}
 }
 
-func TestTransformThatLosesPositionIsRefused(t *testing.T) {
+func TestATransformNeedsTheRecord(t *testing.T) {
 	var ran []string
 	g := release()
-	cfg, err := Apply(g, agentturn.Config{
+	cfg := agentturn.Config{
 		Model: &fakeModel{outcomes: []string{"clean"}}, ModelName: "fake", MaxTurns: 8,
 		Tools: []agenttool.Tool{scriptTool(&ran)},
 		// Stands in for a compaction: only the latest call survives.
@@ -179,13 +180,13 @@ func TestTransformThatLosesPositionIsRefused(t *testing.T) {
 			}
 			return append(agentturn.Transcript{openresponses.UserText("summary")}, tr[len(tr)-2:]...), nil
 		},
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
-	end, _ := agentturn.New(cfg).Prompt(context.Background(), openresponses.UserText("go"))
-	if !errors.Is(end.Err, ErrPositionLost) {
-		t.Fatalf("end = %s, err = %v", end.Reason, end.Err)
+	// What a transform leaves is a view, and position is not read from one.
+	if _, err := Apply(g, cfg); err == nil || !strings.Contains(err.Error(), "give History") {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := Apply(g, cfg, History(func(context.Context) (agentturn.Transcript, error) { return nil, nil })); err != nil {
+		t.Fatal(err)
 	}
 }
 

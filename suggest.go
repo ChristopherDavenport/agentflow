@@ -27,8 +27,6 @@ func Suggest(s string, names []string) string {
 	return fmt.Sprintf("; did you mean %q?", best)
 }
 
-func suggest(s string, names []string) string { return Suggest(s, names) }
-
 // distance is the edit distance between a and b.
 func distance(a, b string) int {
 	prev := make([]int, len(b)+1)

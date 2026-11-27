@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/ChristopherDavenport/agenttool"
-	"github.com/ChristopherDavenport/openresponses"
 )
 
 // Judge says a model may answer a Person node, and how. It permits only:
@@ -146,7 +145,7 @@ func (f *flow) delegate() error {
 			}
 			g := closure[workflow]
 			if g == nil {
-				return fmt.Errorf("agentflow: delegate: step %q: no workflow %q%s", id, workflow, suggest(workflow, slices.Collect(maps.Keys(closure))))
+				return fmt.Errorf("agentflow: delegate: step %q: no workflow %q%s", id, workflow, Suggest(workflow, slices.Collect(maps.Keys(closure))))
 			}
 			if n := g.node(step); n == nil || n.Judge == nil {
 				var judged []string
@@ -155,7 +154,7 @@ func (f *flow) delegate() error {
 						judged = append(judged, m.ID)
 					}
 				}
-				return fmt.Errorf("agentflow: delegate: step %q cannot be judged%s", id, suggest(step, judged))
+				return fmt.Errorf("agentflow: delegate: step %q cannot be judged%s", id, Suggest(step, judged))
 			}
 			f.modes[modeKey(workflow, step)] = d.mode
 		}
@@ -165,20 +164,7 @@ func (f *flow) delegate() error {
 
 // returns says outcome of n leads back to n.
 func (g *Graph) returns(n *Node, outcome string) bool {
-	seen := map[string]bool{}
-	for queue := []string{n.Next[outcome]}; len(queue) > 0; queue = queue[1:] {
-		id := queue[0]
-		if id == n.ID {
-			return true
-		}
-		if next := g.node(id); next != nil && !seen[id] {
-			seen[id] = true
-			for _, to := range next.Next {
-				queue = append(queue, to)
-			}
-		}
-	}
-	return false
+	return g.reachable(n.Next[outcome])[n.ID]
 }
 
 // sentBack counts the times running the judge has sent the work back to
@@ -256,16 +242,12 @@ func (f *flow) ruled(ctx context.Context, st State) bool {
 // judgeCall is the call that has a judge look at st's question in a
 // child: the question's inputs, and nothing of the answer a person may
 // have given.
-func (f *flow) judgeCall(st State) (callArgs, error) {
+func (f *flow) judgeCall(st State, key string) (callArgs, error) {
 	n := st.Node
 	j := st.g.judgeGraph(n)
 	with, err := st.resolveAll(n.With)
 	if err != nil {
 		return callArgs{}, fmt.Errorf("agentflow: step %q: %w", n.ID, err)
-	}
-	key, err := newKey()
-	if err != nil {
-		return callArgs{}, err
 	}
 	mode := f.mode(st)
 	if st.Held != nil {
@@ -289,39 +271,6 @@ func askedText(st State, n *Node) (string, error) {
 		return "", fmt.Errorf("agentflow: step %q: question: %w", n.ID, err)
 	}
 	return text, nil
-}
-
-// checkJudgeCall holds a judge's call to the look st's question wants.
-func checkJudgeCall(st State, c *openresponses.FunctionCall) error {
-	n := st.Node
-	j := st.g.judgeGraph(n)
-	var a callArgs
-	switch {
-	case c.Name != judgeTool || c.CallID != st.judgeID():
-		return fmt.Errorf("a judge looks at step %q first", n.ID)
-	case decode([]byte(c.Arguments), &a) != nil:
-		return errors.New("the call is not readable")
-	case a.Context != ContextFresh || a.Workflow != j.Name || a.Digest != j.OwnDigest() || a.Step != n.ID ||
-		!keyPattern.MatchString(a.Run) || a.Spawn != a.Run || a.Child != "":
-		return fmt.Errorf("a judge of step %q looks in a child of its own", n.ID)
-	case a.Result != nil || a.Failure != "" || a.Verdict != nil:
-		return errors.New("a verdict is the program's to give, when the judge has looked")
-	case st.Held != nil && a.Mode != Shadow.String():
-		return errors.New("a held answer is judged unseen")
-	case a.MaxSteps != st.left():
-		return fmt.Errorf("a judge of step %q is given the %d steps its tree has left", n.ID, st.left())
-	}
-	with, err := st.resolveAll(n.With)
-	if err != nil {
-		return err
-	}
-	if !sameJSON(a.With, with) {
-		return fmt.Errorf("a judge of step %q is given the question's inputs", n.ID)
-	}
-	if text, err := askedText(st, n); err != nil || a.Question != text {
-		return fmt.Errorf("a judge of step %q reads the question as it is asked", n.ID)
-	}
-	return nil
 }
 
 // judgeInstructions tells a judge, in its child, what it weighs.
@@ -350,14 +299,8 @@ func (f *flow) judgeInstructions(st State) (string, error) {
 	// The reason is the step's, and the model that did the work reads a
 	// verdict that was not blind: what to weigh is not for it to read.
 	b.WriteString(" Give your reason in your own words about the work; the model that did it may read it, so do not quote, name or refer to what you were told to weigh.")
-	for _, outcome := range n.outcomes() {
-		if s := n.Data[outcome]; s != nil {
-			j, err := json.Marshal(s)
-			if err != nil {
-				return "", err
-			}
-			fmt.Fprintf(&b, "\nFor outcome %s, data must match this schema: %s", outcome, j)
-		}
+	if err := n.dataText(&b, n.outcomes()); err != nil {
+		return "", err
 	}
 	return b.String(), nil
 }

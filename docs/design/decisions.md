@@ -63,6 +63,10 @@ child's would make the caller's runs the child's, and the child's
 invocation would abandon them. The host says where the inherited items
 end, and position is read only past them.
 
+**A transform needs `History`.** What a transform returns is a view, and
+position read from a view depends on what the transform kept. `Apply`
+refuses the pair rather than check afterwards that position survived.
+
 **Call IDs carry a run's key, not its workflow's name or its ancestry.**
 A name would need cutting and hashing to fit an ID. The start records
 the workflow, the parent's key and the calling call, so ancestry is read
@@ -96,6 +100,12 @@ the tree by `parent`.
 **A run's summary is written into its end.** A child's end goes back to
 its caller with the call's result, so a caller's summary needs no other
 session.
+
+**Usage is counted from the session's responses, not as requests are
+served.** A count kept in the process is lost at a restart, and a second
+count beside the record's can disagree with it. The responses are the
+record of what was used, so a host that wants usage in a summary gives
+them.
 
 ## Models
 

@@ -1,6 +1,7 @@
 package agentflow
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,7 +14,6 @@ import (
 
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
-	"github.com/ChristopherDavenport/openresponses"
 )
 
 // callArgs is the arguments of flow_call, and of the flow_judge the
@@ -142,7 +142,7 @@ func (f *flow) rootStart(inputs any) (startPayload, error) {
 
 // depth is the bound on nesting a new run records.
 func (f *flow) depth() int {
-	d := cmpDepth(f.g.MaxDepth)
+	d := cmp.Or(max(f.g.MaxDepth, 0), DefaultMaxDepth)
 	if f.maxDepth > 0 {
 		d = min(d, f.maxDepth)
 	}
@@ -151,7 +151,7 @@ func (f *flow) depth() int {
 
 // steps is the bound on step entries a new tree records.
 func (f *flow) steps() int {
-	n := cmpSteps(f.g.MaxSteps)
+	n := cmp.Or(max(f.g.MaxSteps, 0), DefaultMaxSteps)
 	if f.maxSteps > 0 {
 		n = min(n, f.maxSteps)
 	}
@@ -160,46 +160,6 @@ func (f *flow) steps() int {
 
 // left is what st's tree has left of its steps, for a child to enter.
 func (st State) left() int { return max(0, st.maxSteps+st.Granted-st.Entries) }
-
-// callFresh holds a call into a child to what the calling step makes.
-func callFresh(st State, c *openresponses.FunctionCall) error {
-	n := st.Node
-	want := st.g.Callees[n.Flow]
-	if n.Kind == Agent {
-		want = st.g.stepGraph(n)
-	}
-	var a callArgs
-	switch {
-	case c.Name != callTool || c.CallID != st.callID():
-		return fmt.Errorf("step %q runs in a child and takes no other calls", n.ID)
-	case decode([]byte(c.Arguments), &a) != nil:
-		return errors.New("the call is not readable")
-	case a.Context != n.childContext() || a.Workflow != want.Name || a.Digest != want.OwnDigest():
-		return fmt.Errorf("step %q runs %s, as pinned, in a child", n.ID, want.Name)
-	case !keyPattern.MatchString(a.Run) || a.Child != n.Child || a.Step != "" || a.Mode != "":
-		return errors.New("the call is not one the step makes")
-	case a.Spawn != a.Run && (n.Child == "" || a.Spawn != st.kept[n.Child]):
-		return fmt.Errorf("step %q keeps child %q in the session it started", n.ID, n.Child)
-	case a.Result != nil || a.Failure != "" || a.Verdict != nil:
-		return errors.New("what came of a child is the program's to say, when it has ended")
-	case a.MaxSteps != st.left():
-		return fmt.Errorf("step %q gives its child the %d steps its tree has left", n.ID, st.left())
-	case a.Dir != st.dirArg(n):
-		return fmt.Errorf("step %q works in the directory its record gives, not %q", n.ID, a.Dir)
-	case n.Kind == Agent && !sameJSON(a.Files, st.filesFor(n)):
-		return fmt.Errorf("step %q passes its child the files it is given", n.ID)
-	case n.Kind == Agent && !sameJSON(a.Documents, st.passedDocuments(n)):
-		return fmt.Errorf("step %q passes its child the documents as they stand", n.ID)
-	}
-	with, err := st.resolveAll(n.With)
-	if err != nil {
-		return err
-	}
-	if !sameJSON(a.With, with) {
-		return fmt.Errorf("step %q passes its child other inputs than its own", n.ID)
-	}
-	return nil
-}
 
 var keyPattern = regexp.MustCompile(`^[0-9a-f]{10}$`)
 

@@ -6,39 +6,34 @@ scripted models unless it is listed here.
 
 ## Not settled
 
-1. **Compaction without a record.** A host with no `History` cannot
-   compact a running workflow: the transform is refused with
-   `ErrPositionLost`. Requiring `History` whenever a config has a
-   `Transform` would remove the second mode. A front's `Replay` must be
-   given the record too.
-2. **Fan-out.** Running a step once per item of a list, and joining.
-3. **Reminders.** One is the rule. A host may want more for a small
+1. **Fan-out.** Running a step once per item of a list, and joining.
+2. **Reminders.** One is the rule. A host may want more for a small
    model.
-4. **A failed run** answers every later prompt with its error until an
+3. **A failed run** answers every later prompt with its error until an
    invocation, since the transcript does not say the error was seen.
-5. **Run directories** show in a repository's status while a script
+4. **Run directories** show in a repository's status while a script
    runs. Hosts exclude them by hand.
-6. **Gates.** A `check` script that rejects a model's result before the
+5. **Gates.** A `check` script that rejects a model's result before the
    step finishes.
-7. **A model step's deadline cuts only its stream and its tools' calls.**
+6. **A model step's deadline cuts only its stream and its tools' calls.**
    A turn whose stream has just finished runs its tool calls under the
    deadline, and the program records the timeout on the next turn. A tool
    that ignores its context is not stopped at all.
-8. **A grant in a kept child.** A kept child's later runs are each given
+7. **A grant in a kept child.** A kept child's later runs are each given
    what the tree has left. A grant made in one counts for the caller, and
    reaches the child's next run only through that count.
-9. **A front's clock.** A question's deadline is absolute, in UTC; a
+8. **A front's clock.** A question's deadline is absolute, in UTC; a
    front that shows how long is left may have a different clock.
-10. **A pick with words.** Whether a pick may also carry the person's
-    words is left to `Result.Reason`, which every answer may carry.
-11. **An attended judge has no deadline.** A judge takes no `timeout`,
+9. **A pick with words.** Whether a pick may also carry the person's
+   words is left to `Result.Reason`, which every answer may carry.
+10. **An attended judge has no deadline.** A judge takes no `timeout`,
     and its workflow's default does not apply to it. Unattended it takes
     `UnattendedTimeout`; attended, nothing bounds its look but a call's
     timeout above it.
-12. **Whether the syntax is settled.** Every key in
+11. **Whether the syntax is settled.** Every key in
     [workflow-format.md](workflow-format.md) is built; none has been
     declared stable.
-13. **The limit of blindness under `Shadow`.** A later visit's person can
+12. **The limit of blindness under `Shadow`.** A later visit's person can
     read an earlier verdict in the record, so only a step's first answer
     in a run is surely blind.
 
@@ -71,6 +66,11 @@ These are in the code as it stands.
 
 ## Proposed, not built
 
+- **A summary read from the record instead of written into it.** A
+  run's times, steps and calls can be worked out from `Runs`, and its
+  usage from each session's responses, so `flow_end` need not carry a
+  summary. That takes an end time on the ending, a run's span in its
+  session's record, and a reader of each child session's responses.
 - **Approval by digest before a first run.** A workflow from a
   repository is repository code that runs at fixed points. The digest is
   recorded; nothing yet asks for approval of it.

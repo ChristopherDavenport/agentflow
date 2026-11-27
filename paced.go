@@ -64,25 +64,8 @@ func (g *Graph) successors(n *Node) []string {
 
 // reaches says some path of one or more edges leads from a to b.
 func (g *Graph) reaches(a, b string) bool {
-	seen := map[string]bool{}
-	queue := []string{a}
-	for len(queue) > 0 {
-		n := g.node(queue[0])
-		queue = queue[1:]
-		if n == nil {
-			continue
-		}
-		for _, next := range g.successors(n) {
-			if next == b {
-				return true
-			}
-			if !seen[next] {
-				seen[next] = true
-				queue = append(queue, next)
-			}
-		}
-	}
-	return false
+	n := g.node(a)
+	return n != nil && g.reachable(g.successors(n)...)[b]
 }
 
 // unpaced is a cycle through id that passes no person step, from id back

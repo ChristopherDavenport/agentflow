@@ -5,10 +5,11 @@ import (
 	"slices"
 )
 
-// reachable is every node some path from id reaches, id among them.
-func (g *Graph) reachable(id string) map[string]bool {
+// reachable is every node some path from one of ids reaches, those of
+// ids that are nodes among them.
+func (g *Graph) reachable(ids ...string) map[string]bool {
 	seen := map[string]bool{}
-	queue := []string{id}
+	queue := slices.Clone(ids)
 	for len(queue) > 0 {
 		at := queue[0]
 		queue = queue[1:]
@@ -43,7 +44,7 @@ func (g *Graph) checkCleanup() []error {
 	var errs []error
 	bad := func(format string, args ...any) { errs = append(errs, fmt.Errorf("agentflow: "+format, args...)) }
 	if g.node(g.OnAbort) == nil {
-		bad("on_abort names no step %q%s", g.OnAbort, suggest(g.OnAbort, g.nodeIDs()))
+		bad("on_abort names no step %q%s", g.OnAbort, Suggest(g.OnAbort, g.nodeIDs()))
 		return errs
 	}
 	main := g.reachable(g.Nodes[0].ID)

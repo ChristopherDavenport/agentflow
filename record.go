@@ -17,10 +17,9 @@ import (
 
 // RecordFormat versions what a workflow writes into a transcript and how
 // it is read. flow_start carries it, and a reader that does not know the
-// one it finds says so rather than guess. Format 2 keys every run, so
-// that runs can nest. Format 3 runs every call to a workflow in a child
-// session, so a session holds no run another of its runs called. Formats
-// 1 and 2 are no longer read.
+// one it finds says so rather than guess. Every run is keyed, and every
+// call to a workflow runs in a child session, so a session holds no run
+// another of its runs called.
 const RecordFormat = 3
 
 // The statuses of an [Instance]. All but running are written down, by
@@ -185,7 +184,7 @@ func (run *Instance) At(t agentturn.Transcript, i int) (State, error) {
 	if run.root == nil {
 		return State{}, errors.New("agentflow: no state to read: " + cmp.Or(run.Problem, "the run never started: "+run.Reason))
 	}
-	r := run.root.replay(spanOf(run.root, t, run.from, min(max(i+1, run.from), run.stop, len(t))))
+	r := run.root.replay(spanOf(t, run.from, min(max(i+1, run.from), run.stop, len(t))))
 	for _, f := range r.frames {
 		if f.st.Instance == run.ID {
 			st := r.state(f)
@@ -202,7 +201,7 @@ func (run *Instance) At(t agentturn.Transcript, i int) (State, error) {
 // spanOf is t's items from from to to. An invocation in it abandons the
 // run, whose cleanup and end come after it; the next run is not part of
 // the span, which stops at its start.
-func spanOf(_ *Graph, t agentturn.Transcript, from, to int) agentturn.Transcript {
+func spanOf(t agentturn.Transcript, from, to int) agentturn.Transcript {
 	return slices.Clone(t[from:to])
 }
 
@@ -250,7 +249,7 @@ func rootRun(t agentturn.Transcript, at int, c *openresponses.FunctionCall, out 
 			}
 		}
 	}
-	r := g.replay(spanOf(g, t, at, run.stop))
+	r := g.replay(spanOf(t, at, run.stop))
 	for _, f := range r.frames {
 		if k, ok := ends[f.st.endID()]; ok && f.ending == nil {
 			var e Ending
