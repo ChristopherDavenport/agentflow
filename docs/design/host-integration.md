@@ -84,6 +84,11 @@ them added, provided they are given the same `*Graph` value `Apply` was.
 | `Requested(t)`, `UnderWay(t)` | a model's unmet request to start a workflow; whether a run is under way |
 | `SummaryFilter` | what a compactor is given to summarise |
 
+**Drive an end that came with an error.** A host that prompts the agent
+itself gives `Drive` the end whenever there is one, not only when the
+error is nil: a run a step's deadline cut off ends in an error, and
+`Drive` goes on from it. `Drive` returns any error it does not handle.
+
 `Drive`, `Resume`, `Invoke` and `OverrideRun` return the end and `State`
 of the run that waits or stopped: the agent's own, or a child's that
 waits on a question. A front sends the person's words to the child that
@@ -274,6 +279,11 @@ base.Instructions += catalog.Prompt() + "\n\n" + workflow.StartPrompt(flows, wor
   that asks by default asks about them.
 - **`MaxTurns` counts the program's turns,** in each session: a start,
   an end and each program step are turns of the session they are in.
+- **A child's agent that stops leaves its call held.** When a child's
+  run ends because its turns or its output ran out, or a guard stopped
+  it, the child's workflow run has not ended and the caller's call still
+  waits. `Drive` returns the child's end and an error naming what stopped
+  it; the host raises the limit and drives again, or abandons the run.
 - **The program's turns use nothing.** They are sent to the model name
   `agentflow/<workflow>`, answered by agentflow itself, and carry no
   usage. Cost and eval tools should skip them, not report an unpriced
@@ -294,7 +304,7 @@ base.Instructions += catalog.Prompt() + "\n\n" + workflow.StartPrompt(flows, wor
 | `ErrRecordBehind` | the record given by `History` does not hold the transcript's calls |
 | `ErrPositionLost` | without `History`, the transcript was rebuilt from a session without part of a run |
 | `ErrExpired` | `Answer` was given after the question's deadline. Drive the run; the timeout is what the record holds |
-| `ErrStepTimeout` | a model's stream was cut off at its step's deadline. `Drive` continues the run |
+| `ErrStepTimeout` | a model's stream was cut off at its step's deadline. The agent's `Prompt` or `Resume` returns the run's end and this error together; given that end, `Drive` continues the run, and the program records the step's failure |
 | `ErrStepFailed` | a step's output was not a result with a declared outcome, and the step is not to be retried |
 | `ErrVisits`, `ErrDepth`, `ErrSteps`, `ErrRepeat` | a bound was reached and nobody granted more |
 | `ErrChildRefused` | a child cannot be opened as its call asks |
