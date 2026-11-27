@@ -138,7 +138,7 @@ Four things can make work fresh:
 |---|---|
 | the call | `context: fresh` on the calling node |
 | the model step | `context: fresh` on the step |
-| another model | a model step whose `model` differs from its workflow's frontmatter `model`, or that names one when the frontmatter names none, defaults to `context: fresh`. `context: session` keeps it in its run's session |
+| another model | a model step or a call whose `model` differs from its workflow's frontmatter `model`, or that names one when the frontmatter names none, defaults to `context: fresh`. `context: session` keeps a step in its run's session, and has a call's child open with its caller's view |
 | the callee | `context: fresh` in the callee's frontmatter makes every call to it fresh |
 
 **Another model defaults to fresh** because it would read a conversation
@@ -148,6 +148,19 @@ never from the host's config, so a host serving the frontmatter's model
 under another name changes nothing. The workflow made for a fresh step
 takes the step's model as its own default, so the step does not open a
 child of its own child.
+
+**A child asked as another model reads its caller's view without the
+reasoning.** A reasoning item is its writer's alone to read: it carries a
+signature only its own provider accepts. The loop leaves out of each
+request the reasoning another model wrote, told item by item from the
+session, and the session records the omission, so the request still
+rebuilds. The child's session opens with those items all the same; it is
+each request that goes without them, and a child below, asked as the
+first model again, is sent them. The loop tells models apart by the name
+in the child's config, which is why the opener names the child's model
+there (`Child.Settings.Model`). A host with no session to fork is handed a
+`Seed` with no reasoning in it for such a child, since a seed carries no
+record of who wrote what.
 
 **A callee that declares `context: fresh`** must not read its caller's
 conversation, and says so once, where it is defined. A call that says
@@ -281,7 +294,7 @@ a step the host lets a judge answer.
 | `ChildSettings` field | What it holds |
 |---|---|
 | `Dir` | the working directory, below the workspace's root; empty for the root |
-| `Model`, `Thinking` | the model the child asks, empty for the caller's, and how hard it reasons |
+| `Model`, `Thinking` | the model the child asks, empty for the caller's, and how hard it reasons. For a call it is the model the workflow called names, and where that names none the call's. The opener's config names it as its `ModelName` |
 | `Instructions` | text added to the child's instructions |
 | `Tools`, `AllTools`, `ExcludeTools` | the tools its step may call, or every tool the host offers but the excluded ones |
 
@@ -343,10 +356,10 @@ These are settings of a child, so a model step takes `dir` and
 `instructions` only when it is fresh. A call to a workflow always runs in
 a child and takes them whatever it opens with: a call in its caller's
 context works in its own directory, under its own instructions, with its
-caller's conversation before it. A call takes `model` only when it is
-fresh, since what it would open with was written for another model.
-`model` and `thinking` are open to every model step, `tools` to every
-model step, and `dir` to a script step as well.
+caller's conversation before it. A call takes `model` whatever it opens
+with too: it names the model of the callee's steps where the callee's
+frontmatter names none. `model` and `thinking` are open to every model
+step, `tools` to every model step, and `dir` to a script step as well.
 
 ### `dir`
 

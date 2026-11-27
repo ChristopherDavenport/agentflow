@@ -241,9 +241,9 @@ type Node struct {
 
 	// call is what linking learnt of the callee of a Flow node.
 	call *callee
-	// otherModel says a model step names a model its workflow does not
-	// default to, which [Graph.Validate] works out: with no Context, the
-	// step runs in a child.
+	// otherModel says a model step or a call names a model its workflow
+	// does not default to, which [Graph.Validate] works out: with no
+	// Context, its work is fresh.
 	otherModel bool
 	// pick is the schema of one of a Person node's choices, as the list
 	// they come from declares it, nil when unknown.
@@ -528,10 +528,11 @@ func (g *Graph) Validate() error {
 		case n.Context != "" && n.Context != ContextSession && n.Context != ContextFresh:
 			bad("node %q: context %q: want %q or %q", n.ID, n.Context, ContextSession, ContextFresh)
 		}
-		// A model step that asks for another model than its workflow's
-		// reads nothing the other model wrote unless it says session: the
-		// definition alone decides, so position does not turn on the host.
-		n.otherModel = n.Kind == Agent && n.Model != "" && n.Model != g.Model
+		// A model step or a call that asks for another model than its
+		// workflow's reads nothing the other model wrote unless it says
+		// session: the definition alone decides, so position does not turn
+		// on the host.
+		n.otherModel = (n.Kind == Agent || n.Flow != "") && n.Model != "" && n.Model != g.Model
 		errs = append(errs, n.checkChild()...)
 		errs = append(errs, n.checkSettings()...)
 		errs = append(errs, n.checkFiles()...)

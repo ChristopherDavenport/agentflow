@@ -127,7 +127,15 @@ conversation another model wrote does not get that model's reasoning,
 which a request leaves out for any other model, and takes the earlier
 turns for its own. It is decided from the definition alone, never from
 the host's config, so position stays a function of the definitions and
-the record.
+the record. The same holds for a call that names another model, and
+either may say `context: session` and read the conversation anyway.
+
+**Whose reasoning a request carries is the loop's to say, not the
+workflow's.** The loop already leaves out of a request the reasoning
+another model wrote, item by item, and its session records that. A child
+asked as another model is therefore opened under that model's name and
+nothing more: the workflow keeps no rule of its own, which could only be
+coarser, a whole inherited conversation with or without reasoning.
 
 **`SummaryFilter` keeps the workflow's own messages out of summaries and
 says whose each call was.** A summarizer cannot tell a call the program

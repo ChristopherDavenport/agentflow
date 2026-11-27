@@ -1886,3 +1886,132 @@ func TestLiveTakeIssue(t *testing.T) {
 	}
 	t.Logf("working requests %d, children's %d", len(m.reqs), len(km.reqs))
 }
+
+// --- A seeded call on another model --------------------------------
+
+// keeperOnFlow is keeperFlow with its call asked as another model, in
+// the caller's context, and its caller's step reasoning as the %s says.
+const keeperOnFlow = "```mermaid\nflowchart TD\n  learn[learn] --> ask[[ask]]\n  ask -->|ok| report[[report]]\n```\n\n" +
+	"## learn\n```yaml\ntools: [read_file]\n%soutputs:\n  ok:\n    read: {type: string, enum: [\"yes\"], required: true}\n```\n" +
+	"Think it through first. Read the file secret.txt with read_file, then finish with read yes. Do not repeat the file's text anywhere: not in your data and not in a reason.\n\n" +
+	"## ask\n```yaml\nflow: teller\nmodel: %s\ncontext: session\n```\n\n" +
+	"## report\n```yaml\ntool: report\nwith:\n  word: ${{ steps.ask.outputs.word }}\n```\n"
+
+// reasonings are the reasoning items among items, by what tells one from
+// another.
+func reasonings(items openresponses.Items) map[string]bool {
+	out := map[string]bool{}
+	for _, item := range items {
+		if r, ok := item.(*openresponses.ReasoningItem); ok {
+			out[r.ID+"\x00"+r.EncryptedContent] = true
+		}
+	}
+	return out
+}
+
+// A call that names another model and says context: session opens with
+// what its caller's model saw: the callee, asked as the second model,
+// reports a word only the caller read, and is sent none of the reasoning
+// the caller's model wrote. AGENTFLOW_LIVE_MODEL2 names the callee's
+// model; swap the two to try the other direction.
+func TestLiveCallerContextOnAnotherModel(t *testing.T) {
+	l := live(t)
+	model2 := os.Getenv("AGENTFLOW_LIVE_MODEL2")
+	if model2 == "" || model2 == l.name {
+		t.Skip("set AGENTFLOW_LIVE_MODEL2 to a model other than AGENTFLOW_LIVE_MODEL")
+	}
+	for _, tc := range []struct{ name, thinking string }{
+		{"thinking", "thinking: high\n"},
+		{"plain", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &tally{t: t}
+			told, in, out, thought := 0, 0, 0, 0
+			for i := range l.trials {
+				s.trial = i
+				m := l.meter(t)
+				word := nonce()
+				ws := localWorkspace(t)
+				if err := os.WriteFile(filepath.Join(ws.Root(), "secret.txt"), []byte(word+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				report := &recorder{name: "report"}
+				g := parse(t, "keeper", fmt.Sprintf(keeperOnFlow, tc.thinking, model2))
+				if err := g.Link(parse(t, "teller", tellerFlow)); err != nil {
+					t.Fatal(err)
+				}
+				tools := func(ws agentworkspace.Workspace) []agenttool.Tool { return append(fileTools(ws), report.tool()) }
+				h := newRecordedHost(t, m, l.name, ws, tools)
+				opts := []agentflow.Option{agentflow.Children(h.open), h.history(h.id), agentflow.Unattended()}
+				cfg, err := agentflow.Apply(g, l.base(m, tools(ws)...), opts...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				a := agentturn.New(cfg)
+				h.rec.Attach(a)
+				end, st, err := runLive(t, g, a, nil, nil, opts...)
+				m.mu.Lock()
+				in, out = in+m.in, out+m.out
+				reqs := slices.Clone(m.reqs)
+				m.mu.Unlock()
+				if err != nil || end.Reason != agentturn.ReasonDone {
+					s.check(false, "end %v: %v", end.Reason, err)
+					continue
+				}
+				before := len(s.notes)
+				var said string
+				if len(report.got) == 1 {
+					said = strings.TrimSpace(fmt.Sprint(report.got[0]["word"]))
+				}
+				knew := strings.EqualFold(said, word)
+				if knew {
+					told++
+				}
+				sessions := h.sessions(t)
+				// What the caller's model reasoned is in its session, and in
+				// what the callee's opened with.
+				wrote := reasonings(openresponses.Items(pathOf(sessions["root"])))
+				thought += len(wrote)
+				s.check(slices.Equal(steps(st), []string{"learn:ok", "ask:ok", "report:ok"}), "path %v", steps(st))
+				s.check(len(h.opened) == 1 && h.opened[0].Seeded && h.opened[0].Settings.Model == model2, "opened %+v, want one seeded child asked as %s", h.opened, model2)
+				asked, sent := 0, 0
+				for _, r := range reqs {
+					if r.Model != model2 {
+						continue
+					}
+					asked++
+					for k := range reasonings(r.Input) {
+						if wrote[k] {
+							sent++
+						}
+					}
+				}
+				s.check(asked > 0, "no request was asked as %s", model2)
+				s.check(sent == 0, "the callee's model was sent %d reasoning items its caller's wrote", sent)
+				checked := 0
+				var bad []string
+				for spawn, sess := range sessions {
+					c, b := hashes(t, sess)
+					checked, bad = checked+c, append(bad, b...)
+					if spawn != "root" {
+						held := 0
+						for k := range reasonings(openresponses.Items(prefixOf(sess))) {
+							if wrote[k] {
+								held++
+							}
+						}
+						s.check(held == len(wrote), "the callee's session opened with %d of the caller's %d reasoning items", held, len(wrote))
+					}
+				}
+				s.check(len(bad) == 0, "wrong hashes: %v", bad)
+				s.check(knew, "the callee said %q, want %q from its caller's context", said, word)
+				if len(s.notes) == before {
+					s.ok++
+				}
+				t.Logf("trial %d (%s): path %v callee said %q, knew %v; the caller wrote %d reasoning items, %d reached the callee's model in %d requests; %d hashes checked", i, word, steps(st), said, knew, len(wrote), sent, asked, checked)
+			}
+			t.Logf("%s, %s calling %s: the callee had the word in %d of %d trials; the caller reasoned %d times; %d tokens in, %d out", tc.name, l.name, model2, told, l.trials, thought, in, out)
+			s.report("caller context on another model, "+tc.name, l.trials)
+		})
+	}
+}
