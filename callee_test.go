@@ -82,7 +82,9 @@ func TestAFreshCalleeTakesAChildsSettingsOnACallThatDoesNotSayFresh(t *testing.T
 	}
 	alone := &Graph{Name: "alone", Nodes: []Node{{ID: "call", Kind: Run, Flow: "plain", Dir: Literal("services")}}}
 	plain := &Graph{Name: "plain", Nodes: []Node{{ID: "say", Kind: Run, Tool: "script"}}}
-	if err := alone.Link(plain); err == nil || !strings.Contains(err.Error(), "dir is a setting of a child") {
+	// Every call runs in a child, so one that opens with its caller's
+	// context takes a child's settings too.
+	if err := alone.Link(plain); err != nil {
 		t.Errorf("a call to a workflow that does not say fresh: %v", err)
 	}
 }

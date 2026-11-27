@@ -497,3 +497,48 @@ func syncAll(t *testing.T, store *jsonl.Store) {
 		}
 	}
 }
+
+// A call that opens with its caller's context is in a child all the
+// same, and takes a child's directory and instructions.
+func TestASeededCallTakesAChildsSettings(t *testing.T) {
+	ctx := context.Background()
+	outer := seedOuter()
+	outer.node("call").Dir, outer.node("call").Instructions = Literal("services/api"), "Keep to the API."
+	g := linked(t, outer, seedInner())
+	var ran []string
+	m := &fakeModel{outcomes: []string{"ok", "ok", "ok"}}
+	kids := newKin(m, "fake", scriptTool(&ran))
+	a := nestedAgent(t, g, m, []agenttool.Tool{scriptTool(&ran)}, kids.option())
+	first, err := a.Prompt(ctx, openresponses.UserText("go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := Drive(ctx, g, a, first); err != nil {
+		t.Fatal(err)
+	}
+	if len(kids.opened) == 0 {
+		t.Fatal("no child was opened")
+	}
+	c := kids.opened[0]
+	if !c.Seeded || c.Settings.Dir != "services/api" || c.Settings.Instructions != "Keep to the API." {
+		t.Errorf("child seeded %v, settings %+v", c.Seeded, c.Settings)
+	}
+	think := requestFor(t, m, "think")
+	if !strings.Contains(think.Instructions, "Keep to the API.") {
+		t.Errorf("the callee's model was not sent the call's instructions:\n%s", think.Instructions)
+	}
+	if got := finishes(think.Input); !slices.Equal(got, []string{"note"}) {
+		t.Errorf("the callee's model saw the finishes of %v, want the caller's note", got)
+	}
+	// A model step in its run's session is no child, and takes neither.
+	for want, change := range map[string]func(n *Node){
+		"instructions is a setting of a child": func(n *Node) { n.Instructions = "x" },
+		"dir is a setting of a child":          func(n *Node) { n.Dir = Literal("docs") },
+	} {
+		g := seedOuter()
+		change(g.node("note"))
+		if err := g.Validate(); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("want %q, got %v", want, err)
+		}
+	}
+}

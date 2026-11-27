@@ -8,10 +8,8 @@ import (
 	"io"
 	"io/fs"
 	"maps"
-	"path"
 	"slices"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/ChristopherDavenport/agentflow"
 	"github.com/ChristopherDavenport/agentskill"
@@ -305,8 +303,6 @@ func skillFiles(g *agentflow.Graph, skill string, files map[string][]byte) error
 			}
 			text, found := files[rel]
 			switch {
-			case path.Clean(rel) != rel || path.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, "../"):
-				return bad("want a clean path within the skill")
 			case !found && slices.ContainsFunc(paths, func(q string) bool { return strings.HasPrefix(q, rel+"/") }):
 				return bad("is a directory; name the files in it")
 			case !found:
@@ -315,10 +311,6 @@ func skillFiles(g *agentflow.Graph, skill string, files map[string][]byte) error
 					shown = append(shown, "./"+q)
 				}
 				return bad("not in the skill%s", agentflow.Suggest(p, shown))
-			case len(text) > agentflow.MaxFile:
-				return bad("over %d bytes", agentflow.MaxFile)
-			case !utf8.Valid(text):
-				return bad("not text: it is not valid UTF-8")
 			}
 			if n.SkillFiles == nil {
 				n.SkillFiles = map[string]string{}

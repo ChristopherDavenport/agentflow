@@ -186,7 +186,9 @@ and it declares no outputs.
 
 A section may open with one `yaml` block of settings. The rest is prose,
 which may hold headings below `##` and fenced blocks. The prose under a
-model or person node is its prompt. A `yaml` block anywhere else, in a
+model or person node is its prompt. A program node takes no prose, since
+no model or person reads it: what the step is for goes under
+`description`. A `yaml` block anywhere else, in a
 section or before the first one, is an error, since it would look like
 settings and be none.
 
@@ -196,7 +198,8 @@ settings and be none.
 |---|---|---|
 | `description` | what the workflow is for, for people and fronts; no model is sent it | [steps-and-data.md](steps-and-data.md#descriptions) |
 | `inputs` | the workflow's inputs, each a schema field that may take a `default` | [below](#inputs-and-outputs) |
-| `outputs` | the workflow's outputs, for every outcome or by outcome | [below](#inputs-and-outputs) |
+| `outputs` | the workflow's outputs, the same for every outcome | [below](#inputs-and-outputs) |
+| `outputs_by` | the workflow's outputs for each outcome, in place of `outputs` | [below](#inputs-and-outputs) |
 | `documents` | the workflow's named documents and how each starts: `{from: <file of the skill>}`, `{input: <input name>}`, or empty | [steps-and-data.md](steps-and-data.md#documents) |
 | `model`, `thinking` | the defaults of the workflow's own model steps | [steps-and-data.md](steps-and-data.md#model-and-thinking) |
 | `timeout` | the default deadline of every script, tool and model step | [limits-failure-and-intervention.md](limits-failure-and-intervention.md) |
@@ -228,8 +231,8 @@ settings and be none.
 | `files` | model | files given to the step as context when it opens | [steps-and-data.md](steps-and-data.md#files) |
 | `model`, `thinking` | model; `model` also a fresh call | the model a step asks and how hard it reasons | [steps-and-data.md](steps-and-data.md#model-and-thinking) |
 | `context` | model, call | `session` or `fresh`. On a model step, whether it works in its run's session or in a child of its own. On a call, whether its child opens with the caller's view or with nothing | [steps-and-data.md](steps-and-data.md#context), [calls-and-children.md](calls-and-children.md#context-what-a-child-opens-with) |
-| `dir` | fresh model, fresh call, script | the directory below the workspace's root the step works in: a path, or a reference to one | [calls-and-children.md](calls-and-children.md) |
-| `instructions` | fresh model, fresh call | a file of the skill added to the child's instructions | [calls-and-children.md](calls-and-children.md) |
+| `dir` | fresh model, call, script | the directory below the workspace's root the step works in: a path, or a reference to one | [calls-and-children.md](calls-and-children.md) |
+| `instructions` | fresh model, call | a file of the skill added to the child's instructions | [calls-and-children.md](calls-and-children.md) |
 | `child` | fresh model | the name of a child kept across the visits and steps that name it | [calls-and-children.md](calls-and-children.md) |
 | `policy` | model, call | `allow` and `deny` lists of rules; a rule is a string, or `{rule, note, path, command}` | [policy-and-trust.md](policy-and-trust.md) |
 | `unattended` | person | the outcome taken when nobody can be asked: a name, or `{outcome, data}` | [questions-and-judges.md](questions-and-judges.md) |
@@ -299,12 +302,12 @@ outputs:
 - A plain `${{ inputs.base }}` is certain on every path, as a required
   input's is.
 
-**Outputs** are values. The flat form above gives the same outputs for
-every outcome. They may instead be given by outcome, as a step's schemas
+**Outputs** are values. `outputs` gives the same outputs for every
+outcome. `outputs_by` gives them by outcome instead, as a step's schemas
 are:
 
 ```yaml
-outputs:
+outputs_by:
   clean:
     summary: ${{ steps.score.outputs.summary }}
   findings:
@@ -312,8 +315,7 @@ outputs:
     summary: ${{ steps.score.outputs.summary }}
 ```
 
-A mapping whose keys are all outcomes of the workflow, each holding a
-mapping, is read by outcome. Anything else is read flat. No outputs are
+A workflow gives one or the other; both is a load error. No outputs are
 asked for on an unrouted `failed`, and an end named `failed` declares
 none.
 

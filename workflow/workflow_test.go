@@ -228,7 +228,7 @@ func TestEverythingUnknownIsRefused(t *testing.T) {
 		"context on a tool":   {edit("tool: x", "tool: x\ncontext: fresh"), "only a model node or a call has a context"},
 		"late settings":       {edit("Well?", "Well?\n```yaml\nmax_visits: 3\n```"), "opens the section"},
 		"tool on a person":    {edit("Well?", "```yaml\ntool: x\n```\nWell?"), "only a program node"},
-		"tools on a program":  {edit("tool: x", "tool: x\ntools: [y]"), "only a model node"},
+		"tools on a program":  {edit("tool: x", "tool: x\ntools: [y]"), "tools and exclude_tools are a model step's"},
 		"embedded reference":  {edit("tool: x", "tool: x\nwith: {n: \"v-${{ inputs.n }}\"}"), "whole value"},
 		"reference in args":   {edit("tool: x", "tool: x\nargs: {n: \"${{ inputs.n }}\"}"), "under with"},
 		"expression":          {edit("tool: x", "tool: x\nwith: {n: \"${{ inputs.n == 1 }}\"}"), "whole value"},
@@ -416,4 +416,17 @@ func withRun(req openresponses.Request, args string) string {
 	}
 	run, _, _ := strings.Cut(rest, `"`)
 	return `{"run":"` + run + `",` + args[1:]
+}
+
+// Prose under a program node would be a prompt nobody reads.
+func TestAProgramNodeTakesNoProse(t *testing.T) {
+	const src = "# t\n\n```mermaid\nflowchart TD\n  a[[a]]\n```\n\n## a\n```yaml\ntool: x\n```\nWhy this step is here.\n"
+	if _, err := workflow.Parse("t", []byte(src)); err == nil || !strings.Contains(err.Error(), `node "a": a program node has no prompt`) {
+		t.Errorf("err = %v", err)
+	}
+	described := strings.Replace(strings.Replace(src, "Why this step is here.\n", "", 1), "tool: x", "tool: x\ndescription: Why this step is here.", 1)
+	g, err := workflow.Parse("t", []byte(described))
+	if err != nil || g.Nodes[0].Description != "Why this step is here." {
+		t.Errorf("described: %v", err)
+	}
 }

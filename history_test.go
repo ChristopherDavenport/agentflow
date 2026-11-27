@@ -204,7 +204,7 @@ func TestResumeAfterKillInAModelStep(t *testing.T) {
 	const mode = "AGENTFLOW_KILL"
 	graph := func(fresh bool) *Graph {
 		g := noted(fresh)
-		g.node("triage").Unattended, g.node("triage").Judge = "fix", nil
+		g.node("triage").Unattended.Outcome, g.node("triage").Judge = "fix", nil
 		return g
 	}
 	// The process dies while the model works on fix.
@@ -351,7 +351,7 @@ func TestResumeWhenTheTranscriptHasLostItems(t *testing.T) {
 				t.Fatal(err)
 			}
 			g := noted(c.fresh)
-			g.node("triage").Unattended, g.node("triage").Judge = "fix", nil
+			g.node("triage").Unattended.Outcome, g.node("triage").Judge = "fix", nil
 			var ran []string
 			agent := func(rec *session.Recorder, id string, m *cast, seed ...agentturn.Option) *agentturn.Agent {
 				base := agentturn.Config{Model: m, ModelName: "w", Tools: []agenttool.Tool{scriptTool(&ran)}}

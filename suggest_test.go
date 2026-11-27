@@ -45,7 +45,7 @@ func TestLoadErrorsSuggestTheNameMeant(t *testing.T) {
 		"an edge's outcome":      {func(g *Graph) { g.node("review").Next["clen"] = "report" }, `undeclared outcome "clen"; did you mean "clean"?`},
 		"an end's outcome":       {func(g *Graph) { g.node("triage").Ends = map[string]string{"reprot": "x"} }, `end for undeclared outcome "reprot"; did you mean "report"?`},
 		"a judge's outcome":      {func(g *Graph) { g.node("triage").Judge = &Judge{Criteria: "c", Outcomes: []string{"fx"}} }, `judge: undeclared outcome "fx"; did you mean "fix"?`},
-		"the unattended outcome": {func(g *Graph) { g.node("triage").Unattended = "reprot" }, `unattended must be an outcome of a person node; did you mean "report"?`},
+		"the unattended outcome": {func(g *Graph) { g.node("triage").Unattended.Outcome = "reprot" }, `unattended must be an outcome of a person node; did you mean "report"?`},
 		"a data outcome":         {func(g *Graph) { g.node("review").Data["finding"] = &agenttool.Schema{Type: "object"} }, `data for undeclared outcome "finding"; did you mean "findings"?`},
 		"a step":                 {func(g *Graph) { g.node("fix").With = map[string]Value{"f": From("steps.reveiw.outputs.findings")} }, `no step "reveiw"; did you mean "review"?`},
 		"an input":               {func(g *Graph) { g.node("gather").With = map[string]Value{"pr": From("inputs.p")} }, `not an input of the workflow; did you mean "pr"?`},

@@ -56,7 +56,7 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 		for _, outcome := range slices.Sorted(maps.Keys(g.OutputsBy)) {
 			out.add(outcome, valuesNode(g.OutputsBy[outcome]))
 		}
-		front.add("outputs", &out.Node)
+		front.add("outputs_by", &out.Node)
 	}
 	if g.Documents != nil {
 		docs := mapping()
@@ -222,6 +222,15 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 			errs = append(errs, m.set(key, v))
 		}
 	}
+	// A question's fallback is written as its outcome, or with data as
+	// both.
+	fallback := func(key string, f agentflow.Fallback) {
+		if f.Data != nil {
+			set(key, true, map[string]any{"outcome": f.Outcome, "data": f.Data})
+			return
+		}
+		set(key, f.Outcome != "", f.Outcome)
+	}
 	set("description", n.Description != "", n.Description)
 	set("run", n.Script != "", n.Script)
 	set("flow", n.Flow != "", n.Flow)
@@ -287,12 +296,7 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 		}
 		m.add("outputs", &out.Node)
 	}
-	switch {
-	case n.UnattendedData != nil:
-		set("unattended", true, map[string]any{"outcome": n.Unattended, "data": n.UnattendedData})
-	default:
-		set("unattended", n.Unattended != "", n.Unattended)
-	}
+	fallback("unattended", n.Unattended)
 	if c := n.Choices; c != nil {
 		choices := &yamlMap{*valuesNode(map[string]agentflow.Value{"from": c.From})}
 		if c.Many {
@@ -311,12 +315,7 @@ func settingsNode(n agentflow.Node) (*yamlMap, error) {
 	default:
 		set("text", true, t.Outcome)
 	}
-	switch {
-	case n.OnTimeoutData != nil:
-		set("on_timeout", true, map[string]any{"outcome": n.OnTimeout, "data": n.OnTimeoutData})
-	default:
-		set("on_timeout", n.OnTimeout != "", n.OnTimeout)
-	}
+	fallback("on_timeout", n.OnTimeout)
 	switch {
 	case n.PersonPaced:
 		set("max_visits", true, "person")

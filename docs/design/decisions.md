@@ -190,3 +190,9 @@ held up by its own cleanup would not be one.
 **An abandoned or overridden child still counts.** What it spent is
 added to the caller's tree however the call was answered, so a bound
 cannot be dodged by overriding and the count is the same after a resume.
+
+**A workflow's outputs by outcome have a key of their own.** `outputs`
+is the same for every outcome and `outputs_by` is for each. One key read
+either way by the shape of its values took an output named for an
+outcome, holding a mapping, for a table of outcomes, and loaded it
+without a word.

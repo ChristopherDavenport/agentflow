@@ -25,6 +25,14 @@ type Choices struct {
 	As      string `json:"as"`
 }
 
+// Fallback is the answer a Person node takes when no person gives one:
+// when nobody is there to ask, or when its timeout passes. Outcome is
+// empty when it takes none, and Data is what goes with the outcome.
+type Fallback struct {
+	Outcome string `json:"outcome,omitempty"`
+	Data    any    `json:"data,omitempty"`
+}
+
 // FreeText, on a Person node, says an answer typed in words takes
 // Outcome, with the words in its data's member As.
 type FreeText struct {
@@ -125,7 +133,7 @@ func (g *Graph) checkAsk(n *Node) []error {
 			bad("only a person node offers choices")
 		case n.Text != nil:
 			bad("only a person node takes free text")
-		case n.OnTimeout != "" || n.OnTimeoutData != nil:
+		case n.OnTimeout.Outcome != "" || n.OnTimeout.Data != nil:
 			bad("only a person node has on_timeout")
 		}
 		return errs
@@ -182,10 +190,10 @@ func (g *Graph) checkAsk(n *Node) []error {
 	// A pick is known only once the question is asked, so nothing written
 	// beforehand can make one.
 	if c := n.Choices; c != nil && c.Outcome != "" {
-		if n.Unattended == c.Outcome {
+		if n.Unattended.Outcome == c.Outcome {
 			bad("unattended cannot be %q: what it picks is not known until the question is asked", c.Outcome)
 		}
-		if n.OnTimeout == c.Outcome {
+		if n.OnTimeout.Outcome == c.Outcome {
 			bad("on_timeout cannot be %q: what it picks is not known until the question is asked", c.Outcome)
 		}
 	}
@@ -202,12 +210,12 @@ func (g *Graph) checkAsk(n *Node) []error {
 		}
 	}
 	switch {
-	case n.Timeout > 0 && n.OnTimeout == "":
+	case n.Timeout > 0 && n.OnTimeout.Outcome == "":
 		bad("a question's timeout needs on_timeout, the outcome it then takes")
-	case n.OnTimeout != "" && n.Timeout == 0:
+	case n.OnTimeout.Outcome != "" && n.Timeout == 0:
 		bad("on_timeout needs a timeout")
-	case n.OnTimeout != "" && declared("on_timeout", n.OnTimeout):
-		if err := checkData(n.schemas()[n.OnTimeout], n.OnTimeoutData); err != nil {
+	case n.OnTimeout.Outcome != "" && declared("on_timeout", n.OnTimeout.Outcome):
+		if err := checkData(n.schemas()[n.OnTimeout.Outcome], n.OnTimeout.Data); err != nil {
 			bad("on_timeout data: %v", err)
 		}
 	}
@@ -345,7 +353,7 @@ func (f *flow) timedOut(q Question) (Result, error) {
 	if n == nil {
 		return Result{}, fmt.Errorf("agentflow: no step %q", q.Step)
 	}
-	return Result{Outcome: n.OnTimeout, Data: n.OnTimeoutData, By: ByTimeout,
+	return Result{Outcome: n.OnTimeout.Outcome, Data: n.OnTimeout.Data, By: ByTimeout,
 		Reason: "nobody answered by " + q.Deadline.Format(time.RFC3339)}, nil
 }
 
@@ -382,7 +390,7 @@ func (f *flow) expire(pending []agentturn.PendingCall) ([]agentturn.Answer, erro
 func (f *flow) askClockDue(ctx context.Context, st State) bool {
 	n := st.Node
 	return n != nil && n.Kind == Person && n.Timeout > 0 && !st.clocked && st.Failure == "" && st.Reached == nil &&
-		st.Held == nil && !f.judging(ctx, st) && !(f.unattended && n.Unattended != "")
+		st.Held == nil && !f.judging(ctx, st) && !(f.unattended && n.Unattended.Outcome != "")
 }
 
 // clockQuestion is the call that reads the clock for st's question.

@@ -749,9 +749,9 @@ func (f *flow) call(st State) (name string, args any, err error) {
 		if t := n.Text; t != nil {
 			q.Text = &FreeText{Outcome: t.Outcome, As: t.member()}
 		}
-		if n.OnTimeout != "" && !st.Deadline.IsZero() {
+		if n.OnTimeout.Outcome != "" && !st.Deadline.IsZero() {
 			due := st.Deadline
-			q.Deadline, q.OnTimeout = &due, n.OnTimeout
+			q.Deadline, q.OnTimeout = &due, n.OnTimeout.Outcome
 		}
 		for outcome, s := range form {
 			if q.Form == nil {
@@ -1253,7 +1253,7 @@ func (f *flow) ask(ctx context.Context, info agentturn.ToolCallInfo, st State) (
 	// a retry, which ends the workflow. A cleanup's question with no
 	// default cannot be answered either, which fails its step and ends the
 	// cleanup: a cleanup never holds up the abandon it is part of.
-	if f.unattended && (q.Retry || q.Limit != "" || n.Unattended != "" || st.Cleaning) {
+	if f.unattended && (q.Retry || q.Limit != "" || n.Unattended.Outcome != "" || st.Cleaning) {
 		return nil, nil
 	}
 	// A question asked after its time ran out, on a resume that came late,
@@ -1360,8 +1360,8 @@ func (f *flow) askTool() agenttool.Tool {
 				return Result{}, fmt.Errorf("agentflow: %w", err)
 			}
 			return *q.Answer, nil
-		case f.unattended && !q.Retry && q.Limit == "" && n.Unattended != "":
-			return Result{Outcome: n.Unattended, Data: n.UnattendedData, By: "unattended default"}, nil
+		case f.unattended && !q.Retry && q.Limit == "" && n.Unattended.Outcome != "":
+			return Result{Outcome: n.Unattended.Outcome, Data: n.Unattended.Data, By: "unattended default"}, nil
 		}
 		return Result{}, errors.New("agentflow: this question needs an answer")
 	}, agenttool.WithReplay(safeReplay))

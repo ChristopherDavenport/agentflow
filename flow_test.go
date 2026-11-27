@@ -23,7 +23,7 @@ func release() *Graph {
 		{ID: "review", Kind: Agent, Prompt: "Review the diff.", Outcomes: []string{"clean", "findings"},
 			Next: map[string]string{"clean": "report", "findings": "triage"}, MaxVisits: 2},
 		{ID: "triage", Kind: Person, Prompt: "Fix them, or report?", Outcomes: []string{"fix", "report"},
-			Next: map[string]string{"fix": "fix", "report": "report"}, Unattended: "report"},
+			Next: map[string]string{"fix": "fix", "report": "report"}, Unattended: Fallback{Outcome: "report"}},
 		{ID: "fix", Kind: Agent, Prompt: "Fix the findings.", Next: map[string]string{OK: "gather"}},
 		{ID: "report", Kind: Run, Tool: "script", Args: json.RawMessage(`{"name":"report"}`)},
 	}}

@@ -236,19 +236,16 @@ type Node struct {
 	// Judge, on a Person node, says a model may answer it.
 	Judge *Judge `json:",omitempty"`
 
-	// Unattended is the outcome a Person node takes when nobody is
-	// there to ask. Empty means the run waits.
-	Unattended string
-	// UnattendedData is the data that goes with it.
-	UnattendedData any
+	// Unattended is what a Person node takes when nobody is there to
+	// ask. With no outcome the run waits.
+	Unattended Fallback `json:",omitzero"`
 
 	// A Person node may offer Choices computed from an earlier result,
 	// take an answer in a person's own words as Text, and, with a
-	// Timeout, take OnTimeout and its data when nobody answers in time.
-	Choices       *Choices  `json:",omitempty"`
-	Text          *FreeText `json:",omitempty"`
-	OnTimeout     string    `json:",omitempty"`
-	OnTimeoutData any       `json:",omitempty"`
+	// Timeout, take OnTimeout when nobody answers in time.
+	Choices   *Choices  `json:",omitempty"`
+	Text      *FreeText `json:",omitempty"`
+	OnTimeout Fallback  `json:",omitzero"`
 	// MaxVisits bounds how often the node runs. 0 means
 	// [DefaultLoopVisits] for a node a loop can come back to, and once
 	// for any other.
@@ -529,6 +526,9 @@ func (g *Graph) Validate() error {
 			if n.Args != nil && !json.Valid(n.Args) {
 				bad("node %q: args are not JSON", n.ID)
 			}
+			if n.Prompt != "" {
+				bad("node %q: a program node has no prompt, since no model or person reads it; say what the step is for under description", n.ID)
+			}
 		case Agent, Person:
 			if n.Script != "" || n.Tool != "" || n.Args != nil || n.Flow != "" {
 				bad("node %q: only a program node has a script, a tool, args or a flow", n.ID)
@@ -616,16 +616,16 @@ func (g *Graph) Validate() error {
 				bad("node %q: end %q: want a name no node has", n.ID, end)
 			}
 		}
-		if n.Unattended != "" && (n.Kind != Person || !slices.Contains(n.outcomes(), n.Unattended)) {
-			bad("node %q: unattended must be an outcome of a person node%s", n.ID, suggest(n.Unattended, n.outcomes()))
+		if n.Unattended.Outcome != "" && (n.Kind != Person || !slices.Contains(n.outcomes(), n.Unattended.Outcome)) {
+			bad("node %q: unattended must be an outcome of a person node%s", n.ID, suggest(n.Unattended.Outcome, n.outcomes()))
 		}
 		for outcome := range n.Data {
 			if !slices.Contains(n.outcomes(), outcome) {
 				bad("node %q: data for undeclared outcome %q%s", n.ID, outcome, suggest(outcome, n.outcomes()))
 			}
 		}
-		if n.Unattended != "" {
-			if err := checkData(n.schemas()[n.Unattended], n.UnattendedData); err != nil {
+		if n.Unattended.Outcome != "" {
+			if err := checkData(n.schemas()[n.Unattended.Outcome], n.Unattended.Data); err != nil {
 				bad("node %q: unattended data: %v", n.ID, err)
 			}
 		}

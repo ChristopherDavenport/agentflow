@@ -8,11 +8,9 @@
 package workflow
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"reflect"
 	"regexp"
@@ -118,11 +116,14 @@ func split(lines []string, offset int) (preamble section, sections []section, er
 type frontmatter struct {
 	Description string    `yaml:"description"`
 	Inputs      yaml.Node `yaml:"inputs"`
-	Outputs     yaml.Node `yaml:"outputs"`
-	MaxDepth    int       `yaml:"max_depth"`
-	MaxSteps    int       `yaml:"max_steps"`
-	Model       string    `yaml:"model"`
-	Thinking    string    `yaml:"thinking"`
+	// Outputs are what the workflow gives back whatever its outcome, and
+	// OutputsBy what it gives back for each, in place of them.
+	Outputs   yaml.Node `yaml:"outputs"`
+	OutputsBy yaml.Node `yaml:"outputs_by"`
+	MaxDepth  int       `yaml:"max_depth"`
+	MaxSteps  int       `yaml:"max_steps"`
+	Model     string    `yaml:"model"`
+	Thinking  string    `yaml:"thinking"`
 	// Documents are the workflow's named markdown documents.
 	Documents map[string]*documentSpec `yaml:"documents"`
 	// OnAbort names the step the cleanup path starts at.
@@ -199,21 +200,22 @@ type settings struct {
 	OnTimeout yaml.Node `yaml:"on_timeout"`
 }
 
-// strict decodes one YAML document, refusing keys it does not know.
+// strict decodes one YAML document, refusing keys it does not know. The
+// document is parsed once: knownKeys holds its keys to v's fields, and v
+// is decoded from the same nodes.
 func strict(src []byte, v any) error {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(src, &doc); err != nil {
 		return err
 	}
+	if doc.Kind == 0 {
+		// Nothing but comments or space: no settings.
+		return nil
+	}
 	if err := knownKeys(&doc, reflect.TypeOf(v)); err != nil {
 		return err
 	}
-	d := yaml.NewDecoder(bytes.NewReader(src))
-	d.KnownFields(true)
-	if err := d.Decode(v); err != nil && !errors.Is(err, io.EOF) {
-		return err
-	}
-	return nil
+	return doc.Decode(v)
 }
 
 // Parse reads a WORKFLOW.md as the workflow called name. The graph it
@@ -222,7 +224,7 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 	lines := strings.Split(strings.ReplaceAll(string(src), "\r\n", "\n"), "\n")
 	g := &agentflow.Graph{Name: name}
 	offset := 0
-	var outputs yaml.Node
+	var outputs, outputsBy yaml.Node
 	if len(lines) > 0 && lines[0] == "---" {
 		end := slices.Index(lines[1:], "---")
 		if end < 0 {
@@ -236,15 +238,14 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 		if g.Inputs, g.InputDefaults, err = inputsSchema(&fm.Inputs); err != nil {
 			return nil, fmt.Errorf("workflow: inputs: %w", err)
 		}
-		outputs, g.MaxDepth, g.MaxSteps, g.Model, g.Thinking = fm.Outputs, fm.MaxDepth, fm.MaxSteps, fm.Model, fm.Thinking
+		outputs, outputsBy = fm.Outputs, fm.OutputsBy
+		g.MaxDepth, g.MaxSteps, g.Model, g.Thinking = fm.MaxDepth, fm.MaxSteps, fm.Model, fm.Thinking
 		g.Description, g.OnAbort, g.ExcludeTools = strings.TrimSpace(fm.Description), fm.OnAbort, fm.ExcludeTools
 		g.Context, g.Hidden = fm.Context, fm.Hidden
 		if fm.Timeout != "" {
-			d, err := time.ParseDuration(fm.Timeout)
-			if err != nil || d <= 0 {
-				return nil, fmt.Errorf("workflow: frontmatter: timeout %q: want a duration such as 90s, 10m or 1h", fm.Timeout)
+			if g.Timeout, err = duration(fm.Timeout); err != nil {
+				return nil, fmt.Errorf("workflow: frontmatter: %w", err)
 			}
-			g.Timeout = d
 		}
 		for name, d := range fm.Documents {
 			if g.Documents == nil {
@@ -333,7 +334,7 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 			n.Ends[e.outcome] = e.end
 		}
 	}
-	if err := readOutputs(g, &outputs); err != nil {
+	if err := readOutputs(g, &outputs, &outputsBy); err != nil {
 		return nil, fmt.Errorf("workflow: outputs: %w", err)
 	}
 	if err := g.Validate(); err != nil {
@@ -513,9 +514,6 @@ func node(n *agentflow.Node, s section) error {
 		}
 		n.Args = b
 	}
-	if n.Kind != agentflow.Run && (n.Script != "" || n.Tool != "" || n.Args != nil || n.Flow != "") {
-		return errors.New("only a program node has run, tool, args or flow")
-	}
 	n.Context = set.Context
 	n.Model, n.InstructionsFile, n.Child = set.Model, set.Instructions, set.Child
 	if !set.Dir.IsZero() && set.Dir.Tag != "!!null" {
@@ -538,20 +536,12 @@ func node(n *agentflow.Node, s section) error {
 		return err
 	}
 	if set.Timeout != "" {
-		d, err := time.ParseDuration(set.Timeout)
-		if err != nil || d <= 0 {
-			return fmt.Errorf("timeout %q: want a duration such as 90s, 10m or 1h", set.Timeout)
+		if n.Timeout, err = duration(set.Timeout); err != nil {
+			return err
 		}
-		n.Timeout = d
 	}
 	if j := set.Judge; j != nil {
 		n.Judge = &agentflow.Judge{Criteria: strings.TrimSpace(j.Criteria), Outcomes: j.Outcomes, Tools: j.Tools, Returns: j.Returns, Policy: j.Policy.policy()}
-	}
-	if n.Kind != agentflow.Agent && (n.Tools != nil || n.AllTools || n.ExcludeTools != nil) {
-		return errors.New("only a model node has tools or exclude_tools")
-	}
-	if set.Skills != nil && n.Kind != agentflow.Agent {
-		return errors.New("only a model node names skills")
 	}
 	for _, name := range set.Skills {
 		n.Skills = append(n.Skills, agentflow.StepSkill{Name: name})
@@ -583,33 +573,47 @@ func node(n *agentflow.Node, s section) error {
 	if err := question(n, &set); err != nil {
 		return err
 	}
-	switch u := &set.Unattended; {
-	case u.IsZero():
-	case n.Kind != agentflow.Person:
-		return errors.New("only a person node has unattended")
-	case u.Kind == yaml.ScalarNode:
-		n.Unattended = u.Value
-	default:
-		return pairs(u, func(key string, v *yaml.Node) error {
-			switch key {
-			case "outcome":
-				return v.Decode(&n.Unattended)
-			case "data":
-				return v.Decode(&n.UnattendedData)
-			}
-			return unknownKey("unattended", key, "outcome", "data")
-		})
+	if n.Unattended, err = fallback("unattended", &set.Unattended); err != nil {
+		return err
 	}
 	return nil
 }
 
+// duration reads a timeout as it is written.
+func duration(s string) (time.Duration, error) {
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("timeout %q: want a duration such as 90s, 10m or 1h", s)
+	}
+	return d, nil
+}
+
+// fallback reads the answer a question takes with nobody to give one,
+// under key: an outcome, or an outcome and the data that goes with it.
+func fallback(key string, u *yaml.Node) (agentflow.Fallback, error) {
+	var f agentflow.Fallback
+	switch {
+	case u.IsZero():
+		return f, nil
+	case u.Kind == yaml.ScalarNode:
+		f.Outcome = u.Value
+		return f, nil
+	}
+	err := pairs(u, func(k string, v *yaml.Node) error {
+		switch k {
+		case "outcome":
+			return v.Decode(&f.Outcome)
+		case "data":
+			return v.Decode(&f.Data)
+		}
+		return unknownKey(key, k, "outcome", "data")
+	})
+	return f, err
+}
+
 // question reads a person node's choices, free text and timeout outcome.
 func question(n *agentflow.Node, set *settings) error {
-	only := func(key string) error { return fmt.Errorf("only a person node has %s", key) }
 	if c := &set.Choices; !c.IsZero() {
-		if n.Kind != agentflow.Person {
-			return only("choices")
-		}
 		if c.Kind != yaml.MappingNode {
 			return errors.New("choices: want from, and select, outcome or as")
 		}
@@ -656,9 +660,6 @@ func question(n *agentflow.Node, set *settings) error {
 		}
 	}
 	if t := &set.Text; !t.IsZero() {
-		if n.Kind != agentflow.Person {
-			return only("text")
-		}
 		n.Text = &agentflow.FreeText{}
 		if t.Kind == yaml.ScalarNode {
 			n.Text.Outcome = t.Value
@@ -674,47 +675,29 @@ func question(n *agentflow.Node, set *settings) error {
 			return err
 		}
 	}
-	switch u := &set.OnTimeout; {
-	case u.IsZero():
-	case n.Kind != agentflow.Person:
-		return only("on_timeout")
-	case u.Kind == yaml.ScalarNode:
-		n.OnTimeout = u.Value
-	default:
-		return pairs(u, func(key string, v *yaml.Node) error {
-			switch key {
-			case "outcome":
-				return v.Decode(&n.OnTimeout)
-			case "data":
-				return v.Decode(&n.OnTimeoutData)
-			}
-			return unknownKey("on_timeout", key, "outcome", "data")
-		})
+	var err error
+	if n.OnTimeout, err = fallback("on_timeout", &set.OnTimeout); err != nil {
+		return err
 	}
 	return nil
 }
 
-// readOutputs reads a workflow's outputs: by outcome, when every key is
-// an outcome of the workflow and every value a mapping, and otherwise the
-// same for every outcome.
-func readOutputs(g *agentflow.Graph, n *yaml.Node) error {
+// readOutputs reads a workflow's outputs: under outputs, the same for
+// every outcome, or under outputs_by, for each outcome its own. Which is
+// which is the key's to say, never the shape of the values.
+func readOutputs(g *agentflow.Graph, same, by *yaml.Node) error {
+	if !same.IsZero() && same.Tag != "!!null" {
+		var err error
+		if g.Outputs, err = values(same); err != nil {
+			return err
+		}
+	}
+	n := by
 	if n.IsZero() || n.Tag == "!!null" {
 		return nil
 	}
-	outcomes := g.Outcomes()
-	// A call's outcomes are not known until the workflows are linked, so
-	// an outcome reached through one is taken on trust here and checked
-	// then.
-	calls := slices.ContainsFunc(g.Nodes, func(n agentflow.Node) bool { return n.Flow != "" && len(n.Outcomes) == 0 })
-	byOutcome := n.Kind == yaml.MappingNode && len(n.Content) > 0
-	for i := 0; byOutcome && i+1 < len(n.Content); i += 2 {
-		key, v := n.Content[i].Value, n.Content[i+1]
-		byOutcome = v.Kind == yaml.MappingNode && (slices.Contains(outcomes, key) || calls)
-	}
-	if !byOutcome {
-		var err error
-		g.Outputs, err = values(n)
-		return err
+	if n.Kind != yaml.MappingNode {
+		return fmt.Errorf("outputs_by: line %d: want a mapping of outcomes to their outputs", n.Line)
 	}
 	g.OutputsBy = map[string]map[string]agentflow.Value{}
 	return pairs(n, func(outcome string, v *yaml.Node) error {
