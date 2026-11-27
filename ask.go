@@ -51,9 +51,9 @@ type Offered struct {
 
 // The data members choices and free text fill when a step names none.
 const (
-	DefaultChoice  = "choice"
-	DefaultChoices = "choices"
-	DefaultText    = "text"
+	defaultChoice  = "choice"
+	defaultChoices = "choices"
+	defaultText    = "text"
 )
 
 // ByTimeout is the Result.By of an answer a question's timeout gave.
@@ -69,12 +69,12 @@ func (c *Choices) member() string {
 	case c.As != "":
 		return c.As
 	case c.Many:
-		return DefaultChoices
+		return defaultChoices
 	}
-	return DefaultChoice
+	return defaultChoice
 }
 
-func (t *FreeText) member() string { return cmp.Or(t.As, DefaultText) }
+func (t *FreeText) member() string { return cmp.Or(t.As, defaultText) }
 
 // withMember is s, an object schema or nil, with the required member
 // name of schema m added.
@@ -140,7 +140,7 @@ func (g *Graph) checkAsk(n *Node) []error {
 	}
 	declared := func(what, outcome string) bool {
 		if !slices.Contains(n.outcomes(), outcome) {
-			bad("%s: outcome %q is not declared%s: want one of %s", what, outcome, suggest(outcome, n.outcomes()), strings.Join(n.outcomes(), ", "))
+			bad("%s: outcome %q is not declared%s: want one of %s", what, outcome, Suggest(outcome, n.outcomes()), strings.Join(n.outcomes(), ", "))
 			return false
 		}
 		return true
@@ -345,13 +345,9 @@ func (q Question) overdue(now time.Time) bool {
 // timedOut is the answer a question gives itself once its time has run
 // out: the node's timeout outcome and data.
 func (f *flow) timedOut(q Question) (Result, error) {
-	g, err := f.g.find(cmp.Or(q.Workflow, f.g.Name))
+	n, err := f.g.asker(q)
 	if err != nil {
 		return Result{}, err
-	}
-	n := g.node(q.Step)
-	if n == nil {
-		return Result{}, fmt.Errorf("agentflow: no step %q", q.Step)
 	}
 	return Result{Outcome: n.OnTimeout.Outcome, Data: n.OnTimeout.Data, By: ByTimeout,
 		Reason: "nobody answered by " + q.Deadline.Format(time.RFC3339)}, nil
@@ -393,14 +389,9 @@ func (f *flow) askClockDue(ctx context.Context, st State) bool {
 		st.Held == nil && !f.judging(ctx, st) && !(f.unattended && n.Unattended.Outcome != "")
 }
 
-// clockQuestion is the call that reads the clock for st's question.
-func (f *flow) clockQuestion(st State) (id string, args clockArgs) {
-	return st.clockID(), clockArgs{Run: st.Instance, Step: st.Node.ID, Timeout: st.Node.Timeout.String()}
-}
-
 // answerByTimeout answers a question whose deadline has passed as it is
 // asked, nil when it has not.
-func (f *flow) answerByTimeout(_ context.Context, q Question) (*Result, error) {
+func (f *flow) answerByTimeout(q Question) (*Result, error) {
 	if q.Retry || q.Limit != "" || !q.overdue(time.Now()) {
 		return nil, nil
 	}

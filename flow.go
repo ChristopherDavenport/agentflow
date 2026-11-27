@@ -207,11 +207,11 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 				}
 			}
 			if n.Model != "" && f.models != nil && !slices.Contains(f.models, n.Model) {
-				return cfg, fmt.Errorf("agentflow: %s: node %q asks for model %q, which the host does not serve%s: want one of %s", x.Name, n.ID, n.Model, suggest(n.Model, f.models), strings.Join(f.models, ", "))
+				return cfg, fmt.Errorf("agentflow: %s: node %q asks for model %q, which the host does not serve%s: want one of %s", x.Name, n.ID, n.Model, Suggest(n.Model, f.models), strings.Join(f.models, ", "))
 			}
 		}
 		if x.Model != "" && f.models != nil && !slices.Contains(f.models, x.Model) {
-			return cfg, fmt.Errorf("agentflow: %s asks for model %q, which the host does not serve%s: want one of %s", x.Name, x.Model, suggest(x.Model, f.models), strings.Join(f.models, ", "))
+			return cfg, fmt.Errorf("agentflow: %s asks for model %q, which the host does not serve%s: want one of %s", x.Name, x.Model, Suggest(x.Model, f.models), strings.Join(f.models, ", "))
 		}
 	}
 	if f.maxSteps < 0 {
@@ -351,7 +351,7 @@ func checkTools(local map[string]*Graph, cfg agentturn.Config) error {
 	var errs []error
 	missing := func(x *Graph, n *Node, tool string) {
 		if !slices.Contains(offered, tool) {
-			errs = append(errs, fmt.Errorf("agentflow: %s: node %q names the tool %s, which the config does not offer%s", x.Name, n.ID, tool, suggest(tool, offered)))
+			errs = append(errs, fmt.Errorf("agentflow: %s: node %q names the tool %s, which the config does not offer%s", x.Name, n.ID, tool, Suggest(tool, offered)))
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(local)) {
@@ -372,7 +372,7 @@ func checkTools(local map[string]*Graph, cfg agentturn.Config) error {
 		}
 		for _, tool := range x.ExcludeTools {
 			if !slices.Contains(offered, tool) {
-				errs = append(errs, fmt.Errorf("agentflow: %s excludes the tool %s, which the config does not offer%s", x.Name, tool, suggest(tool, offered)))
+				errs = append(errs, fmt.Errorf("agentflow: %s excludes the tool %s, which the config does not offer%s", x.Name, tool, Suggest(tool, offered)))
 			}
 		}
 	}
@@ -666,19 +666,27 @@ func (f *flow) instructions(st State) (string, error) {
 	}
 	fmt.Fprintf(&b, "\n\nWhen the step is done, call %s with step %q%s and one outcome of: %s.",
 		finishTool, n.ID, runClause(st), strings.Join(n.finishable(), ", "))
-	for _, outcome := range n.finishable() {
-		if s := n.Data[outcome]; s != nil {
-			j, err := json.Marshal(s)
-			if err != nil {
-				return "", err
-			}
-			fmt.Fprintf(&b, "\nFor outcome %s, data must match this schema: %s", outcome, j)
-		}
+	if err := n.dataText(&b, n.finishable()); err != nil {
+		return "", err
 	}
 	fmt.Fprintf(&b, "\nIf you cannot do the step, call %s with step %q%s and your reason, rather than finish it with an outcome that is not so.",
 		stuckTool, n.ID, runClause(st))
 	f.limitsText(&b, st)
 	return b.String(), nil
+}
+
+// dataText adds the schema each of outcomes holds its data to.
+func (n *Node) dataText(b *strings.Builder, outcomes []string) error {
+	for _, outcome := range outcomes {
+		if s := n.Data[outcome]; s != nil {
+			j, err := json.Marshal(s)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(b, "\nFor outcome %s, data must match this schema: %s", outcome, j)
+		}
+	}
+	return nil
 }
 
 // skillsText adds the instructions of the skills a step names. Their
@@ -900,7 +908,7 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 		}
 	case f.askClockDue(ctx, st):
 		name = clockTool
-		id, args = f.clockQuestion(st)
+		id, args = f.clockCall(st, false)
 	default:
 		id = st.callID()
 		if name, args, err = f.call(st); err != nil {
@@ -1258,7 +1266,7 @@ func (f *flow) ask(ctx context.Context, info agentturn.ToolCallInfo, st State) (
 	}
 	// A question asked after its time ran out, on a resume that came late,
 	// takes its timeout outcome at once.
-	if res, err := f.answerByTimeout(ctx, q); err != nil || res != nil {
+	if res, err := f.answerByTimeout(q); err != nil || res != nil {
 		if err != nil {
 			return nil, err
 		}
@@ -1343,13 +1351,9 @@ func (f *flow) askTool() agenttool.Tool {
 		if err := exact(ctx, &q); err != nil {
 			return Result{}, err
 		}
-		g, err := f.g.find(cmp.Or(q.Workflow, f.g.Name))
+		n, err := f.g.asker(q)
 		if err != nil {
 			return Result{}, err
-		}
-		n := g.node(q.Step)
-		if n == nil {
-			return Result{}, fmt.Errorf("agentflow: no step %q", q.Step)
 		}
 		if !q.Retry && q.Limit == "" && n.Kind != Person {
 			return Result{}, fmt.Errorf("agentflow: step %q asks nothing", q.Step)
@@ -1458,13 +1462,22 @@ func (g *Graph) asked(pending agentturn.PendingCall) (Question, *Node, error) {
 	if err := decode([]byte(pending.Call.Arguments), &q); err != nil {
 		return Question{}, nil, fmt.Errorf("agentflow: question: %w", err)
 	}
-	asker, err := g.find(cmp.Or(q.Workflow, g.Name))
+	n, err := g.asker(q)
 	if err != nil {
 		return Question{}, nil, err
 	}
-	n := asker.node(q.Step)
-	if n == nil {
-		return Question{}, nil, fmt.Errorf("agentflow: no step %q", q.Step)
-	}
 	return q, n, nil
+}
+
+// asker is the step that asks q: one of g's, or of a workflow g calls.
+func (g *Graph) asker(q Question) (*Node, error) {
+	x, err := g.find(cmp.Or(q.Workflow, g.Name))
+	if err != nil {
+		return nil, err
+	}
+	n := x.node(q.Step)
+	if n == nil {
+		return nil, fmt.Errorf("agentflow: no step %q", q.Step)
+	}
+	return n, nil
 }

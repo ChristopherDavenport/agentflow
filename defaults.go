@@ -16,7 +16,7 @@ func (g *Graph) checkDefaults() []error {
 		}
 		switch {
 		case g.Inputs == nil || !declares(g.Inputs, name):
-			bad("has a default, and the workflow has no such input%s", suggest(name, memberNames(g.Inputs)))
+			bad("has a default, and the workflow has no such input%s", Suggest(name, memberNames(g.Inputs)))
 		case slices.Contains(g.Inputs.Required, name):
 			bad("is required and has a default: an input with a default may be left out, so it is not required")
 		default:

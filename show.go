@@ -93,7 +93,7 @@ func (n *Node) checkShow() []error {
 		case seen[m]:
 			errs = append(errs, bad("show names %q twice", m))
 		case !slices.ContainsFunc(n.outcomes(), func(o string) bool { return n.Data[o] != nil && declares(n.Data[o], m) }):
-			errs = append(errs, bad("show: no outcome declares %q%s", m, suggest(m, names)))
+			errs = append(errs, bad("show: no outcome declares %q%s", m, Suggest(m, names)))
 		}
 		seen[m] = true
 	}

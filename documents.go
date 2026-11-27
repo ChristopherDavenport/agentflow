@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	slashpath "path"
 	"slices"
 	"strings"
 
@@ -73,10 +72,10 @@ func (g *Graph) checkDocuments() []error {
 			bad("document %q: want 1 to 20 letters, digits, _ or -", name)
 		case d.From != "" && d.Input != "":
 			bad("document %q starts from a file or from an input, not both", name)
-		case d.From != "" && (slashpath.IsAbs(d.From) || slashpath.Clean(d.From) != d.From || strings.HasPrefix(d.From, "../") || d.From == ".."):
+		case d.From != "" && !cleanPath(d.From):
 			bad("document %q: from %q: want a clean path within the skill", name, d.From)
 		case d.Input != "" && (g.Inputs == nil || !declares(g.Inputs, d.Input)):
-			bad("document %q starts as input %q, which is not an input of the workflow%s", name, d.Input, suggest(d.Input, memberNames(g.Inputs)))
+			bad("document %q starts as input %q, which is not an input of the workflow%s", name, d.Input, Suggest(d.Input, memberNames(g.Inputs)))
 		case d.Input != "":
 			if s := member(g.Inputs, []string{d.Input}); s != nil && s.Type != "" && s.Type != "string" {
 				bad("document %q starts as input %q, which is not text", name, d.Input)
@@ -94,7 +93,7 @@ func (g *Graph) checkDocuments() []error {
 				case n.Kind != Agent || n.Verdict:
 					bad("node %q: only a model step reads or edits documents", n.ID)
 				case g.Documents == nil || !slices.Contains(names, name):
-					bad("node %q: no document %q%s", n.ID, name, suggest(name, names))
+					bad("node %q: no document %q%s", n.ID, name, Suggest(name, names))
 				}
 			}
 		}
@@ -104,7 +103,7 @@ func (g *Graph) checkDocuments() []error {
 			case n.Kind != Run || n.Flow != "":
 				bad("node %q: only a script or tool step writes documents from its result", n.ID)
 			case !slices.Contains(names, name):
-				bad("node %q: no document %q%s", n.ID, name, suggest(name, names))
+				bad("node %q: no document %q%s", n.ID, name, Suggest(name, names))
 			case field == "":
 				bad("node %q: document %q: name the member of the result that holds its text", n.ID, name)
 			case len(n.schemas()) > 0 && g.possible(ref{step: n.ID, path: []string{field}}) != nil:
@@ -262,9 +261,9 @@ func checkDocCall(st State, name string, args json.RawMessage) error {
 	case a.Run != st.Instance:
 		return fmt.Errorf("you are on step %q of run %q, not of run %q", n.ID, st.Instance, a.Run)
 	case name == docReadTool && !n.reads(a.Name):
-		return fmt.Errorf("step %q does not read the document %q%s", n.ID, a.Name, suggest(a.Name, append(slices.Clone(n.Reads), n.Edits...)))
+		return fmt.Errorf("step %q does not read the document %q%s", n.ID, a.Name, Suggest(a.Name, append(slices.Clone(n.Reads), n.Edits...)))
 	case name == docWriteTool && !n.edits(a.Name):
-		return fmt.Errorf("step %q does not edit the document %q%s", n.ID, a.Name, suggest(a.Name, n.Edits))
+		return fmt.Errorf("step %q does not edit the document %q%s", n.ID, a.Name, Suggest(a.Name, n.Edits))
 	}
 	return nil
 }

@@ -84,27 +84,7 @@ const MaxTimeout = 24 * time.Hour
 const DefaultLoopVisits = 5
 
 // onLoop reports whether some path leads from the node back to it.
-func (g *Graph) onLoop(id string) bool {
-	seen := map[string]bool{}
-	queue := []string{id}
-	for len(queue) > 0 {
-		n := g.node(queue[0])
-		queue = queue[1:]
-		if n == nil {
-			continue
-		}
-		for _, next := range n.Next {
-			if next == id {
-				return true
-			}
-			if !seen[next] {
-				seen[next] = true
-				queue = append(queue, next)
-			}
-		}
-	}
-	return false
-}
+func (g *Graph) onLoop(id string) bool { return g.reaches(id, id) }
 
 // visits is the node's bound.
 func (g *Graph) visits(n *Node) int {
@@ -475,7 +455,7 @@ func (g *Graph) Validate() error {
 		bad("timeout must be above 0 and at most %s", MaxTimeout)
 	}
 	if g.Context != "" && g.Context != ContextFresh {
-		bad("context %q: a workflow may say only %q, that every call runs it in a child; leave it out to let each call say%s", g.Context, ContextFresh, suggest(g.Context, []string{ContextFresh}))
+		bad("context %q: a workflow may say only %q, that every call runs it in a child; leave it out to let each call say%s", g.Context, ContextFresh, Suggest(g.Context, []string{ContextFresh}))
 	}
 	for _, tool := range g.ExcludeTools {
 		if tool == ScriptTool || strings.HasPrefix(tool, reserved) {
@@ -586,7 +566,7 @@ func (g *Graph) Validate() error {
 			}
 			for _, outcome := range j.Outcomes {
 				if !slices.Contains(n.outcomes(), outcome) {
-					bad("node %q: judge: undeclared outcome %q%s", n.ID, outcome, suggest(outcome, n.outcomes()))
+					bad("node %q: judge: undeclared outcome %q%s", n.ID, outcome, Suggest(outcome, n.outcomes()))
 				}
 			}
 			for _, tool := range j.Tools {
@@ -600,16 +580,16 @@ func (g *Graph) Validate() error {
 		unknown := n.Flow != "" && n.call == nil && len(n.Outcomes) == 0
 		for outcome, next := range n.Next {
 			if !unknown && !slices.Contains(n.outcomes(), outcome) {
-				bad("node %q: edge for undeclared outcome %q%s", n.ID, outcome, suggest(outcome, n.outcomes()))
+				bad("node %q: edge for undeclared outcome %q%s", n.ID, outcome, Suggest(outcome, n.outcomes()))
 			}
 			if g.node(next) == nil {
-				bad("node %q: edge to unknown node %q%s", n.ID, next, suggest(next, g.nodeIDs()))
+				bad("node %q: edge to unknown node %q%s", n.ID, next, Suggest(next, g.nodeIDs()))
 			}
 		}
 		for outcome, end := range n.Ends {
 			switch {
 			case !unknown && !slices.Contains(n.outcomes(), outcome):
-				bad("node %q: end for undeclared outcome %q%s", n.ID, outcome, suggest(outcome, n.outcomes()))
+				bad("node %q: end for undeclared outcome %q%s", n.ID, outcome, Suggest(outcome, n.outcomes()))
 			case n.Next[outcome] != "":
 				bad("node %q: outcome %q both goes on and ends", n.ID, outcome)
 			case !nodeID.MatchString(end) || g.node(end) != nil:
@@ -617,11 +597,11 @@ func (g *Graph) Validate() error {
 			}
 		}
 		if n.Unattended.Outcome != "" && (n.Kind != Person || !slices.Contains(n.outcomes(), n.Unattended.Outcome)) {
-			bad("node %q: unattended must be an outcome of a person node%s", n.ID, suggest(n.Unattended.Outcome, n.outcomes()))
+			bad("node %q: unattended must be an outcome of a person node%s", n.ID, Suggest(n.Unattended.Outcome, n.outcomes()))
 		}
 		for outcome := range n.Data {
 			if !slices.Contains(n.outcomes(), outcome) {
-				bad("node %q: data for undeclared outcome %q%s", n.ID, outcome, suggest(outcome, n.outcomes()))
+				bad("node %q: data for undeclared outcome %q%s", n.ID, outcome, Suggest(outcome, n.outcomes()))
 			}
 		}
 		if n.Unattended.Outcome != "" {
@@ -643,7 +623,7 @@ func (g *Graph) Validate() error {
 		for outcome, outputs := range g.OutputsBy {
 			switch {
 			case !slices.Contains(outcomes, outcome):
-				bad("outputs for %q, which is not an outcome of the workflow%s: want one of %s", outcome, suggest(outcome, outcomes), strings.Join(outcomes, ", "))
+				bad("outputs for %q, which is not an outcome of the workflow%s: want one of %s", outcome, Suggest(outcome, outcomes), strings.Join(outcomes, ", "))
 			case outcome == Failed && len(outputs) > 0:
 				bad("outputs for %q: a workflow that fails gives nothing back", outcome)
 			}

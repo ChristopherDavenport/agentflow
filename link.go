@@ -1,6 +1,7 @@
 package agentflow
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -64,7 +65,7 @@ func (g *Graph) Link(flows ...*Graph) error {
 			name := calleeName(x, n.Flow)
 			c := pool[name]
 			if c == nil {
-				errs = append(errs, fmt.Errorf("agentflow: %s: node %q calls %s: no such workflow%s", strings.Join(chain[x.Name], " → "), n.ID, name, suggest(name, slices.Collect(maps.Keys(pool)))))
+				errs = append(errs, fmt.Errorf("agentflow: %s: node %q calls %s: no such workflow%s", strings.Join(chain[x.Name], " → "), n.ID, name, Suggest(name, slices.Collect(maps.Keys(pool)))))
 				continue
 			}
 			if x.Callees == nil {
@@ -142,7 +143,7 @@ func (g *Graph) results() map[string]*agenttool.Schema {
 		s := &agenttool.Schema{Type: "object", Properties: []agenttool.Property{}}
 		for _, name := range slices.Sorted(maps.Keys(values)) {
 			v := values[name]
-			s.Properties = append(s.Properties, agenttool.Property{Name: name, Schema: cmpSchema(g.valueSchema(v))})
+			s.Properties = append(s.Properties, agenttool.Property{Name: name, Schema: cmp.Or(g.valueSchema(v), &agenttool.Schema{})})
 			if !v.Optional {
 				s.Required = append(s.Required, name)
 			}
@@ -150,14 +151,6 @@ func (g *Graph) results() map[string]*agenttool.Schema {
 		out[outcome] = s
 	}
 	return out
-}
-
-// cmpSchema is s, or a schema that accepts anything for none.
-func cmpSchema(s *agenttool.Schema) *agenttool.Schema {
-	if s == nil {
-		return &agenttool.Schema{}
-	}
-	return s
 }
 
 // valueSchema is the schema of what v holds, nil when it cannot be known:
@@ -273,7 +266,7 @@ func (g *Graph) contract(n *Node) []error {
 		want := member(c.Inputs, []string{name})
 		switch {
 		case !slices.Contains(props, name):
-			bad("%s is not an input of it%s", name, suggest(name, props))
+			bad("%s is not an input of it%s", name, Suggest(name, props))
 		case v.From == "":
 			if err := checkData(want, v.Literal); err != nil {
 				bad("%s: %v", name, err)

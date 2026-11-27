@@ -206,7 +206,7 @@ func (f *flow) transform(host func(context.Context, agentturn.Transcript) (agent
 			// With a record the folds in force still apply, so the
 			// request is one the record rebuilds, and the whole result is
 			// left out of what the host is given, so no summary takes it
-			// in. A live trial found this turn's request unhashed.
+			// in.
 			view = slices.DeleteFunc(slices.Clone(view), func(item openresponses.Item) bool {
 				switch it := item.(type) {
 				case *openresponses.FunctionCall:

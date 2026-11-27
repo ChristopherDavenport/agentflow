@@ -54,7 +54,7 @@ func (o Override) check() error {
 	case !keyPattern.MatchString(o.Run):
 		return fmt.Errorf("agentflow: override: run %q is not a run's key", o.Run)
 	case !slices.Contains(overrideActions, o.Action):
-		return fmt.Errorf("agentflow: override: action %q%s: want one of %s", o.Action, suggest(o.Action, overrideActions), strings.Join(overrideActions, ", "))
+		return fmt.Errorf("agentflow: override: action %q%s: want one of %s", o.Action, Suggest(o.Action, overrideActions), strings.Join(overrideActions, ", "))
 	case o.Action == OverrideJump && o.Step == "":
 		return errors.New("agentflow: override: a jump names the step it goes to")
 	case o.Action != OverrideJump && o.Step != "":
@@ -108,7 +108,7 @@ func (r *replay) target(o Override) (*frame, error) {
 		n := f.st.g.node(o.Step)
 		switch {
 		case n == nil:
-			return nil, fmt.Errorf("workflow %s has no step %q%s", f.st.Workflow, o.Step, suggest(o.Step, f.st.g.nodeIDs()))
+			return nil, fmt.Errorf("workflow %s has no step %q%s", f.st.Workflow, o.Step, Suggest(o.Step, f.st.g.nodeIDs()))
 		case f.st.g.cleans(n.ID):
 			return nil, fmt.Errorf("step %q is on the cleanup path, which only an abandon starts", o.Step)
 		}
@@ -165,19 +165,13 @@ func (r *replay) overridden(i int, c *openresponses.FunctionCall, out *openrespo
 		r.abandon(i, next, overriddenFor(o.Action))
 		return
 	case OverrideRetry:
-		n := st.Node
-		st.Attempt++
-		if n.Kind == Agent {
-			f.since, st.Nudges, st.Begun, st.refused = i, 0, false, 0
-		}
-		r.entries++
-		st.treeSteps++
+		r.retry(f, i)
 	case OverrideJump:
 		f.since, st.Nudges, st.Begun, st.refused = i, 0, false, 0
 		f.came = "an operator jumped to it"
 	}
 	st.Failure, st.Reached, st.Held, st.Advice = "", nil, nil, nil
-	st.clocked, st.Deadline, st.asked, st.filed = false, time.Time{}, 0, false
+	st.attempt, st.Deadline = attempt{}, time.Time{}
 	if o.Action == OverrideJump {
 		f.jumped = true
 		r.enter(f, i, st.g.node(o.Step))

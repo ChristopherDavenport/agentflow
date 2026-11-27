@@ -1,6 +1,7 @@
 package agentflow
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -142,7 +143,7 @@ func (f *flow) rootStart(inputs any) (startPayload, error) {
 
 // depth is the bound on nesting a new run records.
 func (f *flow) depth() int {
-	d := cmpDepth(f.g.MaxDepth)
+	d := cmp.Or(max(f.g.MaxDepth, 0), DefaultMaxDepth)
 	if f.maxDepth > 0 {
 		d = min(d, f.maxDepth)
 	}
@@ -151,7 +152,7 @@ func (f *flow) depth() int {
 
 // steps is the bound on step entries a new tree records.
 func (f *flow) steps() int {
-	n := cmpSteps(f.g.MaxSteps)
+	n := cmp.Or(max(f.g.MaxSteps, 0), DefaultMaxSteps)
 	if f.maxSteps > 0 {
 		n = min(n, f.maxSteps)
 	}

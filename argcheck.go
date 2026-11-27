@@ -18,7 +18,7 @@ import (
 // reference whose schema is known of its parameter's type. What a config
 // with a ToolProvider offers is known only as it runs, and a reference
 // with no schema only when it is resolved; both are checked when the
-// call is made, as before.
+// call is made.
 func checkArgs(g *Graph, cfg agentturn.Config) error {
 	if cfg.ToolProvider != nil {
 		return nil
@@ -50,18 +50,8 @@ func checkArgs(g *Graph, cfg agentturn.Config) error {
 // argsFit is every way n's arguments do not fit the tool's parameters.
 func (g *Graph) argsFit(n *Node, params *agenttool.Schema) []error {
 	var errs []error
-	var names []string
-	for _, p := range params.Properties {
-		names = append(names, p.Name)
-	}
-	param := func(name string) *agenttool.Schema {
-		for _, p := range params.Properties {
-			if p.Name == name {
-				return p.Schema
-			}
-		}
-		return nil
-	}
+	names := memberNames(params)
+	param := func(name string) *agenttool.Schema { return member(params, []string{name}) }
 	var args map[string]any
 	if n.Args != nil {
 		_ = decode(n.Args, &args)
@@ -96,7 +86,7 @@ func (g *Graph) argsFit(n *Node, params *agenttool.Schema) []error {
 func fit(name string, p, params *agenttool.Schema, names []string, v Value, g *Graph) []error {
 	if p == nil {
 		if params.NoAdditional {
-			return []error{fmt.Errorf("parameter %q is not one the tool takes%s", name, suggest(name, names))}
+			return []error{fmt.Errorf("parameter %q is not one the tool takes%s", name, Suggest(name, names))}
 		}
 		return nil
 	}
@@ -112,7 +102,7 @@ func fit(name string, p, params *agenttool.Schema, names []string, v Value, g *G
 	}
 	for _, path := range v.refs() {
 		s := g.refSchema(path)
-		if s == nil || s.Type == "" || p.Type == "" || s.Type == p.Type || s.Type == "integer" && p.Type == "number" {
+		if compatible(s, p) {
 			continue
 		}
 		return []error{fmt.Errorf("parameter %q wants %s, and %s is %s", name, p.Type, path, s.Type)}
