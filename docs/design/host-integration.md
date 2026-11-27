@@ -115,9 +115,9 @@ history := agentflow.History(func(ctx context.Context) (agentturn.Transcript, er
 
 - A record that does not hold the calls of the transcript it is read
   beside is refused with `ErrRecordBehind`.
-- Without `History` the transcript is the record. A transform that drops
-  what position is read from is then refused with `ErrPositionLost`, a
-  compaction among them, so a host that compacts gives `History`.
+- Without `History` the transcript is the record. A config with a
+  `Transform`, a compaction among them, needs `History`: `Apply` refuses
+  one without it, since what a transform returns is a view.
 - A host whose guards can quarantine a transcript gives `History` too.
 
 ## Children
@@ -292,7 +292,7 @@ base.Instructions += catalog.Prompt() + "\n\n" + workflow.StartPrompt(flows, wor
 | `ErrStalled` | a model stopped, was reminded once, and stopped again. The step is still current: an interactive host shows the person what the model said and prompts with their reply; an unattended one fails |
 | `ErrChanged` | a workflow in the run's closure changed since the run started, or the record is of another format. The run cannot be resumed; it can still be read with `Runs` |
 | `ErrRecordBehind` | the record given by `History` does not hold the transcript's calls |
-| `ErrPositionLost` | without `History`, a transform dropped what position is read from |
+| `ErrPositionLost` | without `History`, the transcript was rebuilt from a session without part of a run |
 | `ErrExpired` | `Answer` was given after the question's deadline. Drive the run; the timeout is what the record holds |
 | `ErrStepTimeout` | a model's stream was cut off at its step's deadline. `Drive` continues the run |
 | `ErrStepFailed` | a step's output was not a result with a declared outcome, and the step is not to be retried |

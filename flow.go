@@ -291,6 +291,11 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 		f.book = &usageBook{}
 	}
 	if transform := cfg.Transform; transform != nil {
+		// What a transform returns is a view, and position is not read
+		// from a view.
+		if f.history == nil {
+			return cfg, errors.New("agentflow: the config has a Transform, which needs the record: give History")
+		}
 		cfg.Transform = f.transform(transform)
 	}
 	cfg.BeforeTurn = agentturn.ChainBeforeTurn(f.begin, cfg.BeforeTurn)
@@ -380,25 +385,9 @@ func checkTools(local map[string]*Graph, cfg agentturn.Config) error {
 }
 
 // ErrPositionLost is a transcript that no longer says where the workflow
-// stands: a transform, a compaction say, dropped part of a run, or the
-// transcript was rebuilt from a session without it.
+// stands: it was rebuilt from a session without part of a run, and no
+// [History] gives the record.
 var ErrPositionLost = errors.New("agentflow: what the workflow's position is read from is gone")
-
-func (f *flow) samePosition(before, after agentturn.Transcript) error {
-	b, err := f.g.Replay(before)
-	if err != nil {
-		return err
-	}
-	a, err := f.g.Replay(after)
-	if err != nil {
-		return err
-	}
-	if a.Instance != b.Instance || a.Node != b.Node || a.Visit != b.Visit || a.Attempt != b.Attempt ||
-		a.Done != b.Done || a.Ended != b.Ended || a.Reported != b.Reported || len(a.Steps) != len(b.Steps) || (a.Advice == nil) != (b.Advice == nil) || (a.Held == nil) != (b.Held == nil) || len(a.Path) != len(b.Path) {
-		return ErrPositionLost
-	}
-	return nil
-}
 
 // begin opens a visit of an Agent node with a message in the transcript.
 // Without it a model reads its last step's flow_finish under a tool that

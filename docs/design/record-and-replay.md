@@ -237,9 +237,9 @@ item, for a session the item entries of its path. With it:
   or the wrong session, does not rewind a run. `Drive` takes the same
   option.
 
-Without `History` the transcript is the record, as long as nothing drops
-from it. A transform that drops what position is read from, a compaction
-among them, is refused with `ErrPositionLost`.
+Without `History` the transcript is the record, so nothing may drop from
+it: `Apply` refuses a config with a `Transform`, a compaction among them,
+that gives no `History`.
 
 A fresh step and a judge work in child sessions, each with the transform
 and the `History` its host's opener gives it.
@@ -268,7 +268,7 @@ and the `History` its host's opener gives it.
   `flow_shown`, the host's transform is given the view with the whole
   result left out. The folds already in force still apply and the request
   rebuilds from the record, while a fold made then cannot take the result
-  in. Without `History` the transform is not run in that turn.
+  in.
 - No description reaches a summarizer, and compaction loses no document
   text or file: both are read from the record.
 

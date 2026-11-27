@@ -173,27 +173,12 @@ func itemKey(item openresponses.Item) string {
 	return item.ItemType() + " " + string(b)
 }
 
-// transform runs the host's. With a history it is given only what a
-// model may read, so nothing it summarises can hand back what was kept
-// from one. Without, what it returns must still say where the workflow
-// stands.
+// transform runs the host's, which is given only what a model may read,
+// so nothing it summarises can hand back what was kept from one. Apply
+// refuses a transform with no history.
 func (f *flow) transform(host func(context.Context, agentturn.Transcript) (agentturn.Transcript, error)) func(context.Context, agentturn.Transcript) (agentturn.Transcript, error) {
 	return func(ctx context.Context, t agentturn.Transcript) (agentturn.Transcript, error) {
-		// Between a result a model sees only in part and the flow_shown
-		// that shows it, the program's turn comes first. Without a record
-		// nothing is summarised then: a summary could take in the whole
-		// result.
 		st, all, err := f.read(ctx, t)
-		if f.history == nil {
-			if st.show != nil {
-				return t, nil
-			}
-			out, err := host(ctx, t)
-			if err != nil {
-				return nil, err
-			}
-			return out, f.samePosition(t, out)
-		}
 		// A failed run's error is the request's to report.
 		if all == nil {
 			return nil, err
@@ -203,7 +188,9 @@ func (f *flow) transform(host func(context.Context, agentturn.Transcript) (agent
 			return nil, err
 		}
 		if u := st.show; u != nil {
-			// With a record the folds in force still apply, so the
+			// Between a result a model sees only in part and the
+			// flow_shown that shows it, the program's turn comes first.
+			// The folds in force still apply, so the
 			// request is one the record rebuilds, and the whole result is
 			// left out of what the host is given, so no summary takes it
 			// in.
