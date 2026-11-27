@@ -58,7 +58,16 @@ of `workflow/body.md`:
   it: the diagram from its first node, each kind of step, outcomes and
   edges, values, documents and limits, and which settings to leave to a
   host.
-- A person step stays the person's to answer.
+- It holds the model to what a program would: one step at a time, each
+  ended in a line that names its outcome; a script run as itself; a
+  step's tools by what they do, so a shell is no `read`; nothing of the
+  skill read but what a step names; a fresh step worked from its `with`
+  alone, by another agent where the model can start one; and `stuck`
+  where a step cannot be done.
+- Documents are files in a directory of their own, outside the working
+  directory.
+- A person step stays the person's to answer, and each outcome says
+  what it needs.
 - It names every key of the frontmatter and of a section's settings; a
   test holds it to that.
 
