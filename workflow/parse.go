@@ -517,9 +517,6 @@ func node(n *agentflow.Node, s section) error {
 		}
 		n.Args = b
 	}
-	if n.Kind != agentflow.Run && (n.Script != "" || n.Tool != "" || n.Args != nil || n.Flow != "") {
-		return errors.New("only a program node has run, tool, args or flow")
-	}
 	n.Context = set.Context
 	n.Model, n.InstructionsFile, n.Child = set.Model, set.Instructions, set.Child
 	if !set.Dir.IsZero() && set.Dir.Tag != "!!null" {
@@ -550,12 +547,6 @@ func node(n *agentflow.Node, s section) error {
 	}
 	if j := set.Judge; j != nil {
 		n.Judge = &agentflow.Judge{Criteria: strings.TrimSpace(j.Criteria), Outcomes: j.Outcomes, Tools: j.Tools, Returns: j.Returns, Policy: j.Policy.policy()}
-	}
-	if n.Kind != agentflow.Agent && (n.Tools != nil || n.AllTools || n.ExcludeTools != nil) {
-		return errors.New("only a model node has tools or exclude_tools")
-	}
-	if set.Skills != nil && n.Kind != agentflow.Agent {
-		return errors.New("only a model node names skills")
 	}
 	for _, name := range set.Skills {
 		n.Skills = append(n.Skills, agentflow.StepSkill{Name: name})
@@ -589,8 +580,6 @@ func node(n *agentflow.Node, s section) error {
 	}
 	switch u := &set.Unattended; {
 	case u.IsZero():
-	case n.Kind != agentflow.Person:
-		return errors.New("only a person node has unattended")
 	case u.Kind == yaml.ScalarNode:
 		n.Unattended = u.Value
 	default:
@@ -609,11 +598,7 @@ func node(n *agentflow.Node, s section) error {
 
 // question reads a person node's choices, free text and timeout outcome.
 func question(n *agentflow.Node, set *settings) error {
-	only := func(key string) error { return fmt.Errorf("only a person node has %s", key) }
 	if c := &set.Choices; !c.IsZero() {
-		if n.Kind != agentflow.Person {
-			return only("choices")
-		}
 		if c.Kind != yaml.MappingNode {
 			return errors.New("choices: want from, and select, outcome or as")
 		}
@@ -660,9 +645,6 @@ func question(n *agentflow.Node, set *settings) error {
 		}
 	}
 	if t := &set.Text; !t.IsZero() {
-		if n.Kind != agentflow.Person {
-			return only("text")
-		}
 		n.Text = &agentflow.FreeText{}
 		if t.Kind == yaml.ScalarNode {
 			n.Text.Outcome = t.Value
@@ -680,8 +662,6 @@ func question(n *agentflow.Node, set *settings) error {
 	}
 	switch u := &set.OnTimeout; {
 	case u.IsZero():
-	case n.Kind != agentflow.Person:
-		return only("on_timeout")
 	case u.Kind == yaml.ScalarNode:
 		n.OnTimeout = u.Value
 	default:

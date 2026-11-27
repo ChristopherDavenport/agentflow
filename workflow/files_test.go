@@ -62,7 +62,7 @@ func TestASkillsFileIsCheckedAtLoad(t *testing.T) {
 		{"./prompts", nil, "is a directory"},
 		{"./../outside.md", nil, "clean path"},
 		{"./big.md", fstest.MapFS{"big.md": {Data: []byte(strings.Repeat("x", agentflow.MaxFile+1))}}, "over"},
-		{"./bin.md", fstest.MapFS{"bin.md": {Data: []byte{0xff, 0xfe}}}, "not valid UTF-8"},
+		{"./bin.md", fstest.MapFS{"bin.md": {Data: []byte{0xff, 0xfe}}}, "of the skill is not text"},
 	} {
 		src := strings.Replace(filed, "./prompts/style.md", tc.path, 1)
 		if _, err := loadFiled(t, src, tc.extra); err == nil || !strings.Contains(err.Error(), tc.want) {

@@ -228,7 +228,7 @@ func TestEverythingUnknownIsRefused(t *testing.T) {
 		"context on a tool":   {edit("tool: x", "tool: x\ncontext: fresh"), "only a model node or a call has a context"},
 		"late settings":       {edit("Well?", "Well?\n```yaml\nmax_visits: 3\n```"), "opens the section"},
 		"tool on a person":    {edit("Well?", "```yaml\ntool: x\n```\nWell?"), "only a program node"},
-		"tools on a program":  {edit("tool: x", "tool: x\ntools: [y]"), "only a model node"},
+		"tools on a program":  {edit("tool: x", "tool: x\ntools: [y]"), "tools and exclude_tools are a model step's"},
 		"embedded reference":  {edit("tool: x", "tool: x\nwith: {n: \"v-${{ inputs.n }}\"}"), "whole value"},
 		"reference in args":   {edit("tool: x", "tool: x\nargs: {n: \"${{ inputs.n }}\"}"), "under with"},
 		"expression":          {edit("tool: x", "tool: x\nwith: {n: \"${{ inputs.n == 1 }}\"}"), "whole value"},

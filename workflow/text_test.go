@@ -134,7 +134,7 @@ func TestAStepsSkillsMustBeFound(t *testing.T) {
 		t.Errorf("an unknown skill: %v", err)
 	}
 	person := strings.Replace(skilled, "fix[fix]", "fix([fix])", 1)
-	if _, err := workflow.Parse("t", []byte(person)); err == nil || !strings.Contains(err.Error(), "only a model node names skills") {
+	if _, err := workflow.Parse("t", []byte(person)); err == nil || !strings.Contains(err.Error(), "skills are a model step's") {
 		t.Errorf("a person's skills: %v", err)
 	}
 }

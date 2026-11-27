@@ -152,7 +152,7 @@ func TestLoadingRefusesABrokenChain(t *testing.T) {
 		"a broken contract": {map[string]string{"WORKFLOW.md": strings.Replace(parentFlow, "  word: ${{ steps.sub.outputs.word }}\n", "  other: 1\n", 1),
 			"flows/sub.md": subFlow, "scripts/say.sh": ""}, true, "requires the input word"},
 		"a flow on a model step": {map[string]string{"WORKFLOW.md": strings.Replace(parentFlow, "sub[[sub]]", "sub[sub]", 1),
-			"flows/sub.md": subFlow, "scripts/say.sh": ""}, true, "only a program node has run, tool, args or flow"},
+			"flows/sub.md": subFlow, "scripts/say.sh": ""}, true, "only a program node has a script, a tool, args or a flow"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			parent := skill(t, filepath.Join(dir, strings.ReplaceAll(name, " ", "-")), "parent", c.files)

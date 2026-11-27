@@ -61,7 +61,7 @@ func TestQuestionKeysAreChecked(t *testing.T) {
 		{"timeout: 4h\n", ""}:                                                                 "on_timeout needs a timeout",
 		{"  from: ${{ steps.list.outputs.files }}", "  from: [a, b]"}:                         "from is a reference",
 		{"  from: ${{ steps.list.outputs.files }}", "  from: ${{ steps.list.outputs.file }}"}: "does not certainly produce",
-		{"tool: fix\n", "tool: fix\ntext: go\n"}:                                              "only a person node has text",
+		{"tool: fix\n", "tool: fix\ntext: go\n"}:                                              "only a person node takes free text",
 		{"text: change", "text: ship"}:                                                        `text: outcome "ship" is not declared`,
 	} {
 		src := strings.Replace(questions, change[0], change[1], 1)
