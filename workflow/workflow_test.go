@@ -274,9 +274,9 @@ func TestLoadRefuses(t *testing.T) {
 	}
 }
 
-// The example in the RFC loads, and its loop can go round.
-func TestRFCExample(t *testing.T) {
-	doc, err := os.ReadFile("../docs/rfcs/0001-agentflow.md")
+// The example in the design documents loads, and its loop can go round.
+func TestDesignExample(t *testing.T) {
+	doc, err := os.ReadFile("../docs/design/workflow-format.md")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +297,11 @@ func TestRFCExample(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := agentturn.New(cfg)
-	end, err := a.Prompt(context.Background(), openresponses.UserText("review"))
+	asked, err := g.Invocation(map[string]any{"pr": 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	end, err := a.Prompt(context.Background(), asked)
 	if err != nil || end.Reason != agentturn.ReasonDone {
 		t.Fatalf("end = %+v, %v", end, err)
 	}
