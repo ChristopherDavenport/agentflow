@@ -233,7 +233,9 @@ with:
   plan: ${{ latest(steps.draft.outputs.plan, steps.revise.outputs.plan, steps.load.outputs.plan) }}
 tools: [read, grep, write]
 ```
-Make the change the plan describes, and nothing else.
+Make the change the plan describes, and nothing else. Edit the files and
+finish: the next step runs the repository's checks, so a plan step that
+says to run them is not yours to do.
 
 ## test
 ```yaml
@@ -259,7 +261,8 @@ with:
   log: ${{ steps.test.outputs.log }}
 tools: [read, grep, write]
 ```
-The checks failed. Fix what the log shows without weakening a test.
+The checks failed. Fix what the log shows without weakening a test, then
+finish: the checks run again after this step.
 
 ## ship
 ```yaml
