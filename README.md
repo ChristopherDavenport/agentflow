@@ -4,10 +4,10 @@ Program-driven workflows over [agentturn](https://github.com/ChristopherDavenpor
 a graph decides whether the program, the model or a person takes each
 turn.
 
-**This is a spike.** The design is
-[RFC 0001](docs/rfcs/0001-agentflow.md), which says what is implemented
-and what is only proposed. A workflow is a `WORKFLOW.md` in an Agent
-Skill, or a graph built in Go. Needs Go 1.26.
+A workflow is a `WORKFLOW.md` in an Agent Skill, or a graph built in Go.
+The design is in [docs/design](docs/design/overview.md); what is not built
+or not settled is in [open questions](docs/design/open-questions.md).
+Needs Go 1.26.
 
 ```go
 cfg, err := agentflow.Apply(graph, agentturn.Config{Model: model, ModelName: name, Tools: tools})
@@ -19,7 +19,7 @@ end, state, err := agentflow.Drive(ctx, graph, a, end)
 
 // At a person step the run ends input_required.
 answer, err := graph.Answer(end.Pending[0], agentflow.Result{Outcome: "fix"})
-end, err = a.Resume(ctx, answer)
+end, state, err = agentflow.Resume(ctx, graph, a, []agentturn.Answer{answer})
 
 // Run it again in the same conversation.
 again, err := graph.Invocation(nil) // or its inputs
@@ -58,12 +58,6 @@ agentflow.Apply(graph, cfg, agentflow.Delegate(agentflow.Advise))           // y
 agentflow.Apply(graph, cfg, agentflow.Delegate(agentflow.Decide, "approve")) // it decides that step
 ```
 
-A session says which runs it holds and how each ended, whatever the
-workflow has become since:
-
-Give it every item of the session's path. The context
-`agentturn/session` rebuilds leaves out what the last request did.
-
 With a session, give the workflow that record, so a compaction or a
 resumed session loses it nothing. The model still sees only what the
 transcript holds, and each step is handed its inputs:
@@ -94,7 +88,27 @@ compact.NewLocal(summarizer, compact.WithOnFold(rec.Fold),
 	compact.WithFilter(agentflow.SummaryFilter))
 ```
 
+A session says which runs it holds and how each ended, whatever the
+workflow has become since. Give it every item of the session's path; the
+context `agentturn/session` rebuilds leaves out what the last request did.
+
 ```go
-runs, err := agentflow.Instances(transcript)
-state, err := runs[0].At(transcript, i) // where it stood after item i
+runs, err := agentflow.Runs(record, open) // open reads a child session's items, or nil
+state, err := runs[0].At(record, i)       // where it stood after item i
 ```
+
+## Documents
+
+| | |
+| --- | --- |
+| [Overview](docs/design/overview.md) | what a workflow is, the rules it holds, every `flow_` call |
+| [Workflow format](docs/design/workflow-format.md) | `WORKFLOW.md`: the diagram, every key, what is checked at load |
+| [Steps and data](docs/design/steps-and-data.md) | what each kind of step does and what passes between them |
+| [Record and replay](docs/design/record-and-replay.md) | the record, position, resuming, reading runs back |
+| [Calls and children](docs/design/calls-and-children.md) | calling a workflow, child sessions |
+| [Questions and judges](docs/design/questions-and-judges.md) | people, and the models that may answer for them |
+| [Limits, failure and intervention](docs/design/limits-failure-and-intervention.md) | timeouts, bounds, abandoning, overrides |
+| [Policy and trust](docs/design/policy-and-trust.md) | what a step may do, and what that does not promise |
+| [Host integration](docs/design/host-integration.md) | what a host supplies and calls |
+| [Decisions](docs/design/decisions.md) | what was chosen over what, and why |
+| [Open questions](docs/design/open-questions.md) | unbuilt, unsettled, and not yet tried with a model |
