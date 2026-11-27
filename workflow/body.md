@@ -41,7 +41,8 @@ reach it, to the end: not the first lines, and not only the diagram.
 5. Take the edge for that outcome: `a --> b` on `ok`, `a -->|name| b` on
    `name`. An edge into an end, `((name))`, ends the workflow with
    `name` as its outcome; an outcome with no edge ends it with that
-   outcome.
+   outcome. An outcome does nothing but take its edge, whatever its
+   name: `stop` or `drop` leads where the diagram says, and no further.
 6. At an end, say so in one line, `Workflow ended: <outcome>`, then
    give each of the frontmatter's `outputs`, or its `outputs_by` for that
    outcome, by name. A called workflow's end is said the same way, and
@@ -151,13 +152,8 @@ this skill (`from`) or from an input (`input`).
   step fails, stop and ask the person whether to go on.
 - A program step or your step that runs past its `timeout`, or the
   frontmatter's, has failed.
-- If the person abandons the run part way, by leaving it rather than
-  by answering a question, and the frontmatter names `on_abort`, follow
-  the steps from that one to an end first. An outcome is never this,
-  whatever its name: `stop`, `drop` or `abort` takes its edge like any
-  other.
 
 A `description` is for people. The other settings, `model`,
-`thinking`, `show`, `hidden`, `on_timeout`, `max_depth` and
+`thinking`, `show`, `hidden`, `on_timeout`, `on_abort`, `max_depth` and
 `max_steps`, tell an agentflow host how to run the workflow. By hand,
-leave them be.
+leave them be, and never follow a step no edge of your path reaches.
