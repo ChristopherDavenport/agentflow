@@ -17,13 +17,15 @@ func (n *Node) checkChild() []error {
 	bad := func(format string, args ...any) {
 		errs = append(errs, fmt.Errorf("agentflow: node %q: "+format, append([]any{n.ID}, args...)...))
 	}
-	if !n.fresh() && !n.unlinked() {
+	// Every call runs in a child, whatever it opens with; a model step
+	// does only when it is fresh.
+	if !n.inChild() {
 		for _, s := range []struct {
 			key string
 			set bool
 		}{{"instructions", n.Instructions != "" || n.InstructionsFile != ""}, {"child", n.Child != ""}} {
 			if s.set {
-				bad("%s is a setting of a child; it needs context: %s", s.key, ContextFresh)
+				bad("%s is a setting of a child; a model step needs context: %s", s.key, ContextFresh)
 			}
 		}
 	}

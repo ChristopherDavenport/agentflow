@@ -228,8 +228,8 @@ settings and be none.
 | `files` | model | files given to the step as context when it opens | [steps-and-data.md](steps-and-data.md#files) |
 | `model`, `thinking` | model; `model` also a fresh call | the model a step asks and how hard it reasons | [steps-and-data.md](steps-and-data.md#model-and-thinking) |
 | `context` | model, call | `session` or `fresh`. On a model step, whether it works in its run's session or in a child of its own. On a call, whether its child opens with the caller's view or with nothing | [steps-and-data.md](steps-and-data.md#context), [calls-and-children.md](calls-and-children.md#context-what-a-child-opens-with) |
-| `dir` | fresh model, fresh call, script | the directory below the workspace's root the step works in: a path, or a reference to one | [calls-and-children.md](calls-and-children.md) |
-| `instructions` | fresh model, fresh call | a file of the skill added to the child's instructions | [calls-and-children.md](calls-and-children.md) |
+| `dir` | fresh model, call, script | the directory below the workspace's root the step works in: a path, or a reference to one | [calls-and-children.md](calls-and-children.md) |
+| `instructions` | fresh model, call | a file of the skill added to the child's instructions | [calls-and-children.md](calls-and-children.md) |
 | `child` | fresh model | the name of a child kept across the visits and steps that name it | [calls-and-children.md](calls-and-children.md) |
 | `policy` | model, call | `allow` and `deny` lists of rules; a rule is a string, or `{rule, note, path, command}` | [policy-and-trust.md](policy-and-trust.md) |
 | `unattended` | person | the outcome taken when nobody can be asked: a name, or `{outcome, data}` | [questions-and-judges.md](questions-and-judges.md) |

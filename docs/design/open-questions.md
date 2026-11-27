@@ -58,9 +58,6 @@ These are in the code as it stands.
   name a tool the step offers, so a step cannot deny a tool that only
   another tool calls, except under `tools: all` or from a calling step.
 
-- **A seeded call's settings.** `instructions`, `child` and `dir` on a
-  call are load errors unless the call is `context: fresh`, though every
-  call now runs in a child that could take them.
 - **The cost of a seeded child's first request.** It repeats what its
   caller's model had been sent, and a seeded child that calls repeats
   that again. Whether a provider's cache takes most of it is not

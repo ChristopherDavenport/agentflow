@@ -339,10 +339,14 @@ tools: [read, grep, edit]
 instructions: prompts/api.md   # a file in the skill
 ```
 
-`instructions` is allowed only on a fresh model step or a fresh call.
+These are settings of a child, so a model step takes `dir` and
+`instructions` only when it is fresh. A call to a workflow always runs in
+a child and takes them whatever it opens with: a call in its caller's
+context works in its own directory, under its own instructions, with its
+caller's conversation before it. A call takes `model` only when it is
+fresh, since what it would open with was written for another model.
 `model` and `thinking` are open to every model step, `tools` to every
-model step, and `dir` to a script step as well. A fresh call to a
-workflow takes `dir`, `model` and `instructions`.
+model step, and `dir` to a script step as well.
 
 ### `dir`
 
