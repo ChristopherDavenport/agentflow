@@ -18,7 +18,7 @@ shown it, so the record holds exactly that:
 
 | Member | What it holds |
 |---|---|
-| `workflow`, `run`, `path` | the run that asks, and the root-to-frame list of workflow, run and step, so a front can say where the question comes from |
+| `workflow`, `run`, `path` | the run that asks, and the root-to-run list of workflow, run and step, so a front can say where the question comes from |
 | `step` | the step |
 | `question`, `template` | the text as the person is asked it, and the text as the step writes it when it names values |
 | `outcomes` | the outcomes an answer may take |
@@ -46,7 +46,7 @@ reads the question from the pending call.
 question at any depth, with its step's description from the definition
 its run pinned. The description is never written into the question's
 arguments, because a model working later in the same context reads
-those. An answer is checked against the asking frame's pinned definition;
+those. An answer is checked against the asking run's pinned definition;
 the root graph, linked, holds them all.
 
 **A reason.** A person may give a reason with any answer

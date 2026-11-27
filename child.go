@@ -44,6 +44,19 @@ type Child struct {
 	Path  []Place
 	// Settings are the child's own.
 	Settings ChildSettings
+	// Seeded says the child's model begins with what its caller's saw:
+	// the opener forks the child's session from its caller's, before the
+	// call Caller names, as agentturn/session's Recorder.ForkChild does at
+	// EntryBefore of it. What the child's session then opens with is no
+	// part of the child's record: the opener passes c.Apply a [History] of
+	// the items the child's session wrote itself, and an [Inherited] of
+	// those it opened with. Apply refuses a seeded child without both.
+	Seeded bool
+	// Seed is for an opener with no session to fork, one that keeps its
+	// agents in memory: what the caller's agent held before the call,
+	// which it seeds the child's agent with and gives back as Inherited.
+	// An opener that forks a session leaves it alone.
+	Seed openresponses.Items
 
 	parent   *flow
 	g        *Graph
@@ -100,6 +113,9 @@ func (c Child) Apply(cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 	for _, opt := range opts {
 		opt(f)
 	}
+	if c.Seeded && (f.history == nil || f.inherited == nil) {
+		return cfg, fmt.Errorf("agentflow: child %s of %s begins with its caller's context, so its session holds items that are not its record: give Child.Apply a History of the items the child's session wrote itself and an Inherited of those it opened with", c.Run, c.Caller)
+	}
 	out, err := f.apply(cfg)
 	if err == nil && c.made != nil {
 		*c.made = f
@@ -112,10 +128,12 @@ func (c Child) Apply(cfg agentturn.Config, opts ...Option) (agentturn.Config, er
 // included. It returns the context the child's runs take and an agent
 // for the child's session, whose config it passes through c.Apply: with
 // agentturn/session, the context of Recorder.ContinueChild(ctx, c.Spawn),
-// or of StartChild when the parent's session has no such spawn yet, and
-// an agent seeded with what the child's session holds. A kept child's
-// session holds its earlier runs. A graph with a fresh step, a fresh call
-// or a step the host lets a judge answer needs it.
+// or when the parent's session has no such spawn yet, of StartChild, or
+// for a seeded child, see [Child.Seeded], of ForkChild at the entry
+// before the call c.Caller names; and an agent seeded with what the
+// child's session holds. A kept child's session holds its earlier runs.
+// A graph with a call to a workflow, a fresh step or a step the host lets
+// a judge answer needs it.
 //
 // c.Apply checks the child's tools against its steps, as Apply does a
 // root's: an opener returns its error as it is, or wrapped with %w, and a
@@ -177,7 +195,7 @@ func heldChild(pending []agentturn.PendingCall) (agentturn.PendingCall, callArgs
 			continue
 		}
 		var a callArgs
-		if decode([]byte(c.Arguments), &a) == nil && a.Context == ContextFresh {
+		if decode([]byte(c.Arguments), &a) == nil && a.held() {
 			return p, a, true
 		}
 	}
@@ -185,7 +203,7 @@ func heldChild(pending []agentturn.PendingCall) (agentturn.PendingCall, callArgs
 }
 
 // childFor is the child a held call of st's run waits on.
-func (f *flow) childFor(st State, call *openresponses.FunctionCall, a callArgs) (Child, error) {
+func (f *flow) childFor(ctx context.Context, view agentturn.Transcript, st State, call *openresponses.FunctionCall, a callArgs) (Child, error) {
 	n := st.Node
 	if n == nil {
 		return Child{}, errors.New("agentflow: a call waits on a child, and its run is at no step")
@@ -220,8 +238,30 @@ func (f *flow) childFor(st State, call *openresponses.FunctionCall, a callArgs) 
 	default:
 		c.Settings = ChildSettings{Dir: a.Dir, Model: n.Model, Instructions: n.Instructions}
 		c.policies = f.policies(st)
+		if a.Context == ContextSession {
+			c.Seeded = true
+			if c.Seed, err = seedFor(view, call.CallID); err != nil {
+				return Child{}, err
+			}
+		}
 	}
 	return c, nil
+}
+
+// seedFor is what an opener with no session seeds a child of the call id
+// with: what the caller's agent, whose transcript is view, held before
+// the call. The call's own turn is the program's, and is left out, so the
+// child reads no call without a result. What no model may read of it the
+// child's view leaves out, as the caller's did.
+func seedFor(view agentturn.Transcript, id string) (openresponses.Items, error) {
+	at := slices.IndexFunc(view, func(item openresponses.Item) bool {
+		c, ok := item.(*openresponses.FunctionCall)
+		return ok && c.CallID == id
+	})
+	if at < 0 {
+		return nil, fmt.Errorf("agentflow: the call %s is not in its session's transcript", id)
+	}
+	return slices.Clone(openresponses.Items(view[:at])), nil
 }
 
 // open asks the host for the child's agent, the context its runs take,
@@ -266,6 +306,7 @@ func (f *flow) past(ctx context.Context, a *agentturn.Agent, run string) (*State
 	for _, in := range runs {
 		if in.ID == run && in.End >= 0 {
 			st := in.State
+			st.Summary = in.Summary
 			return &st, nil
 		}
 	}
@@ -282,9 +323,9 @@ func (f *flow) started(ctx context.Context, a *agentturn.Agent, run string) bool
 // waits in it, until the child's run ends or waits. It returns the
 // answer that lets the call go, or the child's end and state while it
 // waits.
-func (f *flow) settle(ctx context.Context, st State, p agentturn.PendingCall, a callArgs, answers []agentturn.Answer) (*agentturn.Answer, *agentturn.RunEnd, State, error) {
+func (f *flow) settle(ctx context.Context, view agentturn.Transcript, st State, p agentturn.PendingCall, a callArgs, answers []agentturn.Answer) (*agentturn.Answer, *agentturn.RunEnd, State, error) {
 	due := callDeadline(st, p)
-	c, err := f.childFor(st, p.Call, a)
+	c, err := f.childFor(ctx, view, st, p.Call, a)
 	if err != nil {
 		return nil, nil, st, err
 	}
@@ -293,7 +334,7 @@ func (f *flow) settle(ctx context.Context, st State, p agentturn.PendingCall, a 
 	if unfit := (*unfitChild)(nil); late && (errors.Is(err, ErrChildRefused) || errors.As(err, &unfit)) {
 		// Its time ran out over a child that cannot be opened: there is
 		// nothing there to read or to abandon, and the call times out.
-		ans, err := f.expireChild(ctx, st, p, a)
+		ans, err := f.expireChild(ctx, view, st, p, a)
 		return ans, nil, st, err
 	}
 	if unfit := (*unfitChild)(nil); errors.As(err, &unfit) {
@@ -317,7 +358,7 @@ func (f *flow) settle(ctx context.Context, st State, p agentturn.PendingCall, a 
 	// not held to it, however late its caller comes to read the end.
 	if late {
 		if done, _ := cf.over(cctx, child, a.Run); done == nil {
-			ans, err := f.expireChild(ctx, st, p, a)
+			ans, err := f.expireChild(ctx, view, st, p, a)
 			return ans, nil, st, err
 		}
 	}
@@ -366,7 +407,7 @@ func (f *flow) settle(ctx context.Context, st State, p agentturn.PendingCall, a 
 	}
 	if !due.IsZero() && ctx.Err() == nil && errors.Is(run.Err(), context.DeadlineExceeded) {
 		if done, _ := cf.over(cctx, child, a.Run); done == nil {
-			ans, err := f.expireChild(ctx, st, p, a)
+			ans, err := f.expireChild(ctx, view, st, p, a)
 			return ans, nil, st, err
 		}
 	}
@@ -381,7 +422,7 @@ func (f *flow) settle(ctx context.Context, st State, p agentturn.PendingCall, a 
 		// record does not read as a look still under way.
 		stalled := err
 		var looked State
-		if looked.Entries, looked.Granted, looked.Summary, err = f.abandonChild(ctx, st, p, a, "the judge gave no verdict"); err != nil {
+		if looked.Entries, looked.Granted, looked.Summary, err = f.abandonChild(ctx, view, st, p, a, "the judge gave no verdict"); err != nil {
 			return nil, nil, st, err
 		}
 		ans, err := letGo(st, p, a, looked, stalled)
@@ -495,7 +536,7 @@ func (f *flow) resume(ctx context.Context, a *agentturn.Agent, answers []agenttu
 	if !ok {
 		return nil, st, fmt.Errorf("%w: no call of the run, or of a child it waits on, is pending", agentturn.ErrNotPending)
 	}
-	ans, end, cst, err := f.settle(ctx, st, p, args, answers)
+	ans, end, cst, err := f.settle(ctx, a.State().Transcript, st, p, args, answers)
 	if ans == nil {
 		return end, cst, err
 	}
@@ -577,7 +618,7 @@ func (f *flow) setAside(ctx context.Context, a *agentturn.Agent, text, why strin
 			// buy steps by throwing a child's away.
 			let := callFailure{Failure: text}
 			var err error
-			if let.Entries, let.Granted, let.Summary, err = f.abandonChild(ctx, st, p, args, why); err != nil {
+			if let.Entries, let.Granted, let.Summary, err = f.abandonChild(ctx, a.State().Transcript, st, p, args, why); err != nil {
 				return nil, err
 			}
 			b, err := json.Marshal(let)
@@ -601,8 +642,8 @@ func (f *flow) setAside(ctx context.Context, a *agentturn.Agent, text, why strin
 // or unfit for its tools: it never ran there, nothing in it can be
 // abandoned, and setting its call aside, or timing it out, must not fail
 // for that.
-func (f *flow) abandonChild(ctx context.Context, st State, p agentturn.PendingCall, args callArgs, why string) (entries, granted int, summary *Summary, err error) {
-	c, err := f.childFor(st, p.Call, args)
+func (f *flow) abandonChild(ctx context.Context, view agentturn.Transcript, st State, p agentturn.PendingCall, args callArgs, why string) (entries, granted int, summary *Summary, err error) {
+	c, err := f.childFor(ctx, view, st, p.Call, args)
 	if err != nil {
 		return 0, 0, nil, err
 	}
@@ -651,12 +692,12 @@ func (f *flow) abandonChild(ctx context.Context, st State, p agentturn.PendingCa
 // outcome failed where its step routes on it, or as a failure the step
 // asks to retry. What the child spent still counts toward the caller's
 // tree.
-func (f *flow) expireChild(ctx context.Context, st State, p agentturn.PendingCall, a callArgs) (*agentturn.Answer, error) {
+func (f *flow) expireChild(ctx context.Context, view agentturn.Transcript, st State, p agentturn.PendingCall, a callArgs) (*agentturn.Answer, error) {
 	n := st.Node
-	c := callClock{run: st.Instance, workflow: st.Workflow, step: n.ID, timeout: n.Timeout, deadline: st.Deadline}
+	c := callClock{workflow: st.Workflow, step: n.ID, timeout: n.Timeout}
 	why := c.why()
 	var err error
-	if a.Entries, a.Granted, a.Summary, err = f.abandonChild(ctx, st, p, a, why); err != nil {
+	if a.Entries, a.Granted, a.Summary, err = f.abandonChild(ctx, view, st, p, a, why); err != nil {
 		return nil, err
 	}
 	if n.routesFailure() {

@@ -61,13 +61,18 @@ func recorded(t *testing.T, g *Graph, tool agenttool.Tool, m *cast, opts ...Opti
 // run prompts, for a run that is expected to end in an error.
 func run(a *agentturn.Agent) *agentturn.RunEnd {
 	end, _ := a.Prompt(context.Background(), openresponses.UserText("go"))
+	if out, _ := drift(a, end); out != nil {
+		return out
+	}
 	return end
 }
 
 // pathItems is every item of the session's path. The context rebuilt
 // from it leaves out what the last request did.
 func pathItems(s *agentsession.Session) (out agentturn.Transcript) {
-	for _, e := range s.Path(s.Leaf()) {
+	// A forked session's path opens with what its caller's held, which is
+	// no part of its record.
+	for _, e := range session.OwnPath(s) {
 		if item, ok := e.(*agentsession.ItemEntry); ok {
 			out = append(out, item.Item)
 		}

@@ -2,18 +2,15 @@ package agentflow
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"os/exec"
 	"slices"
 	"syscall"
 	"testing"
 
-	"github.com/ChristopherDavenport/agentsession"
-	"github.com/ChristopherDavenport/agentsession/jsonl"
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
-	"github.com/ChristopherDavenport/agentturn/session"
+	"github.com/ChristopherDavenport/openresponses"
 )
 
 // stopAt answers the question a bound raised with stop, holding it to be
@@ -27,7 +24,7 @@ func stopAt(t *testing.T, g *Graph, a *agentturn.Agent, end *agentturn.RunEnd, l
 	if err != nil {
 		t.Fatal(err)
 	}
-	next, err := a.Resume(context.Background(), ans)
+	next, err := carry(t, a, ans)
 	if next == nil {
 		t.Fatal(err)
 	}
@@ -48,23 +45,20 @@ func TestABoundQuestionResumesInANewProcess(t *testing.T) {
 	tools := func() []agenttool.Tool { return []agenttool.Tool{countTool(&counts)} }
 	if dir := os.Getenv(boundEnv); dir != "" {
 		ctx := context.Background()
-		store, err := jsonl.Open(dir)
+		h := hosted(t, dir, "", g(), &fakeModel{}, tools(), false)
+		first, err := h.a.Prompt(ctx, openresponses.UserText("go"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		rec, s, err := session.Start(ctx, store, agentsession.Header{CWD: dir})
+		end, _, err := Drive(ctx, h.g, h.a, first, h.hist)
 		if err != nil {
 			t.Fatal(err)
 		}
-		a := nestedAgent(t, g(), &fakeModel{}, tools())
-		rec.Attach(a)
-		if q := question(t, run(a)); q.Limit != "depth" {
+		if q := question(t, end); q.Limit != "depth" {
 			t.Fatalf("question = %+v", q)
 		}
-		if err := store.Sync(ctx, s.ID()); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(dir+"/id", []byte(s.ID()), 0o600); err != nil {
+		syncAll(t, h.store)
+		if err := os.WriteFile(dir+"/id", []byte(h.id), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
@@ -79,34 +73,20 @@ func TestABoundQuestionResumesInANewProcess(t *testing.T) {
 	if err == nil || readErr != nil {
 		t.Fatalf("child: err = %v, read = %v\n%s", err, readErr, out)
 	}
-	store, err := jsonl.Open(dir)
+	h := hosted(t, dir, string(id), g(), &fakeModel{}, tools(), false)
+	// The question waits three sessions down, each a fork of the one above.
+	end, _, err := Drive(ctx, h.g, h.a, nil, h.hist)
+	if err != nil || end == nil || len(end.Pending) != 1 {
+		t.Fatalf("end = %+v, %v", end, err)
+	}
+	if q := question(t, end); q.Limit != "depth" || q.Workflow != "countdown" || len(q.Path) != 3 {
+		t.Fatalf("question = %+v", q)
+	}
+	ans, err := h.g.Answer(end.Pending[0], Result{Outcome: grantOutcome, Data: map[string]any{"amount": 3}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec, s, err := session.Resume(ctx, store, string(id))
-	if err != nil {
-		t.Fatal(err)
-	}
-	seed, err := session.AgentOptions(s, rec.ReadOptions()...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	graph := g()
-	a := agentturn.New(must(Apply(graph, agentturn.Config{Model: &fakeModel{}, ModelName: "fake", Tools: tools()})), seed...)
-	rec.Attach(a)
-	pending := a.State().Pending
-	if len(pending) != 1 {
-		t.Fatalf("pending = %+v", pending)
-	}
-	var q Question
-	if err := json.Unmarshal([]byte(pending[0].Call.Arguments), &q); err != nil || q.Limit != "depth" || q.Workflow != "countdown" || len(q.Path) != 3 {
-		t.Fatalf("question = %+v, %v", q, err)
-	}
-	ans, err := graph.Answer(pending[0], Result{Outcome: grantOutcome, Data: map[string]any{"amount": 3}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	end, err := a.Resume(ctx, ans)
+	end, _, err = Resume(ctx, h.g, h.a, []agentturn.Answer{ans}, h.hist)
 	if err != nil || end.Reason != agentturn.ReasonDone {
 		t.Fatalf("resume: %v, %+v", err, end)
 	}
@@ -114,16 +94,8 @@ func TestABoundQuestionResumesInANewProcess(t *testing.T) {
 	if !slices.Equal(counts, []int{2, 1, 0}) {
 		t.Errorf("counted %v", counts)
 	}
-	got, err := store.Open(ctx, string(id))
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkHashes(t, got)
-	runs, err := Runs(pathItems(got), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := tree(runs); len(got) != 6 || got[0] != "deep:done:zero" {
+	checkHashes(t, h.session(t, ""))
+	if got := tree(h.runs(t)); len(got) != 6 || got[0] != "deep:done:zero" {
 		t.Errorf("tree = %v", got)
 	}
 }

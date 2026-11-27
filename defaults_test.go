@@ -60,7 +60,7 @@ func TestAnInputLeftOutTakesItsDefault(t *testing.T) {
 		t.Errorf("ran %v", ran)
 	}
 	// The start records what the run was given, the default filled in.
-	if got := startInputs(t, a.State().Transcript, "greet"); got["how"] != "hello" || got["who"] != "ada" {
+	if got := startInputs(t, whole(a), "greet"); got["how"] != "hello" || got["who"] != "ada" {
 		t.Errorf("start recorded %v", got)
 	}
 }
@@ -95,7 +95,7 @@ func TestACallerMayLeaveOutADefaultedInput(t *testing.T) {
 	if len(ran) != 1 || ran[0] != "hello" {
 		t.Errorf("ran %v", ran)
 	}
-	if got := startInputs(t, a.State().Transcript, "greet"); got["how"] != "hello" || got["who"] != "bob" {
+	if got := startInputs(t, whole(a), "greet"); got["how"] != "hello" || got["who"] != "bob" {
 		t.Errorf("the callee's start recorded %v", got)
 	}
 }

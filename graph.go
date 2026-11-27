@@ -49,14 +49,15 @@ const (
 	Person
 )
 
-// Where a model step or a call does its work.
+// Where a model step works, and what a call's child begins with.
 const (
-	// ContextSession is the current context, and what empty means: a
-	// model step reads the whole transcript, and a call's steps write to
-	// it.
+	// ContextSession is what empty means: a model step works in its run's
+	// session and reads its conversation, and a call's child begins with
+	// what the caller's model had seen.
 	ContextSession = "session"
-	// ContextFresh is a child session, which sees only what the call
-	// passes in, its own instructions and its own tools.
+	// ContextFresh is a child session that begins with nothing: it sees
+	// only what the call passes in, its own instructions and its own
+	// tools.
 	ContextFresh = "fresh"
 )
 

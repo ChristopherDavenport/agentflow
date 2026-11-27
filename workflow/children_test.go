@@ -19,16 +19,40 @@ import (
 // inMemory opens children in memory, one agent for each spawn, with the
 // model and tools the parent has. It records nothing of them.
 func inMemory(model openresponses.Streamer, name string, tools []agenttool.Tool) agentflow.Option {
-	agents := map[string]*agentturn.Agent{}
+	return inMemoryOf(map[string]*agentturn.Agent{}, model, name, tools)
+}
+
+// inMemoryOf is inMemory, with the agents it makes kept in agents by spawn.
+//
+// With no session to fork, a seeded child's agent is given what its
+// caller's held, once, and its record is what it holds past that.
+func inMemoryOf(agents map[string]*agentturn.Agent, model openresponses.Streamer, name string, tools []agenttool.Tool) agentflow.Option {
+	seeds := map[string]agentturn.Transcript{}
 	return agentflow.Children(func(ctx context.Context, c agentflow.Child) (context.Context, *agentturn.Agent, error) {
-		cfg, err := c.Apply(agentturn.Config{Model: model, ModelName: cmp.Or(c.Settings.Model, name), Tools: tools})
+		var opts []agentflow.Option
+		if c.Seeded {
+			if _, ok := seeds[c.Spawn]; !ok {
+				seeds[c.Spawn] = agentturn.Transcript(c.Seed)
+			}
+			seed := seeds[c.Spawn]
+			opts = []agentflow.Option{
+				agentflow.History(func(context.Context) (agentturn.Transcript, error) {
+					if a := agents[c.Spawn]; a != nil {
+						return a.State().Transcript[len(seed):], nil
+					}
+					return nil, nil
+				}),
+				agentflow.Inherited(func(context.Context) (agentturn.Transcript, error) { return seed, nil }),
+			}
+		}
+		cfg, err := c.Apply(agentturn.Config{Model: model, ModelName: cmp.Or(c.Settings.Model, name), Tools: tools}, opts...)
 		if err != nil {
 			return nil, nil, err
 		}
 		if a := agents[c.Spawn]; a != nil {
 			return ctx, a, a.SetConfig(cfg)
 		}
-		a := agentturn.New(cfg)
+		a := agentturn.New(cfg, agentturn.WithTranscript(seeds[c.Spawn]))
 		agents[c.Spawn] = a
 		return ctx, a, nil
 	})

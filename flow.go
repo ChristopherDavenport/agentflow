@@ -134,6 +134,7 @@ type flow struct {
 	reply      func(context.Context, Question) (Result, bool)
 
 	history     func(context.Context) (agentturn.Transcript, error)
+	inherited   func(context.Context) (agentturn.Transcript, error)
 	delegations []delegation
 	modes       map[string]Mode
 	judgeName   string
@@ -192,7 +193,7 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 			if n.Flow != "" && n.call == nil {
 				return cfg, fmt.Errorf("agentflow: %s: node %q calls %s, and the graph is not linked; call Link", x.Name, n.ID, n.Flow)
 			}
-			needs = needs || n.fresh()
+			needs = needs || n.inChild()
 			for _, v := range n.Files {
 				if p, ok := v.Literal.(string); ok && strings.HasPrefix(p, skillPrefix) {
 					if _, read := n.SkillFiles[strings.TrimPrefix(p, skillPrefix)]; !read {
@@ -265,7 +266,7 @@ func (f *flow) apply(cfg agentturn.Config) (agentturn.Config, error) {
 	// The tools are checked for what runs on them: the graph and what it
 	// calls in this context. A workflow a fresh call runs works on its
 	// child's tools, which its child's Apply checks.
-	local := g.inContext()
+	local := map[string]*Graph{g.Name: g}
 	scripts := false
 	for _, x := range local {
 		scripts = scripts || slices.ContainsFunc(x.Nodes, func(n Node) bool { return n.Script != "" })
@@ -333,8 +334,8 @@ func (f *flow) unfit(err error) error {
 
 // checkTools holds the tools steps name to those the config offers,
 // where it says what they are: a tool a program step calls, and those a
-// model step working in this context may. local is the workflows that run
-// on the config, the graph and those it calls in context: a child's tools
+// model step working in this session may. local is the workflows that run
+// on the config, which is the graph alone: a child's tools
 // are its opener's, which the child's own Apply checks, and a config with
 // a ToolProvider names its tools only as it runs.
 func checkTools(local map[string]*Graph, cfg agentturn.Config) error {
@@ -393,8 +394,7 @@ func (f *flow) samePosition(before, after agentturn.Transcript) error {
 		return err
 	}
 	if a.Instance != b.Instance || a.Node != b.Node || a.Visit != b.Visit || a.Attempt != b.Attempt ||
-		a.Done != b.Done || a.Ended != b.Ended || a.Reported != b.Reported || len(a.Steps) != len(b.Steps) || (a.Advice == nil) != (b.Advice == nil) || (a.Held == nil) != (b.Held == nil) ||
-		a.Callee != b.Callee || (a.Returned == nil) != (b.Returned == nil) || len(a.Path) != len(b.Path) {
+		a.Done != b.Done || a.Ended != b.Ended || a.Reported != b.Reported || len(a.Steps) != len(b.Steps) || (a.Advice == nil) != (b.Advice == nil) || (a.Held == nil) != (b.Held == nil) || len(a.Path) != len(b.Path) {
 		return ErrPositionLost
 	}
 	return nil
@@ -464,35 +464,13 @@ func (st State) conversing() bool { return !st.Started && st.released != "" && s
 // holds the run it calls from its start.
 func (f *flow) clockDue(st State) bool {
 	if n := st.Node; n != nil && n.Flow != "" {
-		return n.Timeout > 0 && !st.clocked && st.Callee == "" && st.Failure == "" && st.Reached == nil && !st.Done
+		return n.Timeout > 0 && !st.clocked && st.Failure == "" && st.Reached == nil && !st.Done
 	}
 	return modelTurn(st) && st.Node != nil && !st.clocked && f.timeout(st) > 0
 }
 
-// callExpired is the outermost call in this context st's run is nested in
-// whose time has run out, nil when none has: the program says so, and the
-// runs it waits on are abandoned.
-func (f *flow) callExpired(st State) *callClock {
-	now := time.Now()
-	for i := range st.callDue {
-		if !now.Before(st.callDue[i].deadline) {
-			return &st.callDue[i]
-		}
-	}
-	return nil
-}
-
-// due is the first time st's step must be done by: its own deadline, or
-// that of a call its run is nested in. Zero for none.
-func (st State) due() time.Time {
-	at := st.Deadline
-	for _, c := range st.callDue {
-		if at.IsZero() || c.deadline.Before(at) {
-			at = c.deadline
-		}
-	}
-	return at
-}
+// due is the time st's step must be done by, zero for none.
+func (st State) due() time.Time { return st.Deadline }
 
 func (f *flow) expired(st State) bool {
 	return modelTurn(st) && st.Node != nil && !st.Deadline.IsZero() && !time.Now().Before(st.Deadline)
@@ -531,7 +509,7 @@ func (f *flow) prepare(ctx context.Context, req *openresponses.Request) error {
 	if err != nil {
 		return err
 	}
-	if !modelTurn(st) || f.clockDue(st) || f.expired(st) || st.request != nil || f.filesDue(st) || f.limitsDue(st) || f.callExpired(st) != nil {
+	if !modelTurn(st) || f.clockDue(st) || f.expired(st) || st.request != nil || f.filesDue(st) || f.limitsDue(st) {
 		req.Model = programPrefix + f.g.Name
 		return nil
 	}
@@ -539,7 +517,11 @@ func (f *flow) prepare(ctx context.Context, req *openresponses.Request) error {
 		f.due.set(st.due(), st.Instance)
 	}
 	req.Model = f.modelName
-	req.Input = keepFiles(f.visible(req.Input, all, st), all, st)
+	view, err := f.visible(ctx, req.Input, all, st)
+	if err != nil {
+		return err
+	}
+	req.Input = keepFiles(view, all, st)
 	if c := f.child; c != nil && c.Settings.Instructions != "" {
 		req.Instructions = strings.TrimSpace(req.Instructions + "\n\n" + c.Settings.Instructions)
 	}
@@ -784,10 +766,7 @@ func (f *flow) call(st State) (name string, args any, err error) {
 			sc.Skill = skill
 		}
 		return ScriptTool, sc, nil
-	case n.Flow != "" && !n.fresh():
-		c := st.g.Callees[n.Flow]
-		return callTool, callArgs{Workflow: c.Name, Digest: c.OwnDigest(), Run: st.Returned.Instance, With: with}, nil
-	case n.fresh():
+	case n.inChild():
 		c := st.g.Callees[n.Flow]
 		if n.Kind == Agent {
 			c = st.g.stepGraph(n)
@@ -796,7 +775,7 @@ func (f *flow) call(st State) (name string, args any, err error) {
 		if err != nil {
 			return "", nil, err
 		}
-		a := callArgs{Workflow: c.Name, Digest: c.OwnDigest(), Run: key, With: with, Context: ContextFresh, Child: n.Child, Spawn: key, MaxSteps: st.left(), Dir: st.dirArg(n)}
+		a := callArgs{Workflow: c.Name, Digest: c.OwnDigest(), Run: key, With: with, Context: n.childContext(), Child: n.Child, Spawn: key, MaxSteps: st.left(), Dir: st.dirArg(n)}
 		if n.Kind == Agent {
 			a.Documents, a.Files = st.passedDocuments(n), st.filesFor(n)
 		}
@@ -863,13 +842,6 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 		// What a model sees of a result comes before anything a model
 		// could read it in.
 		id, name, args = st.show.id(), shownTool, st.show.args()
-	case f.callExpired(st) != nil && over == nil:
-		// A call this run is nested in has run out of time: the program
-		// says so, under the calling run's key, and replay abandons the runs
-		// it waits on.
-		c := f.callExpired(st)
-		at := c.deadline
-		id, name, args = c.id, clockTool, clockArgs{Run: c.run, Step: c.step, Timeout: c.timeout.String(), Deadline: &at, Expired: true}
 	case over != nil:
 		over.Summary = f.summarize(ctx, st, all)
 		id, name, args = over.id, endTool, over
@@ -929,20 +901,6 @@ func (f *flow) CreateStream(ctx context.Context, req openresponses.Request, sink
 	case f.askClockDue(ctx, st):
 		name = clockTool
 		id, args = f.clockQuestion(st)
-	case st.Node.Flow != "" && !st.Node.fresh() && st.Callee == "":
-		key, err := newKey()
-		if err != nil {
-			return err
-		}
-		with, err := st.resolveAll(st.Node.With)
-		if err != nil {
-			return fmt.Errorf("agentflow: step %q: %w", st.Node.ID, err)
-		}
-		c := st.g.Callees[st.Node.Flow]
-		f.book.started(key)
-		id, name = keyPrefix(key)+"start", startTool
-		args = startPayload{Workflow: c.Name, Digest: c.OwnDigest(), Inputs: c.withDefaults(with), Format: RecordFormat,
-			Run: key, Parent: st.Instance, Caller: st.callID(), Depth: st.Depth + 1}
 	default:
 		id = st.callID()
 		if name, args, err = f.call(st); err != nil {
@@ -1089,9 +1047,6 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 		}
 		return nil, nil
 	}
-	if c := f.callExpired(st); name == clockTool && c != nil && id == c.id {
-		return nil, nil
-	}
 	n := st.Node
 	switch {
 	case st.Done && st.Reported, st.conversing():
@@ -1125,13 +1080,11 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 			return block(err.Error())
 		}
 		return &agentturn.ToolDecision{Action: agentturn.Defer, Reason: fmt.Sprintf("agentflow: a judge looks at step %q in a child", n.ID)}, nil
-	case id == st.callID() && (n.fresh() || n.Flow != "" && st.Callee == "") && f.policyErr(st) != nil:
+	case id == st.callID() && n.inChild() && f.policyErr(st) != nil:
 		// A policy read from the record that does not resolve fails the
 		// call, which asks to retry: a child is never opened under it.
 		return block(fmt.Sprintf("step %q: %v", n.ID, f.policyErr(st)))
-	case n.Flow != "" && st.Callee == "" && !n.fresh() && f.policyErr(st) != nil:
-		return block(fmt.Sprintf("step %q: %v", n.ID, f.policyErr(st)))
-	case n.Dir.set() && id == st.callID() && (n.fresh() || n.Script != ""):
+	case n.Dir.set() && id == st.callID() && (n.inChild() || n.Script != ""):
 		// The directory is read from the record as the call is made: one
 		// that is no path below the root fails the step, which asks to
 		// retry. A child works in the one its call recorded.
@@ -1145,20 +1098,12 @@ func (f *flow) gate(ctx context.Context, info agentturn.ToolCallInfo) (*agenttur
 			return block(err.Error())
 		}
 		return &agentturn.ToolDecision{Action: agentturn.Defer, Reason: fmt.Sprintf("agentflow: step %q runs in a child", n.ID)}, nil
-	case n.fresh():
+	case n.inChild():
 		// The work is done in a child, and the call waits on it.
 		if err := callFresh(st, info.Call); err != nil {
 			return block(err.Error())
 		}
 		return &agentturn.ToolDecision{Action: agentturn.Defer, Reason: fmt.Sprintf("agentflow: step %q runs in a child", n.ID)}, nil
-	case n.Flow != "" && st.Callee == "":
-		if err := callStart(st, info.Call); err != nil {
-			return block(err.Error())
-		}
-	case n.Flow != "":
-		if err := callReturn(st, info.Call); err != nil {
-			return block(err.Error())
-		}
 	case n.Kind == Agent:
 		finish, verb := finishTool, "on"
 		if n.Verdict {

@@ -293,7 +293,7 @@ func TestAnInvocationAbandonsChildren(t *testing.T) {
 	}
 	// The child's run was ended in its own session first, and the call
 	// that held it refused; then the caller's run.
-	runs, err := Runs(first.State().Transcript, nil)
+	runs, err := Runs(first.State().Transcript, under(first))
 	if err != nil || !slices.Equal(tree(runs), []string{"asker:abandoned:"}) {
 		t.Errorf("child = %v, %v", tree(runs), err)
 	}

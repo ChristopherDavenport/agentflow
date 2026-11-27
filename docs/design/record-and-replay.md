@@ -60,21 +60,21 @@ ignored.
 | `digest` | for a run nobody called, the digest of the whole closure; for a call, the callee's own |
 | `inputs` | the inputs, with every default the run was not given filled in |
 | `format` | the record format, `RecordFormat` |
-| `definition`, `definitions` | the workflow's definition and, by name, every other workflow it can reach, each with its digest. A call in the current context leaves them out: the root's start pins them |
+| `definition`, `definitions` | the workflow's definition and, by name, every other workflow it can reach, each with its digest |
 | `run` | the run's key |
 | `parent`, `caller`, `depth` | for a called run: the calling run's key, the ID of the calling call, and how deeply it is nested |
 | `max_depth` | the bound on nesting |
 | `max_steps` | for a run nobody called, the bound on the tree's steps; for a child, what its caller had left |
-| `context`, `path` | for a run in a child session: `fresh`, and the way to its call from the run nobody called |
+| `context`, `path` | for a run in a child session: `session` or `fresh`, which is what the child opened with, and the way to its call from the run nobody called |
 | `files`, `documents`, `question` | for a run in a child: what its call passed in |
 
 The start's result holds the time the start was recorded. Nothing is
 decided by it; the run's summary reads it.
 
 ```json
-{"workflow": "pr-review", "digest": "sha256:…", "format": 2,
+{"workflow": "pr-review", "digest": "sha256:…", "format": 3,
  "run": "3fa9c2d1e0", "parent": "77b01c4a9e",
- "caller": "flow_77b01c4a9e_review_v1", "depth": 1,
+ "caller": "flow_77b01c4a9e_review_v1", "depth": 1, "context": "session",
  "inputs": {"pr": 812}}
 ```
 
@@ -124,51 +124,32 @@ Ancestry is never encoded in an ID: the start records it.
   ends `(run <key>, visit <n>)`, with `, attempt <m>` on a retry, and is
   matched by key and node.
 - Any other call a model makes, such as `read` or `grep`, and anything it
-  says, belongs to the frame whose model step was current at that item.
-  Exactly one frame is current at any item, so replay knows which.
+  says, belongs to the run whose model step was current at that item.
+  A session has one run under way at any item, so replay knows which.
 
-### Frames and the chain
+### One session, one record
 
-Runs can share a transcript, one nested in another. The running frames
-form one chain, from the run nobody called to the current frame:
+A session holds the runs somebody started there, one under way at a
+time. A run a workflow calls is in a child session of its own, so no run
+is nested in another's transcript.
 
-- A start whose `parent` is the current frame, and whose `caller` is that
-  frame's current call, pushes a frame onto the chain.
-- An end pops the frame off.
-- A start of any other shape is refused by the gate. Replay reports it,
-  and does not guess past it.
-- An inner start does not abandon the frame that called it.
+- **A run reads only its own record.** Position, visit counts,
+  references, documents and outputs are each read within one key, from
+  one session. A caller learns what its callee did from its call's
+  result, as it would from any step's.
+- **A start is read only for the run the session is waiting to start:**
+  the workflow the session's config follows, not yet started. Any other
+  `flow_start` is not a run of this session's, and replay does not guess
+  past it.
+- **What a child's session opened with is not its record.** A child that
+  opens with its caller's view holds the caller's items ahead of its own.
+  Replay reads none of them: the caller's runs, invocation and calls are
+  not the child's, and the child's own start is the first thing its
+  record holds. The host says which items those are with `Inherited`, and
+  gives a `History` without them
+  ([calls-and-children.md](calls-and-children.md)).
 
-**A frame reads only its own record.** Position, visit counts,
-references, documents and outputs are each read within one key. A caller
-learns what its callee did from its call's result, as it would from any
-step's.
-
-### A call in the current context
-
-A callee's work cannot sit between a call and that call's output:
-agentturn will not go on while a call is unanswered, providers refuse a
-request that holds an unanswered call, and a deferral ends the run. So in
-a shared context the callee's start names the calling call in advance,
-and the call and its result are written when the callee ends:
-
-```
-flow_start  flow_3fa9c2d1e0_start   {run: 3fa9…, parent: 77b0…, caller: flow_77b01c4a9e_review_v1, inputs}
-  … pr-review's steps, all under 3fa9… …
-flow_end    flow_3fa9c2d1e0_end     {instance: 3fa9…, status: done, outcome: clean, outputs, path}
-flow_call   flow_77b01c4a9e_review_v1  {workflow: pr-review, digest, run: 3fa9…, with}
-  → {"outcome": "clean", "data": {…}}
-```
-
-- The call's ID is known before the call is made, because it is a
-  function of the caller's position.
-- The call's arguments are resolved from the caller's record, which does
-  not move while the callee runs. The gate refuses a `flow_call` whose
-  `with` differs from what the callee's start recorded, after the same
-  input defaults are applied.
-- The `flow_call` tool returns the callee's ending, read from the record.
-
-A call into a child session is recorded differently: see
+How a call and its child are recorded is in
 [calls-and-children.md](calls-and-children.md).
 
 ## Results
@@ -231,6 +212,10 @@ Each is left out as an omission that keeps the request hash:
 Everything else the program writes is in the conversation and a model
 working there later reads it: questions and answers, `flow_call` and its
 result, `flow_limits`, `flow_files`, `flow_end`.
+
+The same is left out of what a child's session opened with, by the
+calls' keys, so a callee's model is sent what its caller's was. A fold in
+the child that covers inherited items does not bring them back.
 
 The record itself holds all of it. An agent that continues the session
 without agentflow would be sent it.
@@ -346,7 +331,7 @@ Every `flow_end` carries a `summary`:
   start was recorded, and the program reads the clock once more as it
   writes the end. Neither decides anything.
 - **Steps** are the step entries of the run, attempts and jumps included,
-  and of every run it called, in context or in a child.
+  and of every run it called.
 - **Usage** is what the run's model requests used, and the requests of
   every run it called. The program's own turns, sent to
   `agentflow/<workflow>`, use nothing and are not counted.
@@ -391,7 +376,8 @@ the runs nobody called there, in the order they started, as
 - `Workflow`, `ID` (the key), `Digest`, `Inputs`, and `Graph`, the
   definition it ran;
 - `Parent`, `Caller` and `Depth`, empty for a run nobody called;
-- `Spawn` and `Fresh`, for a run in a child session;
+- `Spawn`, for a run in a child session, and `Fresh`, for one whose
+  session began with nothing of its caller's;
 - `Start` and `End`, the items its span covers, `End` being -1 while the
   run has none;
 - `Status`, `Outcome`, `Reason` and `State`;
@@ -460,9 +446,6 @@ Resuming needs the store and the definitions. Nothing else was kept.
   digest recorded for the root covers the whole closure: the sorted
   names, each with its own digest. Approving a root approves everything
   it can call.
-- A start in the current context carries the callee's name and digest.
-  Its definition is read from the root's pins, and a start naming a
-  digest that is not pinned is refused.
 - A child's start carries its own definition and those it can reach, as
   pinned at the root, so the child's session reads on its own.
 - **A change to any workflow in the closure makes resuming fail with
@@ -473,7 +456,7 @@ Resuming needs the store and the definitions. Nothing else was kept.
 
 ### Record format
 
-`RecordFormat` is 2. It versions what a workflow writes into a transcript
+`RecordFormat` is 3. It versions what a workflow writes into a transcript
 and how replay reads it: replay's meaning is part of the format, and a
 change to it changes the number. A start of any other format is refused
 with `ErrChanged`, and `Runs` reports it in `Problem`.

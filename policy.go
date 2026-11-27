@@ -423,11 +423,6 @@ func (f *flow) chain(st State) []ruled {
 	if c := f.child; c != nil {
 		out = append(out, c.policies...)
 	}
-	for _, caller := range st.callers {
-		if !caller.node.Policy.empty() {
-			out = append(out, ruled{fmt.Sprintf("step %q of %s", caller.node.ID, caller.workflow), caller.policy, caller.err})
-		}
-	}
 	return out
 }
 

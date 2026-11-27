@@ -12,11 +12,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/ChristopherDavenport/agentsession"
-	"github.com/ChristopherDavenport/agentsession/jsonl"
 	"github.com/ChristopherDavenport/agenttool"
 	"github.com/ChristopherDavenport/agentturn"
-	"github.com/ChristopherDavenport/agentturn/session"
 	"github.com/ChristopherDavenport/openresponses"
 )
 
@@ -71,11 +68,13 @@ func countTool(calls *[]int) agenttool.Tool {
 
 func nestedAgent(t *testing.T, g *Graph, m openresponses.Streamer, tools []agenttool.Tool, opts ...Option) *agentturn.Agent {
 	t.Helper()
-	cfg, err := Apply(g, agentturn.Config{Model: m, ModelName: "fake", Tools: tools}, opts...)
+	cfg, kids, err := kinApplied(g, agentturn.Config{Model: m, ModelName: "fake", Tools: tools}, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return agentturn.New(cfg)
+	a := agentturn.New(cfg)
+	kins.Store(a, kids)
+	return a
 }
 
 // tree draws runs as workflow:status, with their children indented.
@@ -108,7 +107,7 @@ func TestFlowsNestThreeDeepAndCallThemselves(t *testing.T) {
 		t.Errorf("counted %v, ran %v", counts, ran)
 	}
 	items := a.State().Transcript
-	runs, err := Runs(items, nil)
+	runs, err := Runs(items, under(a))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +171,7 @@ func TestAFailedCallRoutesOrFailsTheStep(t *testing.T) {
 		if end := start(t, a); end.Reason != agentturn.ReasonDone || end.Err != nil {
 			t.Fatalf("end = %s, %v", end.Reason, end.Err)
 		}
-		runs, err := Runs(a.State().Transcript, nil)
+		runs, err := Runs(a.State().Transcript, under(a))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -204,7 +203,7 @@ func TestAFailedCallRoutesOrFailsTheStep(t *testing.T) {
 		if end.Reason != agentturn.ReasonDone || end.Err != nil {
 			t.Fatalf("end = %s, %v", end.Reason, end.Err)
 		}
-		runs, err := Runs(a.State().Transcript, nil)
+		runs, err := Runs(a.State().Transcript, under(a))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -223,7 +222,7 @@ func TestAFailedCallRoutesOrFailsTheStep(t *testing.T) {
 		if !errors.Is(end.Err, ErrStepFailed) || !strings.Contains(end.Err.Error(), "fragile") {
 			t.Fatalf("end = %s, %v", end.Reason, end.Err)
 		}
-		runs, _ := Runs(a.State().Transcript, nil)
+		runs, _ := Runs(a.State().Transcript, under(a))
 		if got := tree(runs); !slices.Equal(got, []string{"plain:failed:", " fragile:failed:"}) {
 			t.Errorf("tree = %v", got)
 		}
@@ -251,7 +250,7 @@ func reply(t *testing.T, g *Graph, a *agentturn.Agent, end *agentturn.RunEnd, ou
 	if err != nil {
 		t.Fatal(err)
 	}
-	next, err := a.Resume(context.Background(), ans)
+	next, err := carry(t, a, ans)
 	if err != nil && next == nil {
 		t.Fatal(err)
 	}
@@ -267,21 +266,16 @@ func TestAnInvocationAbandonsTheWholeStack(t *testing.T) {
 	if q := question(t, end); q.Workflow != "middle" || q.Step != "confirm" {
 		t.Fatalf("question = %+v", q)
 	}
-	if _, err := a.Resume(context.Background(), agentturn.Refuse(&openresponses.FunctionCallOutput{CallID: end.Pending[0].Call.CallID, Output: openresponses.FunctionCallOutputData{Text: "never mind"}})); err != nil {
-		t.Fatal(err)
-	}
-	inv, err := g.Invocation(nil)
+	// A new invocation abandons every run of the tree, each in its own
+	// session, before the next starts.
+	end, _, err := Invoke(context.Background(), g, a, nil)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if end, err = a.Prompt(context.Background(), inv); err != nil {
 		t.Fatal(err)
 	}
 	if q := question(t, end); q.Workflow != "middle" {
 		t.Fatalf("question = %+v", q)
 	}
-	items := a.State().Transcript
-	runs, err := Runs(items, nil)
+	runs, err := Runs(a.State().Transcript, under(a))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,20 +284,13 @@ func TestAnInvocationAbandonsTheWholeStack(t *testing.T) {
 	if got := tree(runs); !slices.Equal(got, want) {
 		t.Errorf("tree =\n%s", strings.Join(got, "\n"))
 	}
-	// Innermost first, and both before the next start.
-	var ends []string
-	for _, item := range items[runs[0].Start:runs[1].Start] {
-		if c, ok := item.(*openresponses.FunctionCall); ok && c.Name == endTool && strings.Contains(c.Arguments, Abandoned) {
-			ends = append(ends, c.CallID)
-		}
-	}
-	if len(ends) != 2 || ends[0] != keyPrefix(runs[0].Children[0].ID)+"end" || ends[1] != keyPrefix(runs[0].ID)+"end" {
-		t.Errorf("ends = %v", ends)
-	}
 }
 
 const nestedEnv = "AGENTFLOW_NESTED_STORE"
 
+// A question in a called workflow is asked in its child session, after
+// calls of its own that ran in theirs. A process that has only the store
+// finds it through the call that waits, and the answer goes back up.
 func TestAQuestionAtDepthResumesInANewProcess(t *testing.T) {
 	g := func() *Graph { return linked(t, top(), middle(), countdown()) }
 	var counts []int
@@ -311,23 +298,16 @@ func TestAQuestionAtDepthResumesInANewProcess(t *testing.T) {
 	tools := func() []agenttool.Tool { return []agenttool.Tool{countTool(&counts), scriptTool(&ran)} }
 	if dir := os.Getenv(nestedEnv); dir != "" {
 		ctx := context.Background()
-		store, err := jsonl.Open(dir)
+		h := hosted(t, dir, "", g(), &fakeModel{outcomes: []string{"ok"}}, tools(), false)
+		first, err := h.a.Prompt(ctx, openresponses.UserText("go"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		rec, s, err := session.Start(ctx, store, agentsession.Header{CWD: dir})
-		if err != nil {
-			t.Fatal(err)
+		if end, _, err := Drive(ctx, h.g, h.a, first, h.hist); err != nil || end.Reason != agentturn.ReasonInputRequired {
+			t.Fatalf("end = %+v, %v", end, err)
 		}
-		a := nestedAgent(t, g(), &fakeModel{outcomes: []string{"ok"}}, tools())
-		rec.Attach(a)
-		if end := start(t, a); end.Reason != agentturn.ReasonInputRequired {
-			t.Fatalf("reason = %s, err = %v", end.Reason, end.Err)
-		}
-		if err := store.Sync(ctx, s.ID()); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(dir+"/id", []byte(s.ID()), 0o600); err != nil {
+		syncAll(t, h.store)
+		if err := os.WriteFile(dir+"/id", []byte(h.id), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
@@ -342,39 +322,22 @@ func TestAQuestionAtDepthResumesInANewProcess(t *testing.T) {
 	if err == nil || readErr != nil {
 		t.Fatalf("child: err = %v, read = %v\n%s", err, readErr, out)
 	}
-	store, err := jsonl.Open(dir)
-	if err != nil {
-		t.Fatal(err)
+	h := hosted(t, dir, string(id), g(), &fakeModel{}, tools(), false)
+	// The call waits here, and the question in the child it waits on.
+	end, st, err := Drive(ctx, h.g, h.a, nil, h.hist)
+	if err != nil || end == nil || len(end.Pending) != 1 {
+		t.Fatalf("end = %+v, %v", end, err)
 	}
-	rec, s, err := session.Resume(ctx, store, string(id))
-	if err != nil {
-		t.Fatal(err)
-	}
-	seed, err := session.AgentOptions(s, rec.ReadOptions()...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	graph := g()
-	cfg, err := Apply(graph, agentturn.Config{Model: &fakeModel{}, ModelName: "fake", Tools: tools()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	a := agentturn.New(cfg, seed...)
-	rec.Attach(a)
-	pending := a.State().Pending
-	if len(pending) != 1 {
-		t.Fatalf("pending = %+v", pending)
-	}
-	var q Question
-	if err := json.Unmarshal([]byte(pending[0].Call.Arguments), &q); err != nil || q.Workflow != "middle" || q.Step != "confirm" ||
+	q := question(t, end)
+	if q.Workflow != "middle" || q.Step != "confirm" || st.Workflow != "middle" ||
 		len(q.Path) != 2 || q.Path[0].Workflow != "top" || q.Path[0].Step != "call" {
-		t.Fatalf("question = %+v, %v", q, err)
+		t.Fatalf("question = %+v at %s", q, st.Workflow)
 	}
-	ans, err := graph.Answer(pending[0], Result{Outcome: "yes"})
+	ans, err := h.g.Answer(end.Pending[0], Result{Outcome: "yes"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	end, err := a.Resume(ctx, ans)
+	end, _, err = Resume(ctx, h.g, h.a, []agentturn.Answer{ans}, h.hist)
 	if err != nil || end.Reason != agentturn.ReasonDone {
 		t.Fatalf("resume: %v, %+v", err, end)
 	}
@@ -382,18 +345,20 @@ func TestAQuestionAtDepthResumesInANewProcess(t *testing.T) {
 	if len(counts) != 0 || !slices.Equal(ran, []string{"yes"}) {
 		t.Errorf("counted %v, ran %v", counts, ran)
 	}
-	got, err := store.Open(ctx, string(id))
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkHashes(t, got)
-	runs, err := Runs(pathItems(got), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	checkHashes(t, h.session(t, ""))
+	runs := h.runs(t)
 	if got := tree(runs); !slices.Equal(got, []string{"top:done:ok", " middle:done:yes", "  countdown:done:zero", "   countdown:done:zero", "    countdown:done:zero"}) {
 		t.Errorf("tree = %v", got)
 	}
+	// Every session of the tree rebuilds its requests, the forks too.
+	var check func(in *Instance)
+	check = func(in *Instance) {
+		for _, kid := range in.Children {
+			checkHashes(t, h.session(t, kid.Spawn))
+			check(kid)
+		}
+	}
+	check(runs[0])
 }
 
 func TestDepthIsBoundedAcrossTheTree(t *testing.T) {
@@ -413,7 +378,7 @@ func TestDepthIsBoundedAcrossTheTree(t *testing.T) {
 			if !errors.Is(end.Err, ErrDepth) || len(ran) != 0 {
 				t.Fatalf("end = %s, %v, ran %v", end.Reason, end.Err, ran)
 			}
-			runs, err := Runs(a.State().Transcript, nil)
+			runs, err := Runs(a.State().Transcript, under(a))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -441,7 +406,7 @@ func TestAChangeToACalleeStopsAResume(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 	// What ran reads back as it was pinned.
-	runs, err := Runs(a.State().Transcript, nil)
+	runs, err := Runs(a.State().Transcript, under(a))
 	if err != nil || runs[0].Problem != "" || len(runs[0].Children) != 1 {
 		t.Errorf("runs = %v, %v", tree(runs), err)
 	}
@@ -509,7 +474,7 @@ func TestAFinishNamesItsRun(t *testing.T) {
 		t.Fatalf("end = %s, %v", end.Reason, end.Err)
 	}
 	var refused string
-	for _, item := range a.State().Transcript {
+	for _, item := range whole(a) {
 		if out, ok := item.(*openresponses.FunctionCallOutput); ok && strings.Contains(out.Output.String(), `not of run "nope"`) {
 			refused = out.Output.String()
 		}
@@ -530,23 +495,4 @@ func finishParams(req openresponses.Request) []byte {
 		}
 	}
 	return nil
-}
-
-func TestACallReturnsWhatItWasStartedWith(t *testing.T) {
-	g := linked(t, top(), middle(), countdown())
-	n := g.node("call")
-	st := State{Instance: "0123456789", prefix: keyPrefix("0123456789"), Node: n, Visit: 1, Attempt: 1, g: g,
-		Callee: "9876543210", Returned: &Ending{Instance: "9876543210", Status: Done}, calleeInputs: map[string]any{"n": 1}}
-	c := &openresponses.FunctionCall{CallID: st.callID(), Name: callTool}
-	for args, want := range map[string]string{
-		`{"workflow":"middle","digest":"x","run":"9876543210","with":{"n":1}}`: "",
-		`{"workflow":"middle","digest":"x","run":"9876543210","with":{"n":2}}`: "other inputs",
-		`{"workflow":"middle","digest":"x","run":"1111111111","with":{"n":1}}`: "called run",
-	} {
-		c.Arguments = args
-		err := callReturn(st, c)
-		if want == "" && err != nil || want != "" && (err == nil || !strings.Contains(err.Error(), want)) {
-			t.Errorf("%s: %v, want %q", args, err, want)
-		}
-	}
 }

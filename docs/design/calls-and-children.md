@@ -1,10 +1,11 @@
 # Calling workflows, and child sessions
 
-A workflow can call another workflow. The callee's work runs either in
-the caller's context or in a child session of its own. A fresh model step
-and a judge's look are children too. This document says how a call is
-written, what its contract is, how a child is recorded and driven, and
-what crosses the boundary between a caller and a child.
+A workflow can call another workflow. The callee's work runs in a child
+session of its own, which opens with what the caller's model had seen or
+with nothing. A fresh model step and a judge's look are children too.
+This document says how a call is written, what its contract is, how a
+child is recorded and driven, and what crosses the boundary between a
+caller and a child.
 
 How runs are keyed and recorded is in
 [record-and-replay.md](record-and-replay.md). What a judge is for is in
@@ -94,23 +95,42 @@ be opened, gives `{reason, workflow}`.
   calling workflow: it is not among that workflow's outcomes, and no
   outputs are asked for on it.
 - A failure on a bound across the tree skips the `failed` edge: every
-  frame above fails with it.
+  run above fails with it.
 - An end may be named `failed`. Reaching it ends the run `failed` with
   that outcome, and it declares no outputs.
 
-## Context: current or fresh
+## Context: what a child opens with
 
-- **The default is the current context.** The callee's steps write to the
-  caller's transcript. Its `session` model steps read that conversation
-  as any step does.
-- **`context: fresh`** on a call or on a model step runs the work in a
-  child session.
-- **Both kinds work at any depth.** Inside a child, the child's own
-  context is the current one, so a nested call there runs in the child
-  unless it is fresh.
-- **A child sees what it is given:** the inputs its call passes in, the
-  instructions its settings give it and its own tools. It never sees the
-  parent's transcript.
+Every call to a workflow runs in a child session. The caller holds one
+`flow_call` while the callee works, and is given its result. `context`
+says what the child's model begins with:
+
+- **`session`, the default for a call.** The child opens with the
+  caller's view as it stood when the call was made: what the caller's
+  model had been sent, without the call itself. The callee's `session`
+  model steps read that and go on from it.
+- **`fresh`.** The child opens with nothing. It sees the inputs its call
+  passes in, the instructions its settings give it and its own tools.
+
+Either way:
+
+- **The child's record is its own.** What it opened with is no part of
+  it: position, visit counts, references and documents are read from what
+  the child's session wrote itself
+  ([record-and-replay.md](record-and-replay.md)).
+- **The caller gets back the call's result and nothing else:** the
+  callee's outcome and outputs, what `show` lets a model see of them, and
+  the documents the call hands back. The callee's turns never enter the
+  caller's conversation, so what a later step of the caller needs from
+  them is an output.
+- **What the child opened with is shown as the caller's model saw it.**
+  What no working model may read is left out there too.
+- **It works at any depth.** A child that calls opens a child of its own,
+  which opens with the first child's view, its inherited part included.
+
+A model step's `context` says where the step works, not what a child
+opens with: `session` is its run's session, and `fresh` is a child of its
+own that opens with nothing ([steps-and-data.md](steps-and-data.md)).
 
 Four things can make work fresh:
 
@@ -118,7 +138,7 @@ Four things can make work fresh:
 |---|---|
 | the call | `context: fresh` on the calling node |
 | the model step | `context: fresh` on the step |
-| another model | a model step whose `model` differs from its workflow's frontmatter `model`, or that names one when the frontmatter names none, defaults to `context: fresh`. `context: session` keeps it in the current context |
+| another model | a model step whose `model` differs from its workflow's frontmatter `model`, or that names one when the frontmatter names none, defaults to `context: fresh`. `context: session` keeps it in its run's session |
 | the callee | `context: fresh` in the callee's frontmatter makes every call to it fresh |
 
 **Another model defaults to fresh** because it would read a conversation
@@ -129,9 +149,9 @@ under another name changes nothing. The workflow made for a fresh step
 takes the step's model as its own default, so the step does not open a
 child of its own child.
 
-**A callee that declares `context: fresh`** must not read, or write into,
-its caller's conversation, and says so once, where it is defined. A call
-that says nothing runs it in a child and may take a child's settings. A
+**A callee that declares `context: fresh`** must not read its caller's
+conversation, and says so once, where it is defined. A call that says
+nothing opens its child with nothing and may take a child's settings. A
 call that says `context: session` is a load error, raised by `Link`: the
 callee's word holds, and it is not overridden in silence. `fresh` is the
 only value a workflow may give. Which calls run fresh is known only once
@@ -140,10 +160,10 @@ again then.
 
 ## The record, through a child
 
-A fresh call is held the way a person's question is held:
+A call is held the way a person's question is held:
 
 ```
-parent  flow_call  flow_77b01c4a9e_review_v1  {workflow, digest, run: 3fa9…, with, context: fresh, spawn: 3fa9…}
+parent  flow_call  flow_77b01c4a9e_review_v1  {workflow, digest, run: 3fa9…, with, context: session, spawn: 3fa9…}
         decision   hold by policy             (the run ends input_required)
         link       subsession, spawn_id 3fa9c2d1e0
 child   agentflow: start pr-review {…}        (developer message: the invocation)
@@ -155,13 +175,17 @@ parent  decision   proceed by policy, with what came of the child added to the a
 - The parent holds the call, the result and the link.
 - The spawn ID is the child's key, or for a kept child the first visit's
   key, so the child's session is found from the parent's session alone.
-- The child's start records `parent`, `caller`, `depth`, `context:
-  fresh` and `path`, beside its own definition and closure, so the
-  child's session reads on its own.
+- The child's start records `parent`, `caller`, `depth`, `context` and
+  `path`, beside its own definition and closure, so the child's session
+  reads on its own.
+- A child that opens with its caller's view is a fork of the caller's
+  session, made before the call. Its session holds the inherited entries
+  and then its own, so each of its requests has a hash that verifies and
+  the child is rebuilt from its own session after a restart.
 
 This uses what the loop already has: a deferral and `ApproveWith` in
-agentturn, `Recorder.StartChild` and `ContinueChild` in
-agentturn/session, and agentsession's `SpawnedSessionID(parent,
+agentturn, `Recorder.StartChild`, `ForkChildBefore` and `ContinueChild`
+in agentturn/session, and agentsession's `SpawnedSessionID(parent,
 spawnID)`. The loop learns nothing: children are agents a host makes, and
 the hold is an ordinary deferral.
 
@@ -211,16 +235,33 @@ a child, after a restart included, so it builds an agent seeded from the
 child's session or keeps one in memory.
 
 With agentturn/session, the context is that of
-`Recorder.ContinueChild(ctx, c.Spawn)`, or of `StartChild` when the
-parent's session has no such spawn yet. agentflow cannot record a child
-itself, since the root package does not import agentturn/session.
+`Recorder.ContinueChild(ctx, c.Spawn)`, or when the parent's session has
+no such spawn yet, of `StartChild`, or for a child that opens with its
+caller's view (`c.Seeded`), of `ForkChildBefore(ctx, c.Spawn, c.Caller)`.
+agentflow cannot record a child itself, since the root package does not
+import agentturn/session.
 
 The opener passes the child's config through `Child.Apply(cfg, opts...)`,
 which makes it follow the child's workflow with the caller's options and
 any the opener adds, such as a `History` and `Responses` for the child's
 own record.
 
-Without an opener, `Apply` refuses a graph with a fresh step or call, or
+**A seeded child needs two things of its opener.** Its session holds
+items that are not its record, so `Child.Apply` refuses it without both:
+
+- a `History` of the items the child's session wrote itself
+  (`session.OwnPath`);
+- an `Inherited` of the items it opened with (`session.PrefixPath`),
+  every one of them whatever a compaction has folded since. The program
+  reads no position from them, and hides in them what the caller's view
+  hid.
+
+An opener with no session to fork, one that keeps its agents in memory,
+seeds the child's agent with `c.Seed`, gives the same items back as
+`Inherited`, and gives a `History` of what the agent holds past them.
+Such a host cannot compact a seeded child.
+
+Without an opener, `Apply` refuses a graph with a call, a fresh step, or
 a step the host lets a judge answer.
 
 `Child` tells the opener what it is opening:
@@ -234,6 +275,8 @@ a step the host lets a judge answer.
 | `Kept` | a kept child's name, or empty |
 | `Depth`, `Path` | how deeply the run is nested, and the way to its call from the run nobody called |
 | `Settings` | `ChildSettings`, below |
+| `Seeded` | the child opens with its caller's view: the opener forks the caller's session before the call `Caller` names |
+| `Seed` | for an opener with no session to fork: what the caller's agent held before the call |
 
 | `ChildSettings` field | What it holds |
 |---|---|
@@ -245,9 +288,8 @@ a step the host lets a judge answer.
 ### Opener errors
 
 - **A child's config is checked as its opener builds it.** `Child.Apply`
-  checks the child's tools against the child's workflow and what that
-  calls in context, as `Apply` does for a root. The parent's `Apply`
-  checks only the workflows that run on its own config: a child's tools
+  checks the child's tools against the child's workflow, as `Apply` does
+  for a root. The parent's `Apply` checks only its own graph: a child's tools
   are the opener's, built for its `dir`, so the caller's config cannot
   say what they will be.
 - **A config that does not fit, or an error that wraps
@@ -393,7 +435,7 @@ hidden: true
 `hidden: true` says the workflow is a part, run only by workflows that
 call it. `Graph.Invocation` refuses it, `Apply` refuses it as a root, and
 `workflow.SkillTool` refuses a model's request for its skill, all reading
-`Graph.Hidden`. A call starts it, in its caller's context or in a child.
+`Graph.Hidden`. A call starts it.
 A catalog that lists workflows, or offers them to a model, should leave
 hidden ones out. agentflow has no catalog of its own, so that is the
 host's.
@@ -409,7 +451,7 @@ start records it. The gate holds each to what the caller's record says.
 |---|---|
 | `workflow`, `digest`, `run` | what runs, the callee's own digest, and the child run's key |
 | `with` | the inputs, resolved in the caller |
-| `context` | `fresh` |
+| `context` | `session` or `fresh`: what the child opens with |
 | `spawn`, `child` | the spawn ID of the child's session, and a kept child's name |
 | `dir` | the directory the child works in |
 | `max_steps` | what the caller's tree has left of its steps; the child's start records it as its own bound, 0 included |

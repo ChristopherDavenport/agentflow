@@ -55,7 +55,7 @@ the host's own `BeforeToolCall`, which may still refuse or ask.
 
 - on a model step;
 - on a call (`flow:`), where it limits every model step and judge of the
-  runs it calls, at any depth, in context or in children;
+  runs it calls, at any depth;
 - on a judge (`judge.policy`).
 
 Every policy in force applies, so the limits only add up.
@@ -114,8 +114,8 @@ what its tools call too. The calls of a program step's tool are not held
 to a policy, as the step's own call is not.
 
 **Children** take the policies of the calls and steps they are nested
-in, already resolved, and add their own step's. This covers fresh steps,
-fresh calls, kept children and judges. A child's engines are built for
+in, already resolved, and add their own step's. This covers calls, fresh
+steps, kept children and judges. A child's engines are built for
 its `dir`.
 
 ### Rules that take their paths from the record
@@ -160,9 +160,8 @@ retried, and no model works under it:
 
 | Where | What happens |
 |---|---|
-| a model step in the current context | the program calls `flow_limits` before the model's first turn; its error is the step's failure |
-| a fresh step or a fresh call | the gate refuses the call into the child, so no child is opened |
-| a call in the current context | the gate refuses the callee's start |
+| a model step working in its run's session | the program calls `flow_limits` before the model's first turn; its error is the step's failure |
+| a fresh step or a call | the gate refuses the call into the child, so no child is opened |
 
 `flow_limits` is the program's call under the step's key
 (`…_v<n>-limits`), with the run, the step and the reason. Its result is

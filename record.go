@@ -18,9 +18,10 @@ import (
 // RecordFormat versions what a workflow writes into a transcript and how
 // it is read. flow_start carries it, and a reader that does not know the
 // one it finds says so rather than guess. Format 2 keys every run, so
-// that runs can nest, in a transcript or in child sessions. Format 1 is
-// no longer read.
-const RecordFormat = 2
+// that runs can nest. Format 3 runs every call to a workflow in a child
+// session, so a session holds no run another of its runs called. Formats
+// 1 and 2 are no longer read.
+const RecordFormat = 3
 
 // The statuses of an [Instance]. All but running are written down, by
 // flow_end, so that having left a workflow is not something to infer.
@@ -110,7 +111,7 @@ type Instance struct {
 	Parent, Caller string
 	Depth          int
 	// Spawn names the child session a run called into one works in, and
-	// Fresh says the run is one.
+	// Fresh says that session began with nothing of its caller's.
 	Spawn string
 	Fresh bool
 	// Start is the item that called flow_start, and End the item that
@@ -212,9 +213,6 @@ func rootRun(t agentturn.Transcript, at int, c *openresponses.FunctionCall, out 
 	if err := decode([]byte(c.Arguments), &p); err != nil {
 		return nil, fmt.Errorf("flow_start: %w", err)
 	}
-	if p.Parent != "" && p.Context != ContextFresh {
-		return nil, nil
-	}
 	run := &Instance{Workflow: p.Workflow, Digest: p.Digest, Inputs: p.Inputs, Start: at, End: -1, Status: Running, from: at, stop: len(t),
 		ID: p.Run, Parent: p.Parent, Caller: p.Caller, Depth: p.Depth, Fresh: p.Context == ContextFresh}
 	var res Result
@@ -241,7 +239,7 @@ func rootRun(t agentturn.Transcript, at int, c *openresponses.FunctionCall, out 
 		case *openresponses.FunctionCall:
 			if it.Name == startTool && strings.HasPrefix(it.CallID, reserved) && i < run.stop {
 				var q startPayload
-				if decode([]byte(it.Arguments), &q) == nil && (q.Parent == "" || q.Context == ContextFresh) && q.Workflow == g.Name {
+				if decode([]byte(it.Arguments), &q) == nil && q.Workflow == g.Name {
 					run.stop = i
 				}
 			}
@@ -253,7 +251,6 @@ func rootRun(t agentturn.Transcript, at int, c *openresponses.FunctionCall, out 
 		}
 	}
 	r := g.replay(spanOf(g, t, at, run.stop))
-	byKey := map[string]*Instance{}
 	for _, f := range r.frames {
 		if k, ok := ends[f.st.endID()]; ok && f.ending == nil {
 			var e Ending
@@ -263,18 +260,6 @@ func rootRun(t agentturn.Transcript, at int, c *openresponses.FunctionCall, out 
 			f.ending, f.end = &e, k-at
 		}
 		in := run
-		if f.parent != nil {
-			in = &Instance{Workflow: f.st.Workflow, ID: f.st.Instance, Digest: f.st.g.OwnDigest(), Graph: f.st.g, Inputs: f.st.Inputs,
-				Parent: f.st.Parent, Caller: f.st.Caller, Depth: f.st.Depth, Start: at + f.start, End: -1, Status: Running,
-				root: g, from: at, stop: run.stop}
-			if f.end >= 0 {
-				in.End = at + f.end
-			}
-			if parent := byKey[f.st.Parent]; parent != nil {
-				parent.Children = append(parent.Children, in)
-			}
-		}
-		byKey[f.st.Instance] = in
 		in.State = r.state(f)
 		judge(in, f)
 		for _, fc := range f.children {
@@ -310,7 +295,7 @@ func childRun(t agentturn.Transcript, at int, fc freshCall, in *Instance, open f
 			}
 		}
 	}
-	kid := &Instance{Workflow: fc.workflow, ID: fc.run, Parent: in.ID, Caller: fc.call, Depth: in.Depth + 1, Spawn: fc.spawn, Fresh: true,
+	kid := &Instance{Workflow: fc.workflow, ID: fc.run, Parent: in.ID, Caller: fc.call, Depth: in.Depth + 1, Spawn: fc.spawn, Fresh: fc.fresh,
 		Start: -1, End: -1, Status: Running}
 	for i := at; i < len(t); i++ {
 		o, ok := t[i].(*openresponses.FunctionCallOutput)

@@ -117,7 +117,7 @@ func TestAnUnattendedModelStepHasATimeout(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "ran past its timeout of 30ms") {
 		t.Fatalf("end = %+v, err = %v", end, err)
 	}
-	runs, err := Runs(a.State().Transcript, nil)
+	runs, err := Runs(a.State().Transcript, under(a))
 	if err != nil || len(runs) != 1 || runs[0].Status != Failed {
 		t.Fatalf("runs = %+v, %v", runs, err)
 	}
@@ -613,7 +613,7 @@ func TestAChildHitsTheTreesBound(t *testing.T) {
 	if len(kids.opened) != 1 || kids.opened[0].maxSteps != 2 {
 		t.Errorf("opened = %+v", kids.opened)
 	}
-	runs, err := Runs(a.State().Transcript, nil)
+	runs, err := Runs(a.State().Transcript, under(a))
 	if err != nil || len(runs) != 1 || runs[0].Status != Failed || !strings.Contains(runs[0].Reason, "step limit") {
 		t.Fatalf("runs = %+v, %v", runs, err)
 	}

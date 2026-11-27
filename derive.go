@@ -141,6 +141,22 @@ func (n *Node) fresh() bool {
 	return n.Context == ContextFresh || n.Context == "" && (n.otherModel || n.call != nil && n.call.g.Context == ContextFresh)
 }
 
+// inChild says the node's work runs in a child session: every call to a
+// workflow does, and a fresh model step.
+func (n *Node) inChild() bool { return n.Flow != "" || n.fresh() }
+
+// seeded says the node is a call whose child begins with what its caller
+// saw: a call that is not fresh. The child's record is still its own.
+func (n *Node) seeded() bool { return n.Flow != "" && !n.fresh() }
+
+// childContext is what the node's call says its child begins with.
+func (n *Node) childContext() string {
+	if n.seeded() {
+		return ContextSession
+	}
+	return ContextFresh
+}
+
 // unlinked says n calls a workflow linking has not yet found, so where
 // it runs is not yet known: checks that turn on it wait for the link.
 func (n *Node) unlinked() bool { return n.Flow != "" && n.call == nil }

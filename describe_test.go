@@ -46,7 +46,7 @@ func TestNoModelIsSentADescription(t *testing.T) {
 		t.Error("a summarizer reads a description")
 	}
 	// The record holds them, in the definition its start pins.
-	runs, err := Runs(a.State().Transcript, nil)
+	runs, err := Runs(a.State().Transcript, under(a))
 	if err != nil {
 		t.Fatal(err)
 	}
