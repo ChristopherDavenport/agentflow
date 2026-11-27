@@ -284,7 +284,7 @@ func TestReferencesAreCheckedAtLoad(t *testing.T) {
 		{"a path skips it", func(g *agentflow.Graph) { g.Nodes[3].Next["small"] = "tag" }, "without running"},
 		{"workflow output skipped", func(g *agentflow.Graph) { g.Outputs["v"] = agentflow.From("steps.confirm.outputs.version") }, "without running"},
 		{"syntax", func(g *agentflow.Graph) { g.Nodes[0].With["pr"] = agentflow.From("gather.files") }, "invalid reference"},
-		{"unattended data", func(g *agentflow.Graph) { g.Nodes[4].Unattended = "release" }, "unattended data"},
+		{"unattended data", func(g *agentflow.Graph) { g.Nodes[4].Unattended.Outcome = "release" }, "unattended data"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := release()

@@ -578,22 +578,33 @@ func node(n *agentflow.Node, s section) error {
 	if err := question(n, &set); err != nil {
 		return err
 	}
-	switch u := &set.Unattended; {
-	case u.IsZero():
-	case u.Kind == yaml.ScalarNode:
-		n.Unattended = u.Value
-	default:
-		return pairs(u, func(key string, v *yaml.Node) error {
-			switch key {
-			case "outcome":
-				return v.Decode(&n.Unattended)
-			case "data":
-				return v.Decode(&n.UnattendedData)
-			}
-			return unknownKey("unattended", key, "outcome", "data")
-		})
+	if n.Unattended, err = fallback("unattended", &set.Unattended); err != nil {
+		return err
 	}
 	return nil
+}
+
+// fallback reads the answer a question takes with nobody to give one,
+// under key: an outcome, or an outcome and the data that goes with it.
+func fallback(key string, u *yaml.Node) (agentflow.Fallback, error) {
+	var f agentflow.Fallback
+	switch {
+	case u.IsZero():
+		return f, nil
+	case u.Kind == yaml.ScalarNode:
+		f.Outcome = u.Value
+		return f, nil
+	}
+	err := pairs(u, func(k string, v *yaml.Node) error {
+		switch k {
+		case "outcome":
+			return v.Decode(&f.Outcome)
+		case "data":
+			return v.Decode(&f.Data)
+		}
+		return unknownKey(key, k, "outcome", "data")
+	})
+	return f, err
 }
 
 // question reads a person node's choices, free text and timeout outcome.
@@ -660,20 +671,9 @@ func question(n *agentflow.Node, set *settings) error {
 			return err
 		}
 	}
-	switch u := &set.OnTimeout; {
-	case u.IsZero():
-	case u.Kind == yaml.ScalarNode:
-		n.OnTimeout = u.Value
-	default:
-		return pairs(u, func(key string, v *yaml.Node) error {
-			switch key {
-			case "outcome":
-				return v.Decode(&n.OnTimeout)
-			case "data":
-				return v.Decode(&n.OnTimeoutData)
-			}
-			return unknownKey("on_timeout", key, "outcome", "data")
-		})
+	var err error
+	if n.OnTimeout, err = fallback("on_timeout", &set.OnTimeout); err != nil {
+		return err
 	}
 	return nil
 }

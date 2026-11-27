@@ -184,7 +184,7 @@ func waiter(timeout time.Duration) *Graph {
 	return &Graph{Name: "waiter", Nodes: []Node{
 		{ID: "ask", Kind: Person, Prompt: "Merge it?", Outcomes: []string{"merge", "park"},
 			Data:    map[string]*agenttool.Schema{"park": one("why", true)},
-			Timeout: timeout, OnTimeout: "park", OnTimeoutData: map[string]any{"why": "nobody answered"},
+			Timeout: timeout, OnTimeout: Fallback{Outcome: "park", Data: map[string]any{"why": "nobody answered"}},
 			Next: map[string]string{"park": "tell"}},
 		{ID: "tell", Kind: Run, Tool: "tell", With: map[string]Value{"said": From("steps.ask.outputs.why")}},
 	}}
@@ -237,7 +237,7 @@ func TestAQuestionAskedLateTimesOutAtOnce(t *testing.T) {
 func TestUnattendedDoesNotWaitForATimeout(t *testing.T) {
 	var told []map[string]any
 	g := waiter(time.Hour)
-	g.Nodes[0].Unattended, g.Nodes[0].UnattendedData = "park", map[string]any{"why": "unattended"}
+	g.Nodes[0].Unattended.Outcome, g.Nodes[0].Unattended.Data = "park", map[string]any{"why": "unattended"}
 	a := nestedAgent(t, g, &fakeModel{}, lister(&told), Unattended())
 	end := run(a)
 	if end.Reason != agentturn.ReasonDone || told[0]["said"] != "unattended" {
@@ -386,21 +386,21 @@ func TestQuestionSettingsAreChecked(t *testing.T) {
 		`declares "choice", which choices fills`: ask(func(n *Node) {
 			n.Choices, n.Data = pick(), map[string]*agenttool.Schema{"chosen": one("choice", true)}
 		}),
-		`unattended cannot be "chosen"`:          ask(func(n *Node) { n.Choices, n.Unattended = pick(), "chosen" }),
-		`on_timeout cannot be "chosen"`:          ask(func(n *Node) { n.Choices, n.Timeout, n.OnTimeout = pick(), time.Hour, "chosen" }),
+		`unattended cannot be "chosen"`:          ask(func(n *Node) { n.Choices, n.Unattended.Outcome = pick(), "chosen" }),
+		`on_timeout cannot be "chosen"`:          ask(func(n *Node) { n.Choices, n.Timeout, n.OnTimeout.Outcome = pick(), time.Hour, "chosen" }),
 		`text: outcome "said" is not declared`:   ask(func(n *Node) { n.Text = &FreeText{Outcome: "said"} }),
 		`text: outcome "chosen" is the choices'`: ask(func(n *Node) { n.Choices, n.Text = pick(), &FreeText{Outcome: "chosen"} }),
 		`requires why, which words alone do not`: ask(func(n *Node) {
 			n.Text, n.Data = &FreeText{Outcome: "change"}, map[string]*agenttool.Schema{"change": one("why", true)}
 		}),
 		"a question's timeout needs on_timeout": ask(func(n *Node) { n.Timeout = time.Hour }),
-		"on_timeout needs a timeout":            ask(func(n *Node) { n.OnTimeout = "park" }),
-		`on_timeout: outcome "gone" is not`:     ask(func(n *Node) { n.Timeout, n.OnTimeout = time.Hour, "gone" }),
+		"on_timeout needs a timeout":            ask(func(n *Node) { n.OnTimeout.Outcome = "park" }),
+		`on_timeout: outcome "gone" is not`:     ask(func(n *Node) { n.Timeout, n.OnTimeout.Outcome = time.Hour, "gone" }),
 		"on_timeout data": ask(func(n *Node) {
-			n.Timeout, n.OnTimeout, n.OnTimeoutData = time.Hour, "park", map[string]any{"x": 1}
+			n.Timeout, n.OnTimeout.Outcome, n.OnTimeout.Data = time.Hour, "park", map[string]any{"x": 1}
 			n.Data = map[string]*agenttool.Schema{"park": one("why", true)}
 		}),
-		"unattended data": ask(func(n *Node) { n.Text, n.Unattended = &FreeText{Outcome: "change"}, "change" }),
+		"unattended data": ask(func(n *Node) { n.Text, n.Unattended.Outcome = &FreeText{Outcome: "change"}, "change" }),
 		`judge: "change" takes a person's own words`: ask(func(n *Node) {
 			n.Text, n.Judge = &FreeText{Outcome: "change"}, &Judge{Criteria: "Weigh it.", Outcomes: []string{"change"}}
 		}),

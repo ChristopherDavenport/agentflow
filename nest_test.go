@@ -34,7 +34,7 @@ func middle() *Graph {
 	return &Graph{Name: "middle", Nodes: []Node{
 		{ID: "think", Kind: Agent, Prompt: "Think.", Next: map[string]string{OK: "count"}},
 		{ID: "count", Kind: Run, Flow: "countdown", With: map[string]Value{"n": Literal(2)}, Next: map[string]string{"zero": "confirm"}},
-		{ID: "confirm", Kind: Person, Prompt: "Go on?", Outcomes: []string{"yes", "no"}, Unattended: "yes"},
+		{ID: "confirm", Kind: Person, Prompt: "Go on?", Outcomes: []string{"yes", "no"}, Unattended: Fallback{Outcome: "yes"}},
 	}, OutputsBy: map[string]map[string]Value{"yes": {"said": Literal("yes")}}}
 }
 

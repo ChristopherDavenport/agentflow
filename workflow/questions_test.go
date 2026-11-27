@@ -26,8 +26,8 @@ func TestQuestionSettingsReadBack(t *testing.T) {
 		t.Errorf("choices = %+v", c)
 	case review.Text == nil || review.Text.Outcome != "change" || review.Text.As != "":
 		t.Errorf("text = %+v", review.Text)
-	case review.Timeout != 4*time.Hour || review.OnTimeout != "park" || review.OnTimeoutData == nil:
-		t.Errorf("timeout = %s, %q, %v", review.Timeout, review.OnTimeout, review.OnTimeoutData)
+	case review.Timeout != 4*time.Hour || review.OnTimeout.Outcome != "park" || review.OnTimeout.Data == nil:
+		t.Errorf("timeout = %s, %q, %v", review.Timeout, review.OnTimeout.Outcome, review.OnTimeout.Data)
 	}
 	out, err := workflow.Format(g, "q")
 	if err != nil {

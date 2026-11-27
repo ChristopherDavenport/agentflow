@@ -42,7 +42,7 @@ func tidyOut() *Graph {
 	return &Graph{Name: "tidyout", OnAbort: "undo", Nodes: []Node{
 		{ID: "call", Kind: Run, Flow: "tidyin"},
 		{ID: "undo", Kind: Run, Tool: "undo", With: map[string]Value{"who": Literal("outer")}, Next: map[string]string{OK: "confirm"}},
-		{ID: "confirm", Kind: Person, Prompt: "Undone. Anything else to clear up?", Unattended: OK},
+		{ID: "confirm", Kind: Person, Prompt: "Undone. Anything else to clear up?", Unattended: Fallback{Outcome: OK}},
 	}}
 }
 
