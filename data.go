@@ -330,7 +330,7 @@ func (g *Graph) checkRefs() []error {
 			use("node "+n.ID+": dir", n.Dir, at)
 		}
 		for _, outcome := range n.outcomes() {
-			if n.Next[outcome] != "" || g.cleans(n.ID) {
+			if !n.endsOn(outcome) || g.cleans(n.ID) {
 				continue
 			}
 			outputs := g.outputs(n.ending(outcome))
@@ -429,7 +429,7 @@ func (g *Graph) checkAlternatives() []error {
 				for i := range g.Nodes {
 					n := &g.Nodes[i]
 					for _, outcome := range n.outcomes() {
-						if n.Next[outcome] != "" || end != "" && n.ending(outcome) != end || g.cleans(n.ID) {
+						if !n.endsOn(outcome) || end != "" && n.ending(outcome) != end || g.cleans(n.ID) {
 							continue
 						}
 						for have := range at[n.ID] {

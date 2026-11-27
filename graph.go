@@ -420,7 +420,7 @@ func (g *Graph) Outcomes() []string {
 	// A cleanup path's ends end no workflow: the run is abandoned.
 	for _, n := range g.mainNodes() {
 		for _, outcome := range n.outcomes() {
-			if n.Next[outcome] != "" {
+			if !n.endsOn(outcome) {
 				continue
 			}
 			if end := n.ending(outcome); !slices.Contains(out, end) {

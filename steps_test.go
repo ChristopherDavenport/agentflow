@@ -307,16 +307,18 @@ func TestAPolicyLimitsAStepsTools(t *testing.T) {
 	for i, want := range []string{
 		`the policy of step "edit" of edit: denied by write(src/gen/*): generated; run go generate`,
 		`denied by read(.env)`,
-		`no rule allows bash: denied by default`,
+		// A call outside the step's allow-list names that list, the rule
+		// that refused it. A live trial found only "denied by default".
+		`no rule allows bash: denied by default on "git push"`,
 		`denied by bash(go test -exec:*)`,
-		`no rule allows write: denied by default`,
+		`no rule allows write: denied by default; it allows only calls matching read, write(src/*), bash(go test:*)`,
 		`could not be evaluated: a substitution cannot be read`,
 	} {
 		if i >= len(got) || !strings.Contains(got[i], want) {
 			t.Errorf("refusal %d = %q, want %q", i, got[min(i, len(got)-1)], want)
 		}
 	}
-	if len(got) != 6 {
+	if len(got) != 6 || !strings.HasSuffix(got[2], "; it allows only calls matching read, write(src/*), bash(go test:*)") {
 		t.Errorf("refusals = %q", got)
 	}
 	// The model was told its limits before it tried, notes and all.
@@ -623,4 +625,31 @@ func literalDir(p string) Value {
 		return Value{}
 	}
 	return Literal(p)
+}
+
+// The deadline a model step works to is the program's, read from its
+// flow_clock call: the model is not sent that call, which it took for
+// one of its own in a live trial.
+func TestAModelIsNotSentTheClock(t *testing.T) {
+	g := &Graph{Name: "think", Nodes: []Node{{ID: "work", Kind: Agent, Prompt: "Work.", Timeout: time.Minute}}}
+	m := &fakeModel{outcomes: []string{OK}}
+	a := nestedAgent(t, g, m, nil)
+	if end := start(t, a); end.Reason != agentturn.ReasonDone {
+		t.Fatalf("end = %s %v", end.Reason, end.Err)
+	}
+	clocked := false
+	for _, item := range a.State().Transcript {
+		if c, ok := item.(*openresponses.FunctionCall); ok && c.Name == clockTool {
+			clocked = true
+		}
+	}
+	if !clocked || len(m.requests) == 0 {
+		t.Fatalf("clocked %v, %d requests", clocked, len(m.requests))
+	}
+	for _, r := range m.requests {
+		b, _ := json.Marshal(r.Input)
+		if strings.Contains(string(b), clockTool) {
+			t.Errorf("a model was sent the clock: %s", b)
+		}
+	}
 }

@@ -194,3 +194,7 @@ One check is new rather than reworded. A tool a step names that the
 config does not offer was, when the step ran, left out of the model's
 request without a word, or failed the program's call. It is now a load
 error, since what the config offers is known at `Apply`.
+
+## Tried live (2026-11-26)
+
+A step's `skills:` was tried live with claude-haiku-5.5 on 2026-11-26 (2 of 2 followed it), and descriptions were in no request in any live trial: see RFC 0001's "Live trials of RFCs 0002 to 0009". Progress was not tried live.

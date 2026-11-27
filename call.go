@@ -318,6 +318,13 @@ func returned(n *Node, workflow string, e *Ending) (Result, error) {
 // called failed.
 func (n *Node) routesFailure() bool { return n.Next[Failed] != "" || n.Ends[Failed] != "" }
 
+// endsOn says the workflow ends when n ends with outcome: the outcome has
+// no edge, and is not the failure of a call that does not route on it,
+// which fails the step instead of ending anything.
+func (n *Node) endsOn(outcome string) bool {
+	return n.Next[outcome] == "" && !(n.Flow != "" && outcome == Failed && !n.routesFailure())
+}
+
 // mode is how far the host lets a judge answer st's question.
 func (f *flow) mode(st State) Mode {
 	if st.Node == nil {

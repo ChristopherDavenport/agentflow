@@ -260,3 +260,7 @@ exclude_tools: [fetch]
   step carries `tools: all` and the step's exclusions with its
   workflow's, and `ChildSettings` gives the opener `AllTools` and
   `ExcludeTools` to build the child's tools from.
+
+## Tried live (2026-11-26)
+
+Computed question text and a policy path from data were tried live with claude-haiku-5.5 on 2026-11-26: the question rendered from its template and kept one `version` across runs, and no write outside the path from data was made. See RFC 0001's "Live trials of RFCs 0002 to 0009". Input defaults, call timeouts and tool exclusion were not tried live.

@@ -140,7 +140,10 @@ outputs:
 caller the outcome `failed`, with the data `{reason, workflow, step}`.
 The caller routes on it like any other outcome. With no edge for
 `failed`, the calling step fails instead, and raises its retry question
-([section 5](#5-failure-at-each-level)). An end may be named `failed`:
+([section 5](#5-failure-at-each-level)). So an unrouted `failed` is no
+way out of the calling workflow: it is not among that workflow's
+outcomes, and no outputs are asked for on it. A live trial found the
+outputs of the flat form asked for there. An end may be named `failed`:
 reaching it ends the invocation `failed` with that outcome, and it
 declares no outputs.
 
@@ -636,6 +639,15 @@ working model's requests, not a span of the transcript, and `unseen` goes
 away. The judge's input is unchanged: the question, the `with` values,
 the criteria and its tools.
 
+Under `advise` and `decide` the verdict is not blind, and the working
+model reads it, its reason included, as it reads a person's. So a judge
+is told to give its reason in its own words about the work, and not to
+quote, name or refer to what it was told to weigh. A live trial found a
+judge's reason quoting a reference token from its criteria into the
+working model's next request; with the instruction, six of six were
+clean. It is an instruction, not a guarantee: a reason can still carry
+what the criteria say in other words.
+
 The trials recorded in RFC 0001 were made with the judge inline, and
 have not been run again with it as a child.
 
@@ -657,3 +669,7 @@ have not been run again with it as a child.
   own.
 - **The loop** learns nothing: children are agents a host makes, and the
   hold is an ordinary deferral.
+
+## Tried live (2026-11-26)
+
+Nesting, children, kept children, a `dir` from data and the judge as a child were tried live with claude-haiku-5.5 on 2026-11-26: see RFC 0001's "Live trials of RFCs 0002 to 0009". They found an unrouted `failed` counted as a way out (section 2), and a judge quoting its criteria into a verdict the working model reads (section 12); both are fixed.

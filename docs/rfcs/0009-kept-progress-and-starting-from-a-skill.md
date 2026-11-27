@@ -150,3 +150,7 @@ way by answering with `StartText` and ending the turn.
   does not.
 - Starting from inside a child session: a child's model works on its
   step, so the request is refused there as in any running step.
+
+## Tried live (2026-11-26)
+
+Starting from a skill was tried live with claude-haiku-5.5 on 2026-11-26: asked to greet Ada twice, the model started `greet` with `{who: Ada, times: 2}` in 2 of 2, and asked for the hidden `ops` workflow and was refused in 2 of 2. It never needed to correct its inputs, so that path is tested only scripted. Kept progress was not tried live.

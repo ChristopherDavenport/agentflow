@@ -46,8 +46,12 @@ Without `show`, a model sees the whole result, as before.
   `SummaryFilter` also leaves out any call a `flow_shown` shows, with its
   result, and notes the shown part as the workflow's, so a host without
   `History` summarises none of it either. In the one program turn
-  between a result and its `flow_shown`, the host's transform is not
-  run: a fold made then could take in the whole result.
+  between a result and its `flow_shown`, the host's transform is given
+  the view with the whole result left out, so the folds already in force
+  still apply and the request rebuilds from the record, while a fold
+  made then cannot take the result in. Without `History` it is not run
+  then. A live trial found that turn's request unhashed when the
+  transform was skipped after a fold.
 - **A fresh child is unaffected.** It is sent what its call passes in,
   and its own steps' `show` holds in its own session.
 
@@ -95,3 +99,7 @@ of it, so a person sees what the model did not.
   `History` that costs nothing: position and every `with` are read from
   the record. Without it, the transcript is the record, and a session
   rebuilt that way is refused as RFC 0001 says of any omission.
+
+## Tried live (2026-11-26)
+
+Tried live with claude-haiku-5.5 on 2026-11-26: over 300 rows the model answered from the shown summary in 2 of 2 and no request held a row; with compaction the showing turn's request was unhashed until the fix above, then every response hashed in 2 runs of 13 and 14 folds.

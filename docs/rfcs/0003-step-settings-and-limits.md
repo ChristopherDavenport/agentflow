@@ -54,7 +54,10 @@ timeout: 10m
   works on an attempt, the program calls `flow_clock` with
   `{run, step, timeout}` (ID `…_v<n>-clock`). Its result,
   `{"deadline": "<RFC 3339>"}`, is what the attempt is held to. Replay
-  reads the deadline from that result and never from the clock.
+  reads the deadline from that result and never from the clock. No
+  working model is sent a `flow_clock` call, as none is sent
+  `flow_start`, left out as an omission that keeps the request hash: in
+  a live trial a model that was sent one took it for a call of its own.
 - **Reaching the deadline:**
   - The model's stream is cut off at the deadline. It ends in
     `ErrStepTimeout`, which agentturn does not retry, and `Drive`
@@ -187,8 +190,12 @@ policy:
 - **A refusal is the gate's block, and names the rule** in agentpolicy's
   words, after where it was set: `agentflow: step "build" refuses this
   call: the policy of step "build" of release: denied by
-  edit(src/gen/*): generated; run go generate`, or `…: no rule allows
-  bash: denied by default`. The model reads it and can go on.
+  edit(src/gen/*): generated; run go generate`. A call no rule matches,
+  outside a step's `allow`, is refused naming that list, the rule that
+  refused it: `…: no rule allows write_file: denied by default; it
+  allows only calls matching write_file(out/ok.txt)`. A live trial found
+  the bare "denied by default", which named nothing. The model reads it
+  and can go on.
 - **Children** take the policies of the calls and steps they are nested
   in (`Child` carries them), and add their own step's policy. This covers
   fresh steps, fresh calls, kept children and judges. A child's engines
@@ -384,3 +391,7 @@ still at work.
 - A model step's deadline cuts only its stream and its tools' calls. A
   turn whose stream has just finished runs its tool calls under the
   deadline, and the program records the timeout on the next turn.
+
+## Tried live (2026-11-26)
+
+Timeouts, another model, policy, `flow_stuck`, a grant at a visit bound and `max_visits: person` were tried live with claude-haiku-5.5 on 2026-11-26: see RFC 0001's "Live trials of RFCs 0002 to 0009". They found a refusal outside an `allow` list that named no rule, and a model taking the program's `flow_clock` call for its own; both are fixed. The tree's step bound and the repeat rule were not reached live.
