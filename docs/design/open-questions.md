@@ -61,13 +61,19 @@ These are in the code as it stands.
   memory copies the caller's items into the child's agent. Its requests
   have no session to verify against, and it cannot compact.
 - **A workflow followed by hand is only as faithful as its model.**
-  Nothing enforces `workflow.SkillBody` in a host without workflows. In
-  trials with Sonnet on `take-issue` and `migrate-api` it kept to the
-  diagram, the questions and the scripts, and ended a step it could not
-  do `stuck`. It also looked around between steps, added commands to a
-  script's, and once skipped a fresh step it could not hand to another
-  agent. A fresh step done by the same model is not independent, and a
-  model can read the scripts that check it.
+  Nothing enforces `workflow.SkillBody` in a host without workflows.
+  In trials of the three examples, Sonnet and Haiku run the scripts as
+  the format says, take only drawn edges, ask every question, end a
+  step they cannot do `stuck` and say each end. What still goes wrong:
+  - Sonnet settles `migrate-api`'s fresh `verify` in hidden thinking
+    and says nothing of it, in every run, whatever the wording. Haiku
+    states it, but folds `pr-review`'s into the step before it. A fresh
+    step done by the same model is never independent.
+  - Both use a shell for a step that offers only read and grep, and
+    under a flow that excludes it.
+  - Haiku now and then reads an outcome named `stop` as setting the
+    changes aside, and keeps only some of the documents.
+  - A model can read the scripts that check it.
 - **A call in a child's inherited part without its output** is pending in
   the child. A fork before the calling call leaves that call out, but an
   earlier unanswered call of the same response would still be there.
