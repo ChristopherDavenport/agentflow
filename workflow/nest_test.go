@@ -42,7 +42,7 @@ func skill(t *testing.T, dir, name string, files map[string]string) *agentskill.
 	return s
 }
 
-const parentFlow = "---\noutputs:\n  done:\n    said: ${{ steps.call.outputs.said }}\n---\n# Parent\n\n```mermaid\nflowchart TD\n" +
+const parentFlow = "---\noutputs_by:\n  done:\n    said: ${{ steps.call.outputs.said }}\n---\n# Parent\n\n```mermaid\nflowchart TD\n" +
 	"  sub[[sub]] --> call[[call]]\n  call -->|done| done((done))\n```\n\n" +
 	"## sub\n```yaml\nflow: ./flows/sub.md\n```\n\n" +
 	"## call\n```yaml\nflow: child\nwith:\n  word: ${{ steps.sub.outputs.word }}\n```\n"
@@ -50,7 +50,7 @@ const parentFlow = "---\noutputs:\n  done:\n    said: ${{ steps.call.outputs.sai
 const subFlow = "---\noutputs:\n  word: ${{ steps.say.outputs.word }}\n---\n# Sub\n\n```mermaid\nflowchart TD\n  say[[say]]\n```\n\n" +
 	"## say\n```yaml\nrun: scripts/say.sh\noutputs:\n  ok:\n    word: {type: string, required: true}\n```\n"
 
-const childFlow = "---\ninputs:\n  word: {type: string, required: true}\noutputs:\n  done:\n    said: ${{ steps.echo.outputs.word }}\n---\n# Child\n\n" +
+const childFlow = "---\ninputs:\n  word: {type: string, required: true}\noutputs_by:\n  done:\n    said: ${{ steps.echo.outputs.word }}\n---\n# Child\n\n" +
 	"```mermaid\nflowchart TD\n  echo[[echo]] --> done((done))\n```\n\n" +
 	"## echo\n```yaml\nrun: scripts/echo.sh\nwith:\n  word: ${{ inputs.word }}\noutputs:\n  ok:\n    word: {type: string, required: true}\n```\n"
 
@@ -169,7 +169,7 @@ func TestLoadingRefusesABrokenChain(t *testing.T) {
 }
 
 func TestOutputsByOutcomeAndDepthReadBack(t *testing.T) {
-	src := "---\nmax_depth: 3\noutputs:\n  yes:\n    v: ${{ steps.a.outputs.v }}\n  no: {}\n---\n# t\n\n```mermaid\nflowchart TD\n" +
+	src := "---\nmax_depth: 3\noutputs_by:\n  yes:\n    v: ${{ steps.a.outputs.v }}\n  no: {}\n---\n# t\n\n```mermaid\nflowchart TD\n" +
 		"  a[[a]] -->|yes| yes((yes))\n  a -->|no| no((no))\n```\n\n## a\n```yaml\ntool: x\noutcomes: [yes, no]\noutputs:\n  yes:\n    v: {type: string, required: true}\n```\n"
 	g, err := workflow.Parse("t", []byte(src))
 	if err != nil {
@@ -212,5 +212,38 @@ func TestAnUnroutedFailureIsNoWayOut(t *testing.T) {
 	}
 	if got := middle.Outcomes(); !slices.Equal(got, []string{"done"}) {
 		t.Errorf("outcomes = %v", got)
+	}
+}
+
+// Which way a workflow's outputs are read is its key's to say: an output
+// named for an outcome, holding a mapping, is an output.
+func TestOutputsAreByOutcomeOnlyUnderTheirOwnKey(t *testing.T) {
+	const body = "# t\n\n```mermaid\nflowchart TD\n  a[[a]]\n```\n\n## a\n```yaml\ntool: x\n```\n"
+	g, err := workflow.Parse("t", []byte("---\noutputs:\n  ok:\n    a: 1\n---\n"+body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := g.Outputs["ok"].Literal.(map[string]any); g.OutputsBy != nil || !ok || got["a"] != 1 {
+		t.Errorf("outputs = %+v, by outcome %+v", g.Outputs, g.OutputsBy)
+	}
+	out, err := workflow.Format(g, "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back, err := workflow.Parse("t", out); err != nil || back.Digest() != g.Digest() {
+		t.Errorf("it did not survive Format: %v\n%s", err, out)
+	}
+	by, err := workflow.Parse("t", []byte("---\noutputs_by:\n  ok:\n    a: 1\n---\n"+body))
+	if err != nil || by.Outputs != nil || by.OutputsBy["ok"]["a"].Literal != 1 {
+		t.Errorf("by outcome = %+v, %v", by, err)
+	}
+	for src, want := range map[string]string{
+		"---\noutputs_by: [a]\n---\n" + body:                                "want a mapping of outcomes",
+		"---\noutputs:\n  a: 1\noutputs_by:\n  ok:\n    a: 1\n---\n" + body: "either by outcome or for every outcome",
+		"---\noutputs_by:\n  nope:\n    a: 1\n---\n" + body:                 "nope",
+	} {
+		if _, err := workflow.Parse("t", []byte(src)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("want %q, got %v", want, err)
+		}
 	}
 }

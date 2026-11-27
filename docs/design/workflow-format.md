@@ -196,7 +196,8 @@ settings and be none.
 |---|---|---|
 | `description` | what the workflow is for, for people and fronts; no model is sent it | [steps-and-data.md](steps-and-data.md#descriptions) |
 | `inputs` | the workflow's inputs, each a schema field that may take a `default` | [below](#inputs-and-outputs) |
-| `outputs` | the workflow's outputs, for every outcome or by outcome | [below](#inputs-and-outputs) |
+| `outputs` | the workflow's outputs, the same for every outcome | [below](#inputs-and-outputs) |
+| `outputs_by` | the workflow's outputs for each outcome, in place of `outputs` | [below](#inputs-and-outputs) |
 | `documents` | the workflow's named documents and how each starts: `{from: <file of the skill>}`, `{input: <input name>}`, or empty | [steps-and-data.md](steps-and-data.md#documents) |
 | `model`, `thinking` | the defaults of the workflow's own model steps | [steps-and-data.md](steps-and-data.md#model-and-thinking) |
 | `timeout` | the default deadline of every script, tool and model step | [limits-failure-and-intervention.md](limits-failure-and-intervention.md) |
@@ -299,12 +300,12 @@ outputs:
 - A plain `${{ inputs.base }}` is certain on every path, as a required
   input's is.
 
-**Outputs** are values. The flat form above gives the same outputs for
-every outcome. They may instead be given by outcome, as a step's schemas
+**Outputs** are values. `outputs` gives the same outputs for every
+outcome. `outputs_by` gives them by outcome instead, as a step's schemas
 are:
 
 ```yaml
-outputs:
+outputs_by:
   clean:
     summary: ${{ steps.score.outputs.summary }}
   findings:
@@ -312,8 +313,7 @@ outputs:
     summary: ${{ steps.score.outputs.summary }}
 ```
 
-A mapping whose keys are all outcomes of the workflow, each holding a
-mapping, is read by outcome. Anything else is read flat. No outputs are
+A workflow gives one or the other; both is a load error. No outputs are
 asked for on an unrouted `failed`, and an end named `failed` declares
 none.
 

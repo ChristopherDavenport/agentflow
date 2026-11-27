@@ -56,7 +56,7 @@ func Format(g *agentflow.Graph, title string) ([]byte, error) {
 		for _, outcome := range slices.Sorted(maps.Keys(g.OutputsBy)) {
 			out.add(outcome, valuesNode(g.OutputsBy[outcome]))
 		}
-		front.add("outputs", &out.Node)
+		front.add("outputs_by", &out.Node)
 	}
 	if g.Documents != nil {
 		docs := mapping()

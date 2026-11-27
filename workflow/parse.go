@@ -118,11 +118,14 @@ func split(lines []string, offset int) (preamble section, sections []section, er
 type frontmatter struct {
 	Description string    `yaml:"description"`
 	Inputs      yaml.Node `yaml:"inputs"`
-	Outputs     yaml.Node `yaml:"outputs"`
-	MaxDepth    int       `yaml:"max_depth"`
-	MaxSteps    int       `yaml:"max_steps"`
-	Model       string    `yaml:"model"`
-	Thinking    string    `yaml:"thinking"`
+	// Outputs are what the workflow gives back whatever its outcome, and
+	// OutputsBy what it gives back for each, in place of them.
+	Outputs   yaml.Node `yaml:"outputs"`
+	OutputsBy yaml.Node `yaml:"outputs_by"`
+	MaxDepth  int       `yaml:"max_depth"`
+	MaxSteps  int       `yaml:"max_steps"`
+	Model     string    `yaml:"model"`
+	Thinking  string    `yaml:"thinking"`
 	// Documents are the workflow's named markdown documents.
 	Documents map[string]*documentSpec `yaml:"documents"`
 	// OnAbort names the step the cleanup path starts at.
@@ -222,7 +225,7 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 	lines := strings.Split(strings.ReplaceAll(string(src), "\r\n", "\n"), "\n")
 	g := &agentflow.Graph{Name: name}
 	offset := 0
-	var outputs yaml.Node
+	var outputs, outputsBy yaml.Node
 	if len(lines) > 0 && lines[0] == "---" {
 		end := slices.Index(lines[1:], "---")
 		if end < 0 {
@@ -236,7 +239,8 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 		if g.Inputs, g.InputDefaults, err = inputsSchema(&fm.Inputs); err != nil {
 			return nil, fmt.Errorf("workflow: inputs: %w", err)
 		}
-		outputs, g.MaxDepth, g.MaxSteps, g.Model, g.Thinking = fm.Outputs, fm.MaxDepth, fm.MaxSteps, fm.Model, fm.Thinking
+		outputs, outputsBy = fm.Outputs, fm.OutputsBy
+		g.MaxDepth, g.MaxSteps, g.Model, g.Thinking = fm.MaxDepth, fm.MaxSteps, fm.Model, fm.Thinking
 		g.Description, g.OnAbort, g.ExcludeTools = strings.TrimSpace(fm.Description), fm.OnAbort, fm.ExcludeTools
 		g.Context, g.Hidden = fm.Context, fm.Hidden
 		if fm.Timeout != "" {
@@ -333,7 +337,7 @@ func Parse(name string, src []byte) (*agentflow.Graph, error) {
 			n.Ends[e.outcome] = e.end
 		}
 	}
-	if err := readOutputs(g, &outputs); err != nil {
+	if err := readOutputs(g, &outputs, &outputsBy); err != nil {
 		return nil, fmt.Errorf("workflow: outputs: %w", err)
 	}
 	if err := g.Validate(); err != nil {
@@ -694,27 +698,22 @@ func question(n *agentflow.Node, set *settings) error {
 	return nil
 }
 
-// readOutputs reads a workflow's outputs: by outcome, when every key is
-// an outcome of the workflow and every value a mapping, and otherwise the
-// same for every outcome.
-func readOutputs(g *agentflow.Graph, n *yaml.Node) error {
+// readOutputs reads a workflow's outputs: under outputs, the same for
+// every outcome, or under outputs_by, for each outcome its own. Which is
+// which is the key's to say, never the shape of the values.
+func readOutputs(g *agentflow.Graph, same, by *yaml.Node) error {
+	if !same.IsZero() && same.Tag != "!!null" {
+		var err error
+		if g.Outputs, err = values(same); err != nil {
+			return err
+		}
+	}
+	n := by
 	if n.IsZero() || n.Tag == "!!null" {
 		return nil
 	}
-	outcomes := g.Outcomes()
-	// A call's outcomes are not known until the workflows are linked, so
-	// an outcome reached through one is taken on trust here and checked
-	// then.
-	calls := slices.ContainsFunc(g.Nodes, func(n agentflow.Node) bool { return n.Flow != "" && len(n.Outcomes) == 0 })
-	byOutcome := n.Kind == yaml.MappingNode && len(n.Content) > 0
-	for i := 0; byOutcome && i+1 < len(n.Content); i += 2 {
-		key, v := n.Content[i].Value, n.Content[i+1]
-		byOutcome = v.Kind == yaml.MappingNode && (slices.Contains(outcomes, key) || calls)
-	}
-	if !byOutcome {
-		var err error
-		g.Outputs, err = values(n)
-		return err
+	if n.Kind != yaml.MappingNode {
+		return fmt.Errorf("outputs_by: line %d: want a mapping of outcomes to their outputs", n.Line)
 	}
 	g.OutputsBy = map[string]map[string]agentflow.Value{}
 	return pairs(n, func(outcome string, v *yaml.Node) error {
