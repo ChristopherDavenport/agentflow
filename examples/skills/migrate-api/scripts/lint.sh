@@ -13,7 +13,7 @@ $p is not a directory"
 done
 errors=$(printf '%s\n' "$errors" | sed '/^$/d')
 if [ -z "$errors" ]; then
-  echo '{"outcome": "sound"}'
+  echo '{"outcome": "sound", "data": {"start": []}}'
 else
   printf '%s\n' "$errors" | jq -R . | jq -s '{outcome: "flawed", data: {errors: .}}'
 fi

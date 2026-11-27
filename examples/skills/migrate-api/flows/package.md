@@ -20,9 +20,12 @@ flowchart TD
   check[[check]] -->|todo| edit[edit]
   check -->|clean| skipped((skipped))
   edit --> test[[test]]
-  test -->|pass| verify[verify]
+  edit -->|stuck| failed((failed))
+  test -->|pass| diff[[diff]]
   test -->|fail| fix[fix]
   fix --> test
+  fix -->|stuck| failed
+  diff --> verify[verify]
   verify -->|good| migrated((migrated))
   verify -->|bad| fix
 ```
@@ -68,6 +71,14 @@ show: [failures]
 max_visits: 4
 ```
 
+## diff
+```yaml
+run: scripts/diff.sh
+outputs:
+  ok:
+    diff: {type: string, required: true}
+```
+
 ## fix
 ```yaml
 tools: [read, grep, edit]
@@ -94,12 +105,13 @@ with:
   old: ${{ inputs.old }}
   new: ${{ inputs.new }}
   package: ${{ inputs.package }}
+  diff: ${{ steps.diff.outputs.diff }}
 outcomes: [good, bad]
 outputs:
   bad:
     problems: {type: array, required: true, items: {type: string}}
 max_visits: 4
 ```
-Read this package's diff against its base. It should replace calls of
-the old function with the new one and do nothing else. Report anything
-else it does as a problem.
+Read this package's diff. It should replace calls of the old function
+with the new one and do nothing else. Report anything else it does as a
+problem.

@@ -1,16 +1,17 @@
 ---
 inputs:
-  old: {type: string, required: true, description: "the deprecated function, as path/to/pkg.Name"}
-  new: {type: string, required: true, description: "what replaces it, as path/to/pkg.Name"}
+  old: {type: string, required: true, description: "the deprecated function: its package's directory in this repository, a dot and its name, such as internal/legacy.Fetch"}
+  new: {type: string, required: true, description: "what replaces it, in the same form"}
   base: {type: string, default: main, description: the branch the migration starts from}
   brief: {type: string, default: "", description: anything the migration should keep to}
 outputs_by:
   shipped:
     summary: ${{ steps.report.outputs.summary }}
-    migrated: ${{ steps.next.outputs.done }}
+    migrated: ${{ steps.next.outputs.migrated }}
+    skipped: ${{ steps.next.outputs.skipped }}
   dropped:
     why: ${{ steps.review.outputs.why }}
-  aborted:
+  stopped:
     reason: ${{ steps.migrate.outputs.reason }}
   nothing:
     sites: ${{ optional(steps.scan.outputs.count) }}
@@ -44,7 +45,7 @@ flowchart TD
   migrate -->|failed| triage([triage])
   triage -->|retry| migrate
   triage -->|skip| next
-  triage -->|abort| aborted((aborted))
+  triage -->|stop| stopped((stopped))
 
   review -->|ship| report[[report]]
   review -->|rework| plan
@@ -140,6 +141,8 @@ with:
   packages: ${{ latest(steps.pick.outputs.packages, steps.scan.outputs.packages) }}
 outcomes: [sound, flawed]
 outputs:
+  sound:
+    start: {type: array, required: true, items: {type: string}, description: "an empty list, which starts the packages afresh"}
   flawed:
     errors: {type: array, required: true, items: {type: string}}
 max_visits: 6
@@ -147,18 +150,23 @@ max_visits: 6
 
 ## next
 ```yaml
-description: Hands out the next package of the plan, or says the plan is done.
+description: Hands out the next package of the plan, or says the plan is done. A plan that passed lint starts the round afresh.
 run: scripts/next.sh
 with:
   order: ${{ steps.plan.outputs.order }}
-  done: ${{ optional(steps.next.outputs.done) }}
+  done: ${{ latest(steps.lint.outputs.start, steps.next.outputs.done) }}
+  migrated: ${{ latest(steps.lint.outputs.start, steps.next.outputs.migrated) }}
+  last: ${{ optional(steps.migrate.outputs.package) }}
 outcomes: [package, finished]
 outputs:
   package:
     package: {type: string, required: true}
     done: {type: array, required: true, items: {type: string}}
+    migrated: {type: array, required: true, items: {type: string}}
   finished:
     done: {type: array, required: true, items: {type: string}}
+    migrated: {type: array, required: true, items: {type: string}}
+    skipped: {type: array, required: true, items: {type: string}}
 max_visits: 20
 ```
 
@@ -183,7 +191,7 @@ max_visits: 20
 with:
   package: ${{ steps.next.outputs.package }}
   reason: ${{ steps.migrate.outputs.reason }}
-outcomes: [retry, skip, abort]
+outcomes: [retry, skip, stop]
 unattended: skip
 max_visits: 10
 judge:
@@ -200,7 +208,8 @@ the migration?
 ## review
 ```yaml
 with:
-  migrated: ${{ steps.next.outputs.done }}
+  migrated: ${{ steps.next.outputs.migrated }}
+  skipped: ${{ steps.next.outputs.skipped }}
   plan: ${{ documents.plan }}
   log: ${{ documents.log }}
 outcomes: [ship, rework, drop]
@@ -218,7 +227,7 @@ plan back with notes, or drop it?
 run: scripts/report.sh
 with:
   base: ${{ inputs.base }}
-  migrated: ${{ steps.next.outputs.done }}
+  migrated: ${{ steps.next.outputs.migrated }}
 outputs:
   ok:
     summary: {type: string, required: true}

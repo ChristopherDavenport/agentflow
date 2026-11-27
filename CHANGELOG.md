@@ -26,3 +26,6 @@ versions may break the API.
   would. `workflow.HasSkillBody` says whether a skill's body opens with
   it. The example skills carry it.
 - A step's `skills` naming a workflow skill is a load error.
+- `examples/skills/migrate-api`, an example that uses most of the format.
+- Fixed: a model step's `stuck` may end the workflow, `-->|stuck| failed((failed))`,
+  as the design says; the parser refused the end.
