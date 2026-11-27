@@ -639,6 +639,15 @@ working model's requests, not a span of the transcript, and `unseen` goes
 away. The judge's input is unchanged: the question, the `with` values,
 the criteria and its tools.
 
+Under `advise` and `decide` the verdict is not blind, and the working
+model reads it, its reason included, as it reads a person's. So a judge
+is told to give its reason in its own words about the work, and not to
+quote, name or refer to what it was told to weigh. A live trial found a
+judge's reason quoting a reference token from its criteria into the
+working model's next request; with the instruction, six of six were
+clean. It is an instruction, not a guarantee: a reason can still carry
+what the criteria say in other words.
+
 The trials recorded in RFC 0001 were made with the judge inline, and
 have not been run again with it as a child.
 
