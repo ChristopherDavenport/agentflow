@@ -167,6 +167,11 @@ func readSkills(g *agentflow.Graph, find Find) error {
 			if err != nil {
 				return fmt.Errorf("workflow: %s: node %q names the skill %s: %w", g.Name, n.ID, sk.Name, err)
 			}
+			// A workflow's body tells a model to follow its definition,
+			// which a working model never reads; a step runs one by a call.
+			if _, ok := Marker(s); ok {
+				return fmt.Errorf("workflow: %s: node %q names the skill %s, which is a workflow; a step calls one with flow", g.Name, n.ID, sk.Name)
+			}
 			text, err := s.Instructions()
 			if err != nil {
 				return fmt.Errorf("workflow: %s: node %q names the skill %s: %w", g.Name, n.ID, sk.Name, err)

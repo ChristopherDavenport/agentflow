@@ -20,3 +20,9 @@ versions may break the API.
   loaded from an Agent Skill.
 - `script`: `run_script` over an `agentworkspace`.
 - `summary`: how a run went, read back from its record.
+- `workflow.SkillBody`: the text a workflow skill's `SKILL.md` opens
+  with. It points a model in a host without workflows at the file
+  `metadata.agentflow` names and says how to follow it as agentflow
+  would. `workflow.HasSkillBody` says whether a skill's body opens with
+  it. The example skills carry it.
+- A step's `skills` naming a workflow skill is a load error.

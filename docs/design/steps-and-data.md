@@ -426,6 +426,8 @@ Skills for this step, to follow as you do it:
   them only with a tool the host offers it.
 - **Only model steps.** A judge takes no `skills`: what a judge weighs is
   written in the step's `criteria`, where its reader sees it.
+- **Not a workflow.** A step runs a workflow with `flow`; naming one
+  under `skills` is a load error.
 
 ### Files
 
